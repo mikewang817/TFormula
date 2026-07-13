@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { Resvg } from "@resvg/resvg-js";
 import type { FormulaRegion, RenderedFormula, TerminalCapabilities } from "./types.js";
 import { calculateFormulaGeometry } from "./geometry.js";
+import { FormulaCache, formulaCacheKey, sharedFormulaCache } from "./formula-cache.js";
 
 interface MathJaxApi {
   init(config: Record<string, unknown>): Promise<MathJaxApi>;
@@ -21,6 +21,26 @@ interface SvgDimensions {
 }
 
 let mathJaxPromise: Promise<MathJaxApi> | undefined;
+const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-svg-v1";
+const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v1";
+const CANONICAL_CONTAINER_WIDTH = 100_000;
+
+function mathJaxCacheRequest(latex: string, display: boolean): { source: string; svgKey: string } {
+  const normalized = safeLatex(normalizeLatexForRendering(latex).trim());
+  const source = display ? normalized : `\\textstyle{${normalized}}`;
+  return {
+    source,
+    svgKey: formulaCacheKey({
+      version: MATHJAX_CACHE_VERSION,
+      source,
+      display: true,
+      em: 16,
+      ex: 8,
+      containerWidth: CANONICAL_CONTAINER_WIDTH,
+      fontCache: "local"
+    })
+  };
+}
 
 async function getMathJax(): Promise<MathJaxApi> {
   if (!mathJaxPromise) {
@@ -122,29 +142,33 @@ function resizeNestedSvg(svg: string, x: number, y: number, width: number, heigh
 export async function renderMathJaxSvg(
   latex: string,
   display: boolean,
-  containerWidth: number
+  _containerWidth: number,
+  cache: FormulaCache = sharedFormulaCache
 ): Promise<string> {
-  const mathJax = await getMathJax();
   // MathJax 4.1 can treat top-level relation and binary operators as inline
   // line-break opportunities and return only the first fragment when called
   // with display:false. Convert in display mode and force textstyle instead;
   // this preserves complete inline expressions without enlarging their glyphs.
-  const normalized = safeLatex(normalizeLatexForRendering(latex));
-  const source = display ? normalized : `\\textstyle{${normalized}}`;
-  const node = await mathJax.tex2svgPromise(source, {
-    display: true,
-    em: 16,
-    ex: 8,
-    containerWidth
+  const { source, svgKey } = mathJaxCacheRequest(latex, display);
+  return cache.getOrCreateSvg(svgKey, async () => {
+    const mathJax = await getMathJax();
+    const node = await mathJax.tex2svgPromise(source, {
+      display: true,
+      em: 16,
+      ex: 8,
+      containerWidth: CANONICAL_CONTAINER_WIDTH
+    });
+    const adaptor = mathJax.startup.adaptor;
+    const svgNode = adaptor.tags(node, "svg")[0];
+    if (!svgNode) throw new Error("MathJax produced no SVG");
+    return adaptor.serializeXML(svgNode);
   });
-  const adaptor = mathJax.startup.adaptor;
-  const svgNode = adaptor.tags(node, "svg")[0];
-  if (!svgNode) throw new Error("MathJax produced no SVG");
-  return adaptor.serializeXML(svgNode);
 }
 
 export class MathRenderer {
   readonly #cache = new Map<string, RenderedFormula>();
+
+  constructor(readonly persistentCache: FormulaCache = sharedFormulaCache) {}
 
   async render(
     region: FormulaRegion,
@@ -155,23 +179,27 @@ export class MathRenderer {
     foreground = capabilities.foreground,
     background = capabilities.background
   ): Promise<RenderedFormula> {
-    const cacheKey = createHash("sha256").update(JSON.stringify({
-      latex: region.latex,
+    const { svgKey } = mathJaxCacheRequest(region.latex, region.display);
+    const cacheKey = formulaCacheKey({
+      version: PNG_CACHE_VERSION,
+      svgKey,
       display: region.display,
+      compact: Boolean(region.compact),
       columns,
       rows,
-      cell: capabilities.cell,
+      cell: { width: capabilities.cell.width, height: capabilities.cell.height },
       scale,
       foreground,
       background
-    })).digest("hex");
+    });
     const cached = this.#cache.get(cacheKey);
     if (cached) return cached;
 
     const formulaSvg = await renderMathJaxSvg(
       region.latex,
       region.display,
-      Math.max(80, columns * 16)
+      Math.max(80, columns * 16),
+      this.persistentCache
     );
     const dimensions = readSvgDimensions(formulaSvg);
     const geometry = calculateFormulaGeometry({
@@ -198,12 +226,15 @@ export class MathRenderer {
       `<g color="${escapeAttribute(foreground)}" fill="${escapeAttribute(foreground)}">${nested}</g>`,
       "</svg>"
     ].join("");
-    const png = new Resvg(wrapper, {
-      background: background,
-      fitTo: { mode: "original" }
-    }).render().asPng();
+    const png = await this.persistentCache.getOrCreatePng(cacheKey, async () =>
+      new Resvg(wrapper, {
+        background: background,
+        fitTo: { mode: "original" }
+      }).render().asPng()
+    );
     const rendered: RenderedFormula = {
       png,
+      cacheKey,
       columns,
       rows,
       widthPx: geometry.canvasWidth,

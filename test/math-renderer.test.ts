@@ -82,4 +82,32 @@ describe("MathRenderer", () => {
     expect(png.readUInt32BE(16)).toBe(270);
     expect(png.readUInt32BE(20)).toBe(108);
   });
+
+  it("reuses the same content-addressed PNG after changing scale and changing back", async () => {
+    const renderer = new MathRenderer();
+    const region = {
+      startRow: 0,
+      endRow: 1,
+      startCol: 0,
+      endCol: 20,
+      latex: "E=mc^2",
+      display: true,
+      confidence: "explicit" as const
+    };
+    const capabilities = {
+      kittyGraphics: true,
+      foreground: "#eeeeee",
+      background: "#202030",
+      cell: { width: 9, height: 18, source: "cell-query" as const }
+    };
+
+    const original = await renderer.render(region, 20, 2, capabilities, 1);
+    const enlarged = await renderer.render(region, 20, 2, capabilities, 1.2);
+    renderer.clear();
+    const restored = await renderer.render(region, 20, 2, capabilities, 1);
+
+    expect(enlarged.cacheKey).not.toBe(original.cacheKey);
+    expect(restored.cacheKey).toBe(original.cacheKey);
+    expect(restored.png).toEqual(original.png);
+  });
 });

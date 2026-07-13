@@ -26,6 +26,8 @@ export interface FormulaRegion {
 
 export interface RenderedFormula {
   png: Uint8Array;
+  /** Content-addressed key for this exact terminal-ready PNG variant. */
+  cacheKey: string;
   columns: number;
   rows: number;
   widthPx: number;

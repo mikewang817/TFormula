@@ -59,15 +59,23 @@ TUI would desynchronize its cursor coordinates.
 
 Formula scans are coalesced during streaming output instead of waiting for the
 terminal to become completely idle. Unrelated status-bar or spinner updates do
-not cancel formulas that remain unchanged on screen. When the terminal grid or
-cell pixel size changes, TFormula deletes every recorded Kitty image by ID,
-performs a z-index cleanup, and renders one replacement set at the new size.
-It also reserves a private image-ID range and deletes that complete range during
-full resets and shutdown, catching interrupted transmissions that were not yet
-recorded. Normal resizing only replaces images still in the live viewport;
-off-screen placements are preserved so the terminal can scroll and scale them
-with its own scrollback. `CSI 2J` invalidates visible placements, while `CSI 3J`
-and `RIS` invalidate the complete placement map.
+not cancel formulas that remain unchanged on screen. Long PTY output bursts are
+forwarded at line-boundary checkpoints of roughly one third of the terminal
+height. TFormula completes a formula scan at each checkpoint before forwarding
+more rows, so rendered images enter scrollback together with their source text
+instead of being missed after an entire response scrolls past. When the terminal
+grid or cell pixel size changes, TFormula replaces only the affected Kitty placements.
+The underlying PNG is retained and shared by every placement with the same
+formula, size, and colors. Normal resizing only replaces images still in the
+live viewport; off-screen placements are preserved so the terminal can scroll
+and scale them with its own scrollback. Replacement is transactional: the old
+placement is deleted only after the new cached variant is ready, and xterm
+markers track its source rows through terminal reflow. A rapid sequence of font
+size changes therefore keeps the previous rendered formula instead of exposing
+the underlying TeX. `CSI 2J` invalidates visible placements,
+while `CSI 3J` and `RIS` invalidate all placements and cached terminal images.
+TFormula reserves a private image-ID range and deletes that complete range on
+full reset and shutdown, including interrupted transmissions.
 
 When an agent emits display math as a single standalone `$$...$$` or
 `\[...\]` line, TFormula borrows adjacent blank terminal rows when available.
@@ -94,6 +102,29 @@ terminal font:
 ```sh
 tformula --scale 1.1 codex
 TFORMULA_SCALE=0.9 tformula --shell
+```
+
+## Formula cache
+
+Math rendering is content-addressed and shared by every TFormula-wrapped Agent
+run for the current user. A normalized formula is typeset to SVG once. Each
+terminal-ready PNG variant is then rasterized once for its exact display mode,
+cell dimensions, scale, foreground, background, and source rectangle. Returning
+to an earlier terminal font size reuses the existing PNG instead of invoking
+MathJax or the rasterizer again.
+
+Cache writes use per-item cross-process locks and atomic renames, so concurrent
+Agents can safely request the same formula. In a live terminal session, one PNG
+is uploaded once and reused by independent Kitty placements wherever the same
+variant appears. The original TeX text remains in terminal scrollback.
+
+On macOS the disk cache defaults to `~/Library/Caches/TFormula`; on Linux it
+uses `$XDG_CACHE_HOME/tformula` or `~/.cache/tformula`. Override the location or
+the default 256 MB limit with:
+
+```sh
+TFORMULA_CACHE_DIR=/path/to/cache tformula codex
+TFORMULA_CACHE_MAX_MB=512 tformula claude
 ```
 
 ## Detection

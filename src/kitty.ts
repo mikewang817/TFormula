@@ -10,6 +10,11 @@ export function kittyDeleteImage(imageId: number): string {
   return `${APC_START}a=d,d=I,i=${imageId},q=2${ST}`;
 }
 
+/** Delete one placement while retaining the shared image data in the terminal. */
+export function kittyDeletePlacement(imageId: number, placementId: number): string {
+  return `${APC_START}a=d,d=i,i=${imageId},p=${placementId},q=2${ST}`;
+}
+
 export function kittyDeleteByZIndex(): string {
   return `${APC_START}a=d,d=Z,z=${TFORMULA_Z_INDEX},q=2${ST}`;
 }
@@ -44,6 +49,30 @@ export function kittyTransmitAndPlace(
       : `m=${more},q=2`;
     return `${APC_START}${controls};${chunk}${ST}`;
   }).join("");
+}
+
+/** Upload PNG data without creating a placement. */
+export function kittyTransmitImage(png: Uint8Array, imageId: number): string {
+  const base64 = Buffer.from(png).toString("base64");
+  const chunks = base64.match(/.{1,4096}/gu) ?? [""];
+  return chunks.map((chunk, index) => {
+    const first = index === 0;
+    const more = index < chunks.length - 1 ? 1 : 0;
+    const controls = first
+      ? `a=t,f=100,t=d,i=${imageId},q=2,m=${more}`
+      : `m=${more},q=2`;
+    return `${APC_START}${controls};${chunk}${ST}`;
+  }).join("");
+}
+
+/** Place image data that has already been uploaded to the terminal. */
+export function kittyPlaceImage(
+  imageId: number,
+  placementId: number,
+  columns: number,
+  rows: number
+): string {
+  return `${APC_START}a=p,i=${imageId},p=${placementId},q=2,c=${columns},r=${rows},C=1,z=${TFORMULA_Z_INDEX}${ST}`;
 }
 
 export function cursorPosition(row: number, column: number): string {

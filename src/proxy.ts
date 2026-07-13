@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import * as pty from "node-pty";
 import { FormulaScreen } from "./screen.js";
+import { OutputCheckpointSplitter } from "./output-checkpoints.js";
 import { parseTerminalResponses } from "./probe.js";
 import type { CliOptions, TerminalCapabilities } from "./types.js";
 
@@ -31,6 +32,7 @@ export async function runProxy(
   let probeCapture = "";
   let probeTimer: NodeJS.Timeout | undefined;
   let exiting = false;
+  let outputQueue = Promise.resolve();
 
   const debug = (message: string): void => {
     if (options.debug) process.stderr.write(`\r\n[tformula] ${message}\r\n`);
@@ -41,6 +43,7 @@ export async function runProxy(
   const screen = options.renderMath
     ? new FormulaScreen({ cols, rows, capabilities, scale: options.scale, writeOuter, debug })
     : undefined;
+  const outputSplitter = new OutputCheckpointSplitter(Math.max(2, Math.floor(rows / 3)));
 
   const finishProbe = (): void => {
     probeTimer = undefined;
@@ -101,13 +104,25 @@ export async function runProxy(
   });
 
   child.onData((data) => {
-    writeOuter(data);
-    screen?.write(data);
+    if (!screen) {
+      writeOuter(data);
+      return;
+    }
+    for (const slice of outputSplitter.push(data)) {
+      outputQueue = outputQueue.then(async () => {
+        writeOuter(slice.data);
+        await screen.write(slice.data);
+        if (slice.checkpoint) await screen.flushScan();
+      }).catch((error) => {
+        debug(`output checkpoint failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
   });
 
   const onResize = (): void => {
     const nextCols = Math.max(2, process.stdout.columns ?? 80);
     const nextRows = Math.max(2, process.stdout.rows ?? 24);
+    outputSplitter.setLineInterval(Math.max(2, Math.floor(nextRows / 3)));
     child.resize(nextCols, nextRows);
     screen?.resize(nextCols, nextRows);
     requestProbe();
@@ -121,14 +136,17 @@ export async function runProxy(
     child.onExit(({ exitCode, signal }) => {
       if (exiting) return;
       exiting = true;
-      if (probeTimer) clearTimeout(probeTimer);
-      process.off("SIGWINCH", onResize);
-      screen?.dispose();
-      process.stdin.pause();
-      if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function" && !previousRaw) {
-        process.stdin.setRawMode(false);
-      }
-      resolve(signal ? 128 + signal : exitCode);
+      void outputQueue.finally(async () => {
+        await screen?.flushScan();
+        if (probeTimer) clearTimeout(probeTimer);
+        process.off("SIGWINCH", onResize);
+        screen?.dispose();
+        process.stdin.pause();
+        if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function" && !previousRaw) {
+          process.stdin.setRawMode(false);
+        }
+        resolve(signal ? 128 + signal : exitCode);
+      });
     });
   });
 }
