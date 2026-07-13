@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import process from "node:process";
 import { realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { probeTerminal } from "./probe.js";
 import { runProxy } from "./proxy.js";
 import type { CliOptions } from "./types.js";
 
-const VERSION = "0.1.0";
+const { version: VERSION } = createRequire(import.meta.url)("../package.json") as { version: string };
 
 const HELP = `TFormula ${VERSION}
 

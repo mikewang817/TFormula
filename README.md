@@ -19,6 +19,29 @@ the terminal buffer for copying.
 
 The current implementation has been developed against Ghostty 1.3.1.
 
+## Run with npx
+
+No global installation is required. Start any agent through the latest public
+release:
+
+```sh
+npx --yes tformula@latest codex
+npx --yes tformula@latest claude
+npx --yes tformula@latest -- gemini --model gemini-2.5-pro
+npx --yes tformula@latest --shell
+```
+
+The first run downloads TFormula and its platform-specific dependencies into
+npm's cache. Later runs reuse that installation. Node.js 20 or newer is
+required.
+
+For a permanent command, install it globally:
+
+```sh
+npm install --global tformula
+tformula codex
+```
+
 ## Install from this checkout
 
 ```sh
