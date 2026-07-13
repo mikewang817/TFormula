@@ -21,6 +21,21 @@ describe("calculateFormulaGeometry", () => {
     expect(geometry.formulaWidth).toBe(72);
   });
 
+  it("uses the full reserved height for a tall multi-row display", () => {
+    const geometry = calculateFormulaGeometry({
+      aspectRatio: 3,
+      naturalHeightEx: 4.5,
+      depthEx: 1.5,
+      columns: 80,
+      rows: 2,
+      cell,
+      scale: 1,
+      display: true
+    });
+    expect(geometry.formulaHeight).toBe(40);
+    expect(geometry.offsetY).toBe(0);
+  });
+
   it("shrinks an over-wide formula proportionally", () => {
     const geometry = calculateFormulaGeometry({
       aspectRatio: 100,

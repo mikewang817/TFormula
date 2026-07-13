@@ -14,6 +14,27 @@ describe("detectFormulaRegions", () => {
     expect(regions[0]).toMatchObject({ startRow: 1, endRow: 3, display: true, confidence: "explicit" });
   });
 
+  it("borrows an adjacent blank row for a standalone one-line display", () => {
+    const [region] = detectFormulaRegions([
+      "1. Gauss's law",
+      "",
+      "$$\\nabla \\cdot \\mathbf{E} = \\frac{\\rho}{\\varepsilon_0}$$",
+      "Electric field explanation"
+    ]);
+    expect(region).toMatchObject({
+      startRow: 1,
+      endRow: 2,
+      startCol: 0,
+      display: true,
+      confidence: "explicit"
+    });
+  });
+
+  it("does not expand display delimiters embedded in prose", () => {
+    const [region] = detectFormulaRegions(["", "before $$x=1$$ after", ""]);
+    expect(region).toMatchObject({ startRow: 1, endRow: 1 });
+  });
+
   it("infers the bracket form left by terminal markdown renderers", () => {
     const regions = detectFormulaRegions([
       "[",
@@ -37,6 +58,20 @@ describe("detectFormulaRegions", () => {
     const [region] = detectFormulaRegions(["其中公式 \\(x_i^2\\) 成立"]);
     expect(region?.startCol).toBeGreaterThan("其中公式 ".length);
     expect(region?.display).toBe(false);
+  });
+
+  it("uses a following blank row for a trailing inline formula and its punctuation", () => {
+    const [region] = detectFormulaRegions([
+      "waves propagate at \\(c=1/\\sqrt{\\mu_0\\varepsilon_0}\\).",
+      ""
+    ]);
+    expect(region).toMatchObject({
+      startRow: 0,
+      endRow: 1,
+      latex: "c=1/\\sqrt{\\mu_0\\varepsilon_0}\\text{.}",
+      display: false,
+      compact: true
+    });
   });
 
   it("requires math structure for single-dollar expressions", () => {

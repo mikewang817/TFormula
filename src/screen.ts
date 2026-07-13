@@ -36,8 +36,10 @@ export class FormulaScreen {
   #imageId = 1_400_000_000;
   #scanTimer?: NodeJS.Timeout;
   #scanVersion = 0;
+  #layoutVersion = 0;
   #scanning = false;
   #rescanRequested = false;
+  #disposed = false;
 
   constructor(options: {
     cols: number;
@@ -91,20 +93,36 @@ export class FormulaScreen {
   }
 
   scheduleScan(delayMs = 110): void {
+    if (this.#disposed) return;
     this.#scanVersion += 1;
-    if (this.#scanTimer) clearTimeout(this.#scanTimer);
-    this.#scanTimer = setTimeout(() => void this.#scan(), delayMs);
+    // Coalesce bursts without postponing forever. Agent status bars and
+    // spinners can write more frequently than the scan delay.
+    if (this.#scanTimer) return;
+    this.#scanTimer = setTimeout(() => {
+      this.#scanTimer = undefined;
+      void this.#scan();
+    }, delayMs);
   }
 
   resetPlacements(): void {
-    if (this.#placed.size > 0 && this.#capabilities.kittyGraphics) {
-      this.#writeOuter(kittyDeleteByZIndex());
+    this.#layoutVersion += 1;
+    if (this.#capabilities.kittyGraphics) {
+      const imageIds = new Set(Array.from(this.#placed.values(), (placement) => placement.imageId));
+      const commands = [
+        ...Array.from(imageIds, (imageId) => kittyDeleteImage(imageId)),
+        // Also remove any placement that an earlier interrupted scan may have
+        // transmitted before it could be recorded in #placed.
+        kittyDeleteByZIndex()
+      ];
+      this.#writeOuter(synchronizedOutput(commands.join("")));
     }
     this.#placed.clear();
   }
 
   dispose(): void {
+    this.#disposed = true;
     if (this.#scanTimer) clearTimeout(this.#scanTimer);
+    this.#scanTimer = undefined;
     this.resetPlacements();
     this.terminal.dispose();
   }
@@ -133,8 +151,22 @@ export class FormulaScreen {
     return `${buffer.type}:${buffer.viewportY + region.startRow}:${region.startCol}:${columns}:${rows}`;
   }
 
+  #regionStillVisible(region: FormulaRegion, viewportY: number): boolean {
+    const buffer = this.terminal.buffer.active;
+    if (buffer.viewportY !== viewportY) return false;
+    return detectFormulaRegions(this.#visibleLines()).some((candidate) =>
+      candidate.startRow === region.startRow
+      && candidate.endRow === region.endRow
+      && candidate.startCol === region.startCol
+      && candidate.endCol === region.endCol
+      && candidate.latex === region.latex
+      && candidate.display === region.display
+      && candidate.compact === region.compact
+    );
+  }
+
   async #scan(): Promise<void> {
-    if (!this.#capabilities.kittyGraphics || this.terminal.modes.originMode) return;
+    if (this.#disposed || !this.#capabilities.kittyGraphics || this.terminal.modes.originMode) return;
     if (this.#scanning) {
       this.#rescanRequested = true;
       return;
@@ -142,15 +174,28 @@ export class FormulaScreen {
 
     this.#scanning = true;
     const version = this.#scanVersion;
+    const layoutVersion = this.#layoutVersion;
+    const viewportY = this.terminal.buffer.active.viewportY;
     try {
       const regions = detectFormulaRegions(this.#visibleLines());
-      for (const region of regions) {
-        if (version !== this.#scanVersion) break;
+      const prepared = regions.map((region) => {
         const rows = region.endRow - region.startRow + 1;
         const columns = rows > 1 && !region.compact
           ? this.terminal.cols
           : Math.max(1, Math.min(this.terminal.cols - region.startCol, region.endCol - region.startCol));
         const anchor = this.#anchor(region, columns, rows);
+        return { region, rows, columns, anchor };
+      });
+      const desiredAnchors = new Set(prepared.map(({ anchor }) => anchor));
+      for (const [anchor, placement] of this.#placed) {
+        if (desiredAnchors.has(anchor)) continue;
+        this.#writeOuter(kittyDeleteImage(placement.imageId));
+        this.#placed.delete(anchor);
+      }
+
+      for (const { region, rows, columns, anchor } of prepared) {
+        if (this.#disposed || layoutVersion !== this.#layoutVersion) break;
+        if (version !== this.#scanVersion && !this.#regionStillVisible(region, viewportY)) continue;
         const colors = this.#regionColors(region);
         const fingerprint = createHash("sha1").update(JSON.stringify({
           latex: region.latex,
@@ -176,7 +221,10 @@ export class FormulaScreen {
             colors.foreground,
             colors.background
           );
-          if (version !== this.#scanVersion) break;
+          if (this.#disposed || layoutVersion !== this.#layoutVersion) break;
+          // Unrelated output (for example a spinner in the status bar) should
+          // not starve formulas that are unchanged at their screen location.
+          if (version !== this.#scanVersion && !this.#regionStillVisible(region, viewportY)) continue;
 
           const buffer = this.terminal.buffer.active;
           // CUP cannot reproduce xterm's pending-wrap state exactly.
@@ -200,7 +248,7 @@ export class FormulaScreen {
       }
     } finally {
       this.#scanning = false;
-      if (this.#rescanRequested || version !== this.#scanVersion) {
+      if (!this.#disposed && (this.#rescanRequested || version !== this.#scanVersion)) {
         this.#rescanRequested = false;
         this.scheduleScan(140);
       }

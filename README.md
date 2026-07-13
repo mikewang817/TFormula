@@ -57,6 +57,24 @@ scaled down when they would exceed the columns or rows already occupied by the
 source. This is necessary because inserting terminal rows behind a full-screen
 TUI would desynchronize its cursor coordinates.
 
+Formula scans are coalesced during streaming output instead of waiting for the
+terminal to become completely idle. Unrelated status-bar or spinner updates do
+not cancel formulas that remain unchanged on screen. When the terminal grid or
+cell pixel size changes, TFormula deletes every recorded Kitty image by ID,
+performs a z-index cleanup, and renders one replacement set at the new size.
+
+When an agent emits display math as a single standalone `$$...$$` or
+`\[...\]` line, TFormula borrows adjacent blank terminal rows when available.
+This gives fractions and derivatives enough vertical space to retain the same
+base glyph size as simple equations. Inline math and display delimiters mixed
+with prose are never expanded, so neighboring text is not covered.
+
+A trailing inline formula can similarly use one following blank row for tall
+fraction content. TFormula absorbs terminal punctuation into that overlay so it
+stays next to the rendered expression. The common reciprocal-root form
+`1/\sqrt{...}` is typeset as `\frac{1}{\sqrt{...}}`; slashes in ordinary units
+such as `m/s` are left unchanged.
+
 If a terminal does not answer pixel-size queries, TFormula falls back to 9x18
 pixels. You can override that explicitly:
 

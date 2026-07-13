@@ -153,6 +153,94 @@ function inferredDefinitionGroup(lines: string[], startRow: number): FormulaRegi
   };
 }
 
+function isStandaloneDisplayLine(line: string): boolean {
+  const trimmed = line.trim();
+  return /^(?:\\\[[\s\S]+\\\]|\$\$[^$]+\$\$)$/u.test(trimmed);
+}
+
+function expandStandaloneDisplayRegions(
+  lines: string[],
+  regions: FormulaRegion[]
+): FormulaRegion[] {
+  const claimedRows = new Set<number>();
+  for (const region of regions) {
+    for (let row = region.startRow; row <= region.endRow; row += 1) claimedRows.add(row);
+  }
+
+  return regions.map((region) => {
+    if (!region.display
+      || region.startRow !== region.endRow
+      || !isStandaloneDisplayLine(lines[region.startRow] ?? "")) {
+      return region;
+    }
+
+    let startRow = region.startRow;
+    let endRow = region.endRow;
+    const previousRow = startRow - 1;
+    const nextRow = endRow + 1;
+    if (previousRow >= 0
+      && !(lines[previousRow] ?? "").trim()
+      && !claimedRows.has(previousRow)) {
+      startRow = previousRow;
+      claimedRows.add(previousRow);
+    }
+    if (nextRow < lines.length
+      && !(lines[nextRow] ?? "").trim()
+      && !claimedRows.has(nextRow)) {
+      endRow = nextRow;
+      claimedRows.add(nextRow);
+    }
+    if (startRow === region.startRow && endRow === region.endRow) return region;
+
+    return {
+      ...region,
+      startRow,
+      endRow,
+      startCol: 0,
+      endCol: Math.max(...lines.slice(startRow, endRow + 1).map((line) => stringWidth(line)), 1)
+    };
+  });
+}
+
+function trailingInlineRegion(
+  lines: string[],
+  row: number,
+  line: string,
+  startIndex: number,
+  endIndex: number,
+  latex: string,
+  confidence: FormulaRegion["confidence"]
+): FormulaRegion {
+  const suffix = line.slice(endIndex);
+  const trailing = suffix.match(/^([.,;:!?，。；：！？]?)\s*$/u);
+  let regionEndIndex = endIndex;
+  let regionLatex = latex;
+  let endRow = row;
+  let compact = false;
+
+  if (trailing) {
+    const punctuation = trailing[1] ?? "";
+    if (punctuation) {
+      regionLatex += `\\text{${escapeTexText(punctuation)}}`;
+      regionEndIndex += punctuation.length;
+    }
+    compact = true;
+    if (row + 1 < lines.length && !(lines[row + 1] ?? "").trim()) endRow = row + 1;
+  }
+
+  const [startCol, endCol] = visualEnd(line, startIndex, regionEndIndex);
+  return {
+    startRow: row,
+    endRow,
+    startCol,
+    endCol,
+    latex: regionLatex,
+    display: false,
+    confidence,
+    ...(compact ? { compact: true } : {})
+  };
+}
+
 /**
  * Detect formulas in the post-ANSI terminal screen. Explicit TeX delimiters are
  * preferred. A conservative inferred form handles TUIs that turn `\[`/`\]`
@@ -224,16 +312,29 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
     for (const { regex, display } of explicitPatterns) {
       for (const match of line.matchAll(regex)) {
         if (match.index === undefined || !match[1]?.trim()) continue;
-        const [startCol, endCol] = visualEnd(line, match.index, match.index + match[0].length);
-        regions.push({
-          startRow: row,
-          endRow: row,
-          startCol,
-          endCol,
-          latex: match[1].trim(),
-          display,
-          confidence: "explicit"
-        });
+        const matchEnd = match.index + match[0].length;
+        if (!display) {
+          regions.push(trailingInlineRegion(
+            lines,
+            row,
+            line,
+            match.index,
+            matchEnd,
+            match[1].trim(),
+            "explicit"
+          ));
+        } else {
+          const [startCol, endCol] = visualEnd(line, match.index, matchEnd);
+          regions.push({
+            startRow: row,
+            endRow: row,
+            startCol,
+            endCol,
+            latex: match[1].trim(),
+            display,
+            confidence: "explicit"
+          });
+        }
       }
     }
 
@@ -258,31 +359,33 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
     const inlineDollar = /(?<!\$)\$([^$\n]+?)\$(?!\$)/gu;
     for (const match of line.matchAll(inlineDollar)) {
       if (match.index === undefined || !match[1] || mathScore(match[1]) < 2) continue;
-      const [startCol, endCol] = visualEnd(line, match.index, match.index + match[0].length);
-      regions.push({
-        startRow: row,
-        endRow: row,
-        startCol,
-        endCol,
-        latex: match[1].trim(),
-        display: false,
-        confidence: "explicit"
-      });
+      regions.push(trailingInlineRegion(
+        lines,
+        row,
+        line,
+        match.index,
+        match.index + match[0].length,
+        match[1].trim(),
+        "explicit"
+      ));
     }
   }
 
-  return regions;
+  return expandStandaloneDisplayRegions(lines, regions);
 }
 
 export const detectorInternals = {
   descriptionToLatex,
   definitionItem,
   escapeTexText,
+  expandStandaloneDisplayRegions,
   inferredDefinitionGroup,
   inferredParenthesizedMath,
   isLikelyMath,
+  isStandaloneDisplayLine,
   looksLikeAsciiMath,
   mathScore,
   parenthesizedSegments,
+  trailingInlineRegion,
   visualColumn
 };

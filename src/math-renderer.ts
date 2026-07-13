@@ -75,6 +75,37 @@ function safeLatex(latex: string): string {
   return latex;
 }
 
+export function normalizeLatexForRendering(latex: string): string {
+  const marker = /(?<![A-Za-z0-9.])1\s*\/\s*\\sqrt\s*\{/gu;
+  let normalized = latex;
+  let searchFrom = 0;
+
+  while (searchFrom < normalized.length) {
+    marker.lastIndex = searchFrom;
+    const match = marker.exec(normalized);
+    if (!match || match.index === undefined) break;
+    const openBrace = marker.lastIndex - 1;
+    let depth = 1;
+    let closeBrace = -1;
+    for (let index = openBrace + 1; index < normalized.length; index += 1) {
+      if (normalized[index] === "{" && normalized[index - 1] !== "\\") depth += 1;
+      if (normalized[index] === "}" && normalized[index - 1] !== "\\") depth -= 1;
+      if (depth === 0) {
+        closeBrace = index;
+        break;
+      }
+    }
+    if (closeBrace < 0) break;
+
+    const sqrtOffset = match[0].indexOf("\\sqrt");
+    const sqrt = normalized.slice(match.index + sqrtOffset, closeBrace + 1);
+    const replacement = `\\frac{1}{${sqrt}}`;
+    normalized = normalized.slice(0, match.index) + replacement + normalized.slice(closeBrace + 1);
+    searchFrom = match.index + replacement.length;
+  }
+  return normalized;
+}
+
 function escapeAttribute(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
 }
@@ -98,7 +129,8 @@ export async function renderMathJaxSvg(
   // line-break opportunities and return only the first fragment when called
   // with display:false. Convert in display mode and force textstyle instead;
   // this preserves complete inline expressions without enlarging their glyphs.
-  const source = display ? safeLatex(latex) : `\\textstyle{${safeLatex(latex)}}`;
+  const normalized = safeLatex(normalizeLatexForRendering(latex));
+  const source = display ? normalized : `\\textstyle{${normalized}}`;
   const node = await mathJax.tex2svgPromise(source, {
     display: true,
     em: 16,

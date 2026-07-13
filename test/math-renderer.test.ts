@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { MathRenderer, readSvgDimensions, renderMathJaxSvg } from "../src/math-renderer.js";
+import {
+  MathRenderer,
+  normalizeLatexForRendering,
+  readSvgDimensions,
+  renderMathJaxSvg
+} from "../src/math-renderer.js";
 
 describe("MathRenderer", () => {
   it("reads MathJax ex dimensions", () => {
@@ -14,6 +19,13 @@ describe("MathRenderer", () => {
     const dimensions = readSvgDimensions(svg);
     expect(dimensions.aspectRatio).toBeGreaterThan(3);
     expect(svg.match(/<use\b/gu)?.length ?? 0).toBeGreaterThanOrEqual(5);
+  });
+
+  it("typesets reciprocal square roots as fractions without changing unit slashes", () => {
+    expect(normalizeLatexForRendering("c=1/\\sqrt{\\mu_0\\varepsilon_0}"))
+      .toBe("c=\\frac{1}{\\sqrt{\\mu_0\\varepsilon_0}}");
+    expect(normalizeLatexForRendering("3.0\\times10^8\\ \\text{m/s}"))
+      .toBe("3.0\\times10^8\\ \\text{m/s}");
   });
 
   it("renders a PNG exactly matching the terminal cell rectangle", async () => {
