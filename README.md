@@ -88,6 +88,15 @@ Markdown. For that case TFormula conservatively recognizes a bare `[`/`]`
 block only when its body contains strong TeX features such as `\frac`, `\sum`,
 subscripts, superscripts, or braced arguments.
 
+The same compatibility rule applies when a TUI turns inline delimiters such as
+`\(\rho\)` into `(\rho)`. TFormula renders the parenthesized span only when its
+contents contain a recognized TeX command or similarly strong math structure;
+ordinary prose in parentheses remains unchanged.
+
+Consecutive definition items such as `- (\rho)：电荷密度` are rendered as one
+compact two-column MathJax array. This keeps symbols, colons, and descriptions
+aligned even though their original TeX source strings have different widths.
+
 Single-dollar expressions also require mathematical structure, which prevents
 ordinary prices such as `$12.50` from being rendered.
 

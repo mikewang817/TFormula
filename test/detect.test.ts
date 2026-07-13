@@ -38,6 +38,43 @@ describe("detectFormulaRegions", () => {
     expect(detectFormulaRegions(["price is $12.50$ today"])).toEqual([]);
     expect(detectFormulaRegions(["value is $x_i^2$ today"])).toHaveLength(1);
   });
+
+  it("infers inline math when a TUI strips backslashes from delimiters", () => {
+    const regions = detectFormulaRegions([
+      "- (\\rho)：电荷密度",
+      "- (ordinary note)：不应渲染"
+    ]);
+    expect(regions).toHaveLength(1);
+    expect(regions[0]?.latex).toBe("\\rho");
+    expect(regions.every((region) => region.confidence === "inferred" && !region.display)).toBe(true);
+  });
+
+  it("aligns consecutive symbol definitions as a compact two-column group", () => {
+    const [region] = detectFormulaRegions([
+      "- (\\mathbf E)：电场强度",
+      "- (\\mathbf B)：磁感应强度",
+      "- (\\rho)：电荷密度",
+      "- (\\mathbf J)：电流密度",
+      "- (\\varepsilon_0)：真空介电常数",
+      "- (\\mu_0)：真空磁导率"
+    ]);
+    expect(region).toMatchObject({
+      startRow: 0,
+      endRow: 5,
+      startCol: 2,
+      compact: true,
+      display: false,
+      confidence: "inferred"
+    });
+    expect(region?.latex).toContain("\\begin{array}{ll}");
+    expect(region?.latex).toContain("\\mathbf E & \\text{：电场强度}");
+    expect(region?.latex).toContain("\\mu_0 & \\text{：真空磁导率}");
+  });
+
+  it("supports nested parentheses inside inferred inline formulas", () => {
+    const [region] = detectFormulaRegions(["value (\\operatorname{Var}(X_i))：方差"]);
+    expect(region?.latex).toBe("\\operatorname{Var}(X_i)");
+  });
 });
 
 describe("math scoring", () => {

@@ -147,7 +147,7 @@ export class FormulaScreen {
       for (const region of regions) {
         if (version !== this.#scanVersion) break;
         const rows = region.endRow - region.startRow + 1;
-        const columns = rows > 1
+        const columns = rows > 1 && !region.compact
           ? this.terminal.cols
           : Math.max(1, Math.min(this.terminal.cols - region.startCol, region.endCol - region.startCol));
         const anchor = this.#anchor(region, columns, rows);

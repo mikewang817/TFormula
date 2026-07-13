@@ -1,7 +1,7 @@
 import stringWidth from "string-width";
 import type { FormulaRegion } from "./types.js";
 
-const COMMAND_RE = /\\(?:frac|dfrac|tfrac|sum|prod|int|iint|iiint|log|ln|exp|sqrt|lim|begin|end|left|right|mathrm|mathbf|mathbb|mathcal|operatorname|overline|underline|hat|bar|vec|partial|nabla|infty|alpha|beta|gamma|delta|theta|lambda|mu|sigma|phi|omega)\b/gu;
+const COMMAND_RE = /\\(?:frac|dfrac|tfrac|sum|prod|int|iint|iiint|log|ln|exp|sqrt|lim|begin|end|left|right|mathrm|mathbf|mathbb|mathcal|operatorname|overline|underline|hat|bar|vec|partial|nabla|infty|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|omicron|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega)(?![A-Za-z])/gu;
 
 function mathScore(value: string): number {
   let score = 0;
@@ -27,6 +27,88 @@ function normalizeLatex(parts: string[]): string {
   return parts.map((part) => part.trim()).filter(Boolean).join("\n");
 }
 
+function inferredParenthesizedMath(line: string): Array<{ start: number; end: number; body: string }> {
+  const segments: Array<{ start: number; end: number; body: string }> = [];
+  for (let start = 0; start < line.length; start += 1) {
+    if (line[start] !== "(" || line[start - 1] === "\\") continue;
+    let depth = 1;
+    for (let end = start + 1; end < line.length; end += 1) {
+      if (line[end] === "(" && line[end - 1] !== "\\") depth += 1;
+      if (line[end] === ")" && line[end - 1] !== "\\") depth -= 1;
+      if (depth !== 0) continue;
+      const body = line.slice(start + 1, end).trim();
+      if (body && mathScore(body) >= 3) segments.push({ start, end: end + 1, body });
+      start = end;
+      break;
+    }
+  }
+  return segments;
+}
+
+interface DefinitionItem {
+  body: string;
+  description: string;
+  startCol: number;
+  lineWidth: number;
+}
+
+function escapeTexText(value: string): string {
+  const replacements: Record<string, string> = {
+    "\\": "\\backslash{}",
+    "{": "\\{",
+    "}": "\\}",
+    "$": "\\$",
+    "&": "\\&",
+    "#": "\\#",
+    "%": "\\%",
+    "_": "\\_",
+    "^": "\\^{}",
+    "~": "\\~{}"
+  };
+  return value.replace(/[\\{}$&#%_^~]/gu, (character) => replacements[character]!);
+}
+
+function definitionItem(line: string): DefinitionItem | undefined {
+  for (const segment of inferredParenthesizedMath(line)) {
+    const prefix = line.slice(0, segment.start);
+    if (!/^\s*(?:[-*•]\s+|\d+[.)]\s+)$/u.test(prefix)) continue;
+    const suffix = line.slice(segment.end);
+    const description = suffix.match(/^\s*([：:]\s*\S.*)$/u)?.[1];
+    if (!description) continue;
+    return {
+      body: segment.body,
+      description,
+      startCol: visualColumn(line, segment.start),
+      lineWidth: stringWidth(line)
+    };
+  }
+  return undefined;
+}
+
+function inferredDefinitionGroup(lines: string[], startRow: number): FormulaRegion | undefined {
+  const items: DefinitionItem[] = [];
+  for (let row = startRow; row < lines.length; row += 1) {
+    const item = definitionItem(lines[row] ?? "");
+    if (!item || (items[0] && item.startCol !== items[0].startCol)) break;
+    items.push(item);
+  }
+  if (items.length < 2) return undefined;
+
+  const latexRows = items
+    .map((item) => `${item.body} & \\text{${escapeTexText(item.description)}}`)
+    .join("\\\\");
+  return {
+    startRow,
+    endRow: startRow + items.length - 1,
+    startCol: items[0]!.startCol,
+    endCol: Math.max(...items.map((item) => item.lineWidth)),
+    latex: `\\begin{array}{ll}${latexRows}\\end{array}`,
+    display: false,
+    confidence: "inferred",
+    compact: true
+  };
+}
+
 /**
  * Detect formulas in the post-ANSI terminal screen. Explicit TeX delimiters are
  * preferred. A conservative inferred form handles TUIs that turn `\[`/`\]`
@@ -45,6 +127,17 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
       continue;
     }
     if (inCodeFence || !trimmed) continue;
+
+    // Definition lists need group-level layout: the source TeX tokens have
+    // different character widths, so independently overlaying each token
+    // leaves the colons and descriptions staggered. A compact MathJax array
+    // aligns both columns without changing the child terminal's cell layout.
+    const definitionGroup = inferredDefinitionGroup(lines, row);
+    if (definitionGroup) {
+      regions.push(definitionGroup);
+      row = definitionGroup.endRow;
+      continue;
+    }
 
     const blockStart = trimmed === "\\[" || trimmed === "$$" || trimmed === "[";
     if (blockStart) {
@@ -100,6 +193,23 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
       }
     }
 
+    // Several terminal Markdown renderers consume the backslashes in \(...\)
+    // and leave forms such as `(\mathbf E)` or `(\rho)`. Only infer these
+    // when the body has strong TeX evidence, so ordinary prose parentheses
+    // remain untouched.
+    for (const segment of inferredParenthesizedMath(line)) {
+      const [startCol, endCol] = visualEnd(line, segment.start, segment.end);
+      regions.push({
+        startRow: row,
+        endRow: row,
+        startCol,
+        endCol,
+        latex: segment.body,
+        display: false,
+        confidence: "inferred"
+      });
+    }
+
     // Single-dollar inline math is intentionally conservative to avoid prices.
     const inlineDollar = /(?<!\$)\$([^$\n]+?)\$(?!\$)/gu;
     for (const match of line.matchAll(inlineDollar)) {
@@ -120,4 +230,11 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
   return regions;
 }
 
-export const detectorInternals = { mathScore, visualColumn };
+export const detectorInternals = {
+  definitionItem,
+  escapeTexText,
+  inferredDefinitionGroup,
+  inferredParenthesizedMath,
+  mathScore,
+  visualColumn
+};

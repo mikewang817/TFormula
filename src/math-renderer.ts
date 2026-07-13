@@ -17,6 +17,7 @@ interface MathJaxApi {
 interface SvgDimensions {
   aspectRatio: number;
   heightEx: number;
+  depthEx: number;
 }
 
 let mathJaxPromise: Promise<MathJaxApi> | undefined;
@@ -47,7 +48,7 @@ export function readSvgDimensions(svg: string): SvgDimensions {
   const viewBox = svg.match(/\bviewBox="[^\s]+\s+[^\s]+\s+([\d.]+)\s+([\d.]+)"/u);
   const fallbackRatio = viewBox ? Number(viewBox[1]) / Number(viewBox[2]) : 1;
 
-  if (!width || !height) return { aspectRatio: fallbackRatio, heightEx: 1.8 };
+  if (!width || !height) return { aspectRatio: fallbackRatio, heightEx: 1.8, depthEx: 0 };
   const unitToEx = (length: { value: number; unit: string }): number => {
     if (length.unit === "ex") return length.value;
     if (length.unit === "em") return length.value * 2;
@@ -55,9 +56,14 @@ export function readSvgDimensions(svg: string): SvgDimensions {
   };
   const widthEx = unitToEx(width);
   const heightEx = unitToEx(height);
+  const verticalAlign = svg.match(/vertical-align:\s*(-?[\d.]+)(ex|em|px)?/u);
+  const verticalAlignEx = verticalAlign
+    ? unitToEx({ value: Number(verticalAlign[1]), unit: verticalAlign[2] ?? "px" })
+    : 0;
   return {
     aspectRatio: Number.isFinite(widthEx / heightEx) ? widthEx / heightEx : fallbackRatio,
-    heightEx
+    heightEx,
+    depthEx: Math.max(0, -verticalAlignEx)
   };
 }
 
@@ -122,6 +128,7 @@ export class MathRenderer {
     const geometry = calculateFormulaGeometry({
       aspectRatio: dimensions.aspectRatio,
       naturalHeightEx: dimensions.heightEx,
+      depthEx: dimensions.depthEx,
       columns,
       rows,
       cell: capabilities.cell,

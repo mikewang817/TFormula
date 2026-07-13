@@ -20,6 +20,8 @@ export interface FormulaRegion {
   latex: string;
   display: boolean;
   confidence: "explicit" | "inferred";
+  /** Use the detected region width even when the formula spans several rows. */
+  compact?: boolean;
 }
 
 export interface RenderedFormula {
