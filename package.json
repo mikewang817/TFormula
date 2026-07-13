@@ -24,7 +24,8 @@
     "tformula": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.zh-CN.md"
   ],
   "scripts": {
     "build": "rimraf dist && tsc -p tsconfig.json && chmod +x dist/cli.js",

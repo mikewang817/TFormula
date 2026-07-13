@@ -1,9 +1,15 @@
 # TFormula
 
-TFormula is a terminal-agnostic PTY proxy that renders LaTeX produced by any
-CLI agent in Ghostty and other terminals that implement the Kitty graphics
-protocol. It does not use Codex, Claude, Gemini, or any other agent-specific
-API.
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+Render LaTeX from **any CLI agent** directly inside your terminal.
+
+> **Ghostty is the recommended terminal.** TFormula is developed and tested
+> primarily with Ghostty and also works with terminals that implement the Kitty
+> graphics protocol, including Kitty and WezTerm.
+
+TFormula is a terminal-agnostic PTY proxy. It does not use Codex, Claude,
+Gemini, or any other agent-specific API.
 
 The child program still sees a normal terminal. TFormula forwards its ANSI
 output unchanged, maintains a headless copy of the terminal screen, detects
@@ -11,36 +17,71 @@ visible TeX, renders it locally with MathJax, and places the result over the
 source text using the Kitty graphics protocol. The original text remains in
 the terminal buffer for copying.
 
-## Requirements
+## Quick start in Ghostty
 
-- macOS or Linux
-- Node.js 20 or newer
-- Ghostty, Kitty, WezTerm, or another terminal with Kitty graphics support
+Open Ghostty and run an agent immediately without a global install:
 
-The current implementation has been developed against Ghostty 1.3.1.
+```sh
+npx --yes tformula@latest codex
+```
 
-## Run with npx
+Or install the short `tformula` command once:
 
-No global installation is required. Start any agent through the latest public
-release:
+```sh
+npm install --global tformula
+```
+
+Then place `tformula` before whichever agent command you already use:
+
+| Agent | Command |
+|---|---|
+| OpenAI Codex | `tformula codex` |
+| Claude Code | `tformula claude` |
+| Cursor Agent | `tformula agent` |
+| Pi coding agent | `tformula pi` |
+| Gemini CLI | `tformula gemini` |
+| OpenCode | `tformula opencode` |
+| Aider | `tformula aider` |
+| Goose | `tformula goose` |
+| Qwen Code | `tformula qwen` |
+| Any other CLI agent | `tformula -- <agent-command> [args...]` |
+
+The agent itself must already be installed and available on your `PATH`.
+TFormula simply wraps the command; it has no agent-specific integration.
+
+To use npx instead, replace `tformula` in any row with
+`npx --yes tformula@latest`. For example:
 
 ```sh
 npx --yes tformula@latest codex
 npx --yes tformula@latest claude
-npx --yes tformula@latest -- gemini --model gemini-2.5-pro
+npx --yes tformula@latest agent
+npx --yes tformula@latest pi
+npx --yes tformula@latest gemini
+npx --yes tformula@latest opencode
+npx --yes tformula@latest aider
+npx --yes tformula@latest goose
+npx --yes tformula@latest -- claude --resume
 npx --yes tformula@latest --shell
 ```
 
-The first run downloads TFormula and its platform-specific dependencies into
-npm's cache. Later runs reuse that installation. Node.js 20 or newer is
-required.
-
-For a permanent command, install it globally:
+`--shell` starts an enhanced login shell, so commands launched inside that shell
+can be wrapped without creating an alias for each agent:
 
 ```sh
-npm install --global tformula
-tformula codex
+tformula --shell
 ```
+
+Running `tformula` without arguments is equivalent to `tformula --shell`.
+
+## Requirements
+
+- Ghostty recommended; Kitty, WezTerm, or another Kitty-graphics terminal
+- macOS or Linux
+- Node.js 20 or newer
+- The CLI agent you want to run
+
+The current implementation has been developed against Ghostty 1.3.1.
 
 ## Install from this checkout
 
@@ -48,24 +89,8 @@ tformula codex
 npm install
 npm run check
 npm link
-```
-
-After `npm link`, start any agent through TFormula:
-
-```sh
 tformula codex
-tformula claude
-tformula gemini
-tformula -- opencode --continue
 ```
-
-To cover every command without adding aliases, start an enhanced login shell:
-
-```sh
-tformula --shell
-```
-
-Running `tformula` without arguments is equivalent to `tformula --shell`.
 
 ## Formula sizing
 
@@ -87,7 +112,8 @@ forwarded at line-boundary checkpoints of roughly one third of the terminal
 height. TFormula completes a formula scan at each checkpoint before forwarding
 more rows, so rendered images enter scrollback together with their source text
 instead of being missed after an entire response scrolls past. When the terminal
-grid or cell pixel size changes, TFormula replaces only the affected Kitty placements.
+grid or cell pixel size changes, TFormula replaces only the affected Kitty
+placements.
 The underlying PNG is retained and shared by every placement with the same
 formula, size, and colors. Normal resizing only replaces images still in the
 live viewport; off-screen placements are preserved so the terminal can scroll
