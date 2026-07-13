@@ -7,8 +7,11 @@ import {
   cursorPosition,
   kittyDeleteByZIndex,
   kittyDeleteImage,
+  kittyDeleteRange,
   kittyTransmitAndPlace,
-  synchronizedOutput
+  synchronizedOutput,
+  TFORMULA_IMAGE_ID_MAX,
+  TFORMULA_IMAGE_ID_MIN
 } from "./kitty.js";
 import type { FormulaRegion, TerminalCapabilities } from "./types.js";
 
@@ -19,6 +22,9 @@ const { Terminal } = createRequire(import.meta.url)("@xterm/headless") as {
 interface PlacedFormula {
   imageId: number;
   fingerprint: string;
+  bufferType: string;
+  absoluteStartRow: number;
+  absoluteEndRow: number;
 }
 
 function rgbHex(value: number): string {
@@ -33,13 +39,14 @@ export class FormulaScreen {
   readonly #debug: (message: string) => void;
   #capabilities: TerminalCapabilities;
   #scale: number;
-  #imageId = 1_400_000_000;
+  #imageId = TFORMULA_IMAGE_ID_MIN;
   #scanTimer?: NodeJS.Timeout;
   #scanVersion = 0;
   #layoutVersion = 0;
   #scanning = false;
   #rescanRequested = false;
   #disposed = false;
+  #controlTail = "";
 
   constructor(options: {
     cols: number;
@@ -59,16 +66,36 @@ export class FormulaScreen {
     this.#scale = options.scale;
     this.#writeOuter = options.writeOuter;
     this.#debug = options.debug ?? (() => undefined);
-    this.terminal.buffer.onBufferChange(() => this.resetPlacements());
+    this.terminal.buffer.onBufferChange(() => {
+      // The newly activated buffer is cleared by the terminal. Placements in
+      // the inactive buffer (especially normal-buffer scrollback) must survive.
+      this.#invalidateBufferPlacements(this.terminal.buffer.active.type, false);
+    });
   }
 
   write(data: string): void {
+    const controls = this.#controlTail + data;
+    if (/\x1bc|\x1b\[(?:[0-9;]*)3J/u.test(controls)) {
+      // RIS and ED 3 clear scrollback as well as the live screen.
+      this.resetPlacements();
+      this.#debug("terminal reset invalidated all formula placements");
+    } else if (/\x1b\[(?:[0-9;]*)2J/u.test(controls)) {
+      // Kitty images are cleared by ED 2/3 and RIS independently of xterm's
+      // text buffer. ED 2 only affects the live viewport; scrollback images
+      // continue to be owned and scrolled by the terminal.
+      this.#invalidateVisiblePlacements(false);
+      this.#debug("terminal clear invalidated visible formula placements");
+    }
+    this.#controlTail = this.#incompleteControlSuffix(controls);
     this.terminal.write(data, () => this.scheduleScan());
   }
 
   resize(cols: number, rows: number): void {
     this.terminal.resize(Math.max(2, cols), Math.max(2, rows));
-    this.resetPlacements();
+    // Kitty placements are cell-based and resize with the terminal. Keep them
+    // until the next scan selectively replaces formulas still in the live
+    // viewport; off-screen scrollback cannot be reconstructed later.
+    this.#layoutVersion += 1;
     this.scheduleScan(180);
   }
 
@@ -80,7 +107,7 @@ export class FormulaScreen {
     this.#capabilities = capabilities;
     if (dimensionsChanged || colorsChanged) {
       this.#renderer.clear();
-      this.resetPlacements();
+      this.#layoutVersion += 1;
       this.scheduleScan(180);
     }
   }
@@ -88,7 +115,7 @@ export class FormulaScreen {
   setScale(scale: number): void {
     this.#scale = scale;
     this.#renderer.clear();
-    this.resetPlacements();
+    this.#layoutVersion += 1;
     this.scheduleScan();
   }
 
@@ -109,6 +136,10 @@ export class FormulaScreen {
     if (this.#capabilities.kittyGraphics) {
       const imageIds = new Set(Array.from(this.#placed.values(), (placement) => placement.imageId));
       const commands = [
+        // Range deletion also catches an image transmitted by an interrupted
+        // scan before it could be entered into #placed. Older terminals can
+        // ignore this command and fall back to the ID and z-index deletions.
+        kittyDeleteRange(),
         ...Array.from(imageIds, (imageId) => kittyDeleteImage(imageId)),
         // Also remove any placement that an earlier interrupted scan may have
         // transmitted before it could be recorded in #placed.
@@ -117,6 +148,41 @@ export class FormulaScreen {
       this.#writeOuter(synchronizedOutput(commands.join("")));
     }
     this.#placed.clear();
+  }
+
+  #placementIsVisible(placement: PlacedFormula): boolean {
+    const buffer = this.terminal.buffer.active;
+    const viewportStart = buffer.viewportY;
+    const viewportEnd = viewportStart + this.terminal.rows - 1;
+    return placement.bufferType === buffer.type
+      && placement.absoluteEndRow >= viewportStart
+      && placement.absoluteStartRow <= viewportEnd;
+  }
+
+  #invalidateVisiblePlacements(deleteImages: boolean): void {
+    this.#layoutVersion += 1;
+    const imageIds: number[] = [];
+    for (const [anchor, placement] of this.#placed) {
+      if (!this.#placementIsVisible(placement)) continue;
+      if (deleteImages) imageIds.push(placement.imageId);
+      this.#placed.delete(anchor);
+    }
+    if (imageIds.length > 0 && this.#capabilities.kittyGraphics) {
+      this.#writeOuter(synchronizedOutput(imageIds.map(kittyDeleteImage).join("")));
+    }
+  }
+
+  #invalidateBufferPlacements(bufferType: string, deleteImages: boolean): void {
+    this.#layoutVersion += 1;
+    const imageIds: number[] = [];
+    for (const [anchor, placement] of this.#placed) {
+      if (placement.bufferType !== bufferType) continue;
+      if (deleteImages) imageIds.push(placement.imageId);
+      this.#placed.delete(anchor);
+    }
+    if (imageIds.length > 0 && this.#capabilities.kittyGraphics) {
+      this.#writeOuter(synchronizedOutput(imageIds.map(kittyDeleteImage).join("")));
+    }
   }
 
   dispose(): void {
@@ -132,6 +198,17 @@ export class FormulaScreen {
     return Array.from({ length: this.terminal.rows }, (_, row) =>
       buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? ""
     );
+  }
+
+  #incompleteControlSuffix(data: string): string {
+    const escapeIndex = data.lastIndexOf("\x1b");
+    if (escapeIndex < 0) return "";
+    const suffix = data.slice(escapeIndex);
+    if (suffix === "\x1b") return suffix;
+    if (!suffix.startsWith("\x1b[")) return "";
+    // A CSI sequence is incomplete until its final byte in the 0x40-0x7e
+    // range arrives. Keep only that suffix for split PTY writes.
+    return /[\x40-\x7e]/u.test(suffix.slice(2)) ? "" : suffix.slice(-32);
   }
 
   #regionColors(region: FormulaRegion): { foreground: string; background: string } {
@@ -189,6 +266,11 @@ export class FormulaScreen {
       const desiredAnchors = new Set(prepared.map(({ anchor }) => anchor));
       for (const [anchor, placement] of this.#placed) {
         if (desiredAnchors.has(anchor)) continue;
+        // Absence from detectFormulaRegions only means absence from the live
+        // viewport. Keep scrollback placements: the outer terminal scrolls
+        // them with text, while the headless terminal cannot observe the
+        // user's scrollback position to recreate them later.
+        if (!this.#placementIsVisible(placement)) continue;
         this.#writeOuter(kittyDeleteImage(placement.imageId));
         this.#placed.delete(anchor);
       }
@@ -233,14 +315,20 @@ export class FormulaScreen {
             break;
           }
           const imageId = this.#imageId++;
-          if (this.#imageId >= 2_000_000_000) this.#imageId = 1_400_000_000;
+          if (this.#imageId > TFORMULA_IMAGE_ID_MAX) this.#imageId = TFORMULA_IMAGE_ID_MIN;
           const placement = [
             cursorPosition(region.startRow + 1, region.startCol + 1),
             kittyTransmitAndPlace(rendered.png, imageId, columns, rows),
             cursorPosition(buffer.cursorY + 1, buffer.cursorX + 1)
           ].join("");
           this.#writeOuter(synchronizedOutput(placement));
-          this.#placed.set(anchor, { imageId, fingerprint });
+          this.#placed.set(anchor, {
+            imageId,
+            fingerprint,
+            bufferType: buffer.type,
+            absoluteStartRow: buffer.viewportY + region.startRow,
+            absoluteEndRow: buffer.viewportY + region.endRow
+          });
           this.#debug(`rendered ${region.confidence} formula at ${anchor} (${rendered.widthPx}x${rendered.heightPx}px)`);
         } catch (error) {
           this.#debug(`formula render skipped: ${error instanceof Error ? error.message : String(error)}`);

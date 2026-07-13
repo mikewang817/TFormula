@@ -3,6 +3,8 @@ const APC_START = `${ESC}_G`;
 const ST = `${ESC}\\`;
 
 export const TFORMULA_Z_INDEX = 20_260_713;
+export const TFORMULA_IMAGE_ID_MIN = 1_400_000_000;
+export const TFORMULA_IMAGE_ID_MAX = 1_999_999_999;
 
 export function kittyDeleteImage(imageId: number): string {
   return `${APC_START}a=d,d=I,i=${imageId},q=2${ST}`;
@@ -10,6 +12,13 @@ export function kittyDeleteImage(imageId: number): string {
 
 export function kittyDeleteByZIndex(): string {
   return `${APC_START}a=d,d=Z,z=${TFORMULA_Z_INDEX},q=2${ST}`;
+}
+
+export function kittyDeleteRange(
+  firstImageId = TFORMULA_IMAGE_ID_MIN,
+  lastImageId = TFORMULA_IMAGE_ID_MAX
+): string {
+  return `${APC_START}a=d,d=R,x=${firstImageId},y=${lastImageId},q=2${ST}`;
 }
 
 export function kittyTransmitAndPlace(

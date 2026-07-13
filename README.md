@@ -62,6 +62,12 @@ terminal to become completely idle. Unrelated status-bar or spinner updates do
 not cancel formulas that remain unchanged on screen. When the terminal grid or
 cell pixel size changes, TFormula deletes every recorded Kitty image by ID,
 performs a z-index cleanup, and renders one replacement set at the new size.
+It also reserves a private image-ID range and deletes that complete range during
+full resets and shutdown, catching interrupted transmissions that were not yet
+recorded. Normal resizing only replaces images still in the live viewport;
+off-screen placements are preserved so the terminal can scroll and scale them
+with its own scrollback. `CSI 2J` invalidates visible placements, while `CSI 3J`
+and `RIS` invalidate the complete placement map.
 
 When an agent emits display math as a single standalone `$$...$$` or
 `\[...\]` line, TFormula borrows adjacent blank terminal rows when available.

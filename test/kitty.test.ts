@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { kittyTransmitAndPlace } from "../src/kitty.js";
+import {
+  kittyDeleteRange,
+  kittyTransmitAndPlace,
+  TFORMULA_IMAGE_ID_MAX,
+  TFORMULA_IMAGE_ID_MIN
+} from "../src/kitty.js";
 
 describe("Kitty graphics encoding", () => {
   it("uses fixed cell placement without moving the cursor", () => {
@@ -8,5 +13,12 @@ describe("Kitty graphics encoding", () => {
     expect(encoded).toContain("i=42");
     expect(encoded).toContain("c=30,r=3,C=1");
     expect(encoded).toContain("iVBORw==");
+  });
+
+  it("can delete the complete reserved TFormula image-id range", () => {
+    const encoded = kittyDeleteRange();
+    expect(encoded).toContain("a=d,d=R");
+    expect(encoded).toContain(`x=${TFORMULA_IMAGE_ID_MIN}`);
+    expect(encoded).toContain(`y=${TFORMULA_IMAGE_ID_MAX}`);
   });
 });
