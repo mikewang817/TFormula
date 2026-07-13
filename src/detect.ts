@@ -27,7 +27,13 @@ function normalizeLatex(parts: string[]): string {
   return parts.map((part) => part.trim()).filter(Boolean).join("\n");
 }
 
-function inferredParenthesizedMath(line: string): Array<{ start: number; end: number; body: string }> {
+interface ParenthesizedSegment {
+  start: number;
+  end: number;
+  body: string;
+}
+
+function parenthesizedSegments(line: string): ParenthesizedSegment[] {
   const segments: Array<{ start: number; end: number; body: string }> = [];
   for (let start = 0; start < line.length; start += 1) {
     if (line[start] !== "(" || line[start - 1] === "\\") continue;
@@ -37,7 +43,7 @@ function inferredParenthesizedMath(line: string): Array<{ start: number; end: nu
       if (line[end] === ")" && line[end - 1] !== "\\") depth -= 1;
       if (depth !== 0) continue;
       const body = line.slice(start + 1, end).trim();
-      if (body && mathScore(body) >= 3) segments.push({ start, end: end + 1, body });
+      if (body) segments.push({ start, end: end + 1, body });
       start = end;
       break;
     }
@@ -45,9 +51,27 @@ function inferredParenthesizedMath(line: string): Array<{ start: number; end: nu
   return segments;
 }
 
+function looksLikeAsciiMath(value: string): boolean {
+  const compact = value.replace(/\\[ ,;:!]/gu, "").trim();
+  if (!/[A-Za-z0-9]/u.test(compact)) return false;
+  if (!/^[A-Za-z0-9\s.,+*/=<>^_{}()[\]|\\-]+$/u.test(compact)) return false;
+  if (/[=<>]/u.test(compact)) return true;
+  if (/^[A-Za-z](?:[_^](?:[A-Za-z0-9]|\{[A-Za-z0-9]+\}))+$/u.test(compact)) return true;
+  const operand = String.raw`(?:\d+(?:\.\d+)?|[A-Za-z])`;
+  return new RegExp(`^${operand}(?:[+*/-]${operand})+$`, "u").test(compact.replace(/\s+/gu, ""));
+}
+
+function isLikelyMath(value: string): boolean {
+  return mathScore(value) >= 3 || looksLikeAsciiMath(value);
+}
+
+function inferredParenthesizedMath(line: string): ParenthesizedSegment[] {
+  return parenthesizedSegments(line).filter((segment) => isLikelyMath(segment.body));
+}
+
 interface DefinitionItem {
   body: string;
-  description: string;
+  descriptionLatex: string;
   startCol: number;
   lineWidth: number;
 }
@@ -68,8 +92,28 @@ function escapeTexText(value: string): string {
   return value.replace(/[\\{}$&#%_^~]/gu, (character) => replacements[character]!);
 }
 
+function descriptionToLatex(value: string): string {
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const segment of parenthesizedSegments(value)) {
+    if (!isLikelyMath(segment.body)) continue;
+    const prose = value.slice(cursor, segment.start);
+    if (prose) parts.push(`\\text{${escapeTexText(prose)}}`);
+    parts.push(segment.body);
+    cursor = segment.end;
+  }
+  const prose = value.slice(cursor);
+  if (prose) parts.push(`\\text{${escapeTexText(prose)}}`);
+  return parts.join("");
+}
+
+function isDefinitionSymbol(value: string): boolean {
+  return isLikelyMath(value) || /^[A-Za-z](?:[_^](?:[A-Za-z0-9]|\{[A-Za-z0-9]+\}))?$/u.test(value);
+}
+
 function definitionItem(line: string): DefinitionItem | undefined {
-  for (const segment of inferredParenthesizedMath(line)) {
+  for (const segment of parenthesizedSegments(line)) {
+    if (!isDefinitionSymbol(segment.body)) continue;
     const prefix = line.slice(0, segment.start);
     if (!/^\s*(?:[-*•]\s+|\d+[.)]\s+)$/u.test(prefix)) continue;
     const suffix = line.slice(segment.end);
@@ -77,7 +121,7 @@ function definitionItem(line: string): DefinitionItem | undefined {
     if (!description) continue;
     return {
       body: segment.body,
-      description,
+      descriptionLatex: descriptionToLatex(description),
       startCol: visualColumn(line, segment.start),
       lineWidth: stringWidth(line)
     };
@@ -95,7 +139,7 @@ function inferredDefinitionGroup(lines: string[], startRow: number): FormulaRegi
   if (items.length < 2) return undefined;
 
   const latexRows = items
-    .map((item) => `${item.body} & \\text{${escapeTexText(item.description)}}`)
+    .map((item) => `${item.body} & ${item.descriptionLatex}`)
     .join("\\\\");
   return {
     startRow,
@@ -156,7 +200,7 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
       }
 
       const latex = normalizeLatex(body);
-      if (endRow > row && latex && (explicit || mathScore(latex) >= 3)) {
+      if (endRow > row && latex && (explicit || isLikelyMath(latex))) {
         regions.push({
           startRow: row,
           endRow,
@@ -231,10 +275,14 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
 }
 
 export const detectorInternals = {
+  descriptionToLatex,
   definitionItem,
   escapeTexText,
   inferredDefinitionGroup,
   inferredParenthesizedMath,
+  isLikelyMath,
+  looksLikeAsciiMath,
   mathScore,
+  parenthesizedSegments,
   visualColumn
 };

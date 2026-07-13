@@ -38,7 +38,7 @@ describe("calculateFormulaGeometry", () => {
     expect(geometry.formulaWidth / geometry.formulaHeight).toBeGreaterThan(80);
   });
 
-  it("left-aligns inline math within source columns", () => {
+  it("centers ordinary inline math within its source columns", () => {
     const geometry = calculateFormulaGeometry({
       aspectRatio: 1,
       naturalHeightEx: 1,
@@ -49,8 +49,23 @@ describe("calculateFormulaGeometry", () => {
       scale: 1,
       display: false
     });
-    expect(geometry.offsetX).toBeLessThan(cell.width);
+    expect(geometry.offsetX).toBeGreaterThan(cell.width);
     expect(geometry.offsetY).toBeGreaterThanOrEqual(0);
+  });
+
+  it("left-aligns compact multi-line layouts", () => {
+    const geometry = calculateFormulaGeometry({
+      aspectRatio: 1,
+      naturalHeightEx: 1,
+      depthEx: 0,
+      columns: 12,
+      rows: 1,
+      cell,
+      scale: 1,
+      display: false,
+      leftAlign: true
+    });
+    expect(geometry.offsetX).toBeLessThan(cell.width);
   });
 
   it("aligns inline formulas using their MathJax baselines", () => {

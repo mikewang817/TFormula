@@ -93,9 +93,15 @@ The same compatibility rule applies when a TUI turns inline delimiters such as
 contents contain a recognized TeX command or similarly strong math structure;
 ordinary prose in parentheses remains unchanged.
 
+Short equations such as `E=mc^2`, `p=0`, and `c^2` are also recognized from
+their operator structure. A single letter is inferred only in a symbol
+definition item, where forms such as `- (E)：energy` are unambiguous.
+
 Consecutive definition items such as `- (\rho)：电荷密度` are rendered as one
 compact two-column MathJax array. This keeps symbols, colons, and descriptions
 aligned even though their original TeX source strings have different widths.
+Math expressions embedded in a description, including units written with
+`\text{...}`, remain mathematical content inside that array.
 
 Single-dollar expressions also require mathematical structure, which prevents
 ordinary prices such as `$12.50` from being rendered.

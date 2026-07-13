@@ -9,6 +9,7 @@ export interface FormulaGeometryInput {
   cell: CellMetrics;
   scale: number;
   display: boolean;
+  leftAlign?: boolean;
 }
 
 export interface FormulaGeometry {
@@ -55,9 +56,9 @@ export function calculateFormulaGeometry(input: FormulaGeometryInput): FormulaGe
     canvasHeight,
     formulaWidth,
     formulaHeight,
-    offsetX: input.display
-      ? Math.round((canvasWidth - formulaWidth) / 2)
-      : Math.round(horizontalPadding),
+    offsetX: input.leftAlign
+      ? Math.round(horizontalPadding)
+      : Math.round((canvasWidth - formulaWidth) / 2),
     offsetY: input.display
       ? Math.round((canvasHeight - formulaHeight) / 2)
       : Math.max(0, Math.min(maxOffsetY, baselineOffsetY))

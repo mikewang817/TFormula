@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MathRenderer, readSvgDimensions } from "../src/math-renderer.js";
+import { MathRenderer, readSvgDimensions, renderMathJaxSvg } from "../src/math-renderer.js";
 
 describe("MathRenderer", () => {
   it("reads MathJax ex dimensions", () => {
@@ -7,6 +7,13 @@ describe("MathRenderer", () => {
       .toEqual({ aspectRatio: 4, heightEx: 2.5, depthEx: 0 });
     expect(readSvgDimensions('<svg style="vertical-align: -0.5ex" width="2ex" height="1.5ex"></svg>'))
       .toEqual({ aspectRatio: 4 / 3, heightEx: 1.5, depthEx: 0.5 });
+  });
+
+  it("keeps complete operator expressions in inline MathJax output", async () => {
+    const svg = await renderMathJaxSvg("E=mc^2", false, 160);
+    const dimensions = readSvgDimensions(svg);
+    expect(dimensions.aspectRatio).toBeGreaterThan(3);
+    expect(svg.match(/<use\b/gu)?.length ?? 0).toBeGreaterThanOrEqual(5);
   });
 
   it("renders a PNG exactly matching the terminal cell rectangle", async () => {

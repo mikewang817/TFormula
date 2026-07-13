@@ -24,6 +24,11 @@ describe("detectFormulaRegions", () => {
     expect(regions[0]?.confidence).toBe("inferred");
   });
 
+  it("infers a short equation inside a bare bracket display block", () => {
+    const [region] = detectFormulaRegions(["[", "E=mc^2", "]"]);
+    expect(region).toMatchObject({ latex: "E=mc^2", display: true, confidence: "inferred" });
+  });
+
   it("does not mistake a normal bracketed list for math", () => {
     expect(detectFormulaRegions(["[", "alpha, beta, gamma", "]"])).toEqual([]);
   });
@@ -71,6 +76,26 @@ describe("detectFormulaRegions", () => {
     expect(region?.latex).toContain("\\mu_0 & \\text{：真空磁导率}");
   });
 
+  it("supports simple symbols and embedded math in a definition group", () => {
+    const [region] = detectFormulaRegions([
+      "- (E)：物体的静止能量",
+      "- (m)：物体的静止质量",
+      "- (c)：真空中的光速，约为 (3.0\\times10^8\\ \\text{m/s})"
+    ]);
+    expect(region).toMatchObject({ startRow: 0, endRow: 2, compact: true });
+    expect(region?.latex).toContain("E & \\text{：物体的静止能量}");
+    expect(region?.latex).toContain(
+      "c & \\text{：真空中的光速，约为 }3.0\\times10^8\\ \\text{m/s}"
+    );
+  });
+
+  it("infers compact ASCII math but leaves ordinary parenthetical prose alone", () => {
+    const regions = detectFormulaRegions([
+      "当粒子静止，即动量 (p=0) 时，光速平方为 (c^2)，单位制 (SI)，接口为 (input/output)"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual(["p=0", "c^2"]);
+  });
+
   it("supports nested parentheses inside inferred inline formulas", () => {
     const [region] = detectFormulaRegions(["value (\\operatorname{Var}(X_i))：方差"]);
     expect(region?.latex).toBe("\\operatorname{Var}(X_i)");
@@ -81,5 +106,7 @@ describe("math scoring", () => {
   it("scores structured latex above prose", () => {
     expect(detectorInternals.mathScore("\\frac{P_i}{Q_i}")).toBeGreaterThan(3);
     expect(detectorInternals.mathScore("ordinary prose")).toBe(0);
+    expect(detectorInternals.isLikelyMath("E=mc^2")).toBe(true);
+    expect(detectorInternals.isLikelyMath("SI")).toBe(false);
   });
 });

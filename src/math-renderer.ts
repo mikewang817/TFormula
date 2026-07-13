@@ -88,6 +88,29 @@ function resizeNestedSvg(svg: string, x: number, y: number, width: number, heigh
   });
 }
 
+export async function renderMathJaxSvg(
+  latex: string,
+  display: boolean,
+  containerWidth: number
+): Promise<string> {
+  const mathJax = await getMathJax();
+  // MathJax 4.1 can treat top-level relation and binary operators as inline
+  // line-break opportunities and return only the first fragment when called
+  // with display:false. Convert in display mode and force textstyle instead;
+  // this preserves complete inline expressions without enlarging their glyphs.
+  const source = display ? safeLatex(latex) : `\\textstyle{${safeLatex(latex)}}`;
+  const node = await mathJax.tex2svgPromise(source, {
+    display: true,
+    em: 16,
+    ex: 8,
+    containerWidth
+  });
+  const adaptor = mathJax.startup.adaptor;
+  const svgNode = adaptor.tags(node, "svg")[0];
+  if (!svgNode) throw new Error("MathJax produced no SVG");
+  return adaptor.serializeXML(svgNode);
+}
+
 export class MathRenderer {
   readonly #cache = new Map<string, RenderedFormula>();
 
@@ -113,17 +136,11 @@ export class MathRenderer {
     const cached = this.#cache.get(cacheKey);
     if (cached) return cached;
 
-    const mathJax = await getMathJax();
-    const node = await mathJax.tex2svgPromise(safeLatex(region.latex), {
-      display: region.display,
-      em: 16,
-      ex: 8,
-      containerWidth: Math.max(80, columns * 16)
-    });
-    const adaptor = mathJax.startup.adaptor;
-    const svgNode = adaptor.tags(node, "svg")[0];
-    if (!svgNode) throw new Error("MathJax produced no SVG");
-    const formulaSvg = adaptor.serializeXML(svgNode);
+    const formulaSvg = await renderMathJaxSvg(
+      region.latex,
+      region.display,
+      Math.max(80, columns * 16)
+    );
     const dimensions = readSvgDimensions(formulaSvg);
     const geometry = calculateFormulaGeometry({
       aspectRatio: dimensions.aspectRatio,
@@ -133,7 +150,8 @@ export class MathRenderer {
       rows,
       cell: capabilities.cell,
       scale,
-      display: region.display
+      display: region.display,
+      leftAlign: region.compact
     });
     const nested = resizeNestedSvg(
       formulaSvg,
