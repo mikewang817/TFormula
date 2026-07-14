@@ -21,8 +21,10 @@ interface SvgDimensions {
 }
 
 let mathJaxPromise: Promise<MathJaxApi> | undefined;
-const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-svg-v1";
-const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v1";
+// v2 rejects MathJax's visual error boxes instead of persisting them as if
+// they were successful formula images.
+const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-svg-v3";
+const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v2";
 const CANONICAL_CONTAINER_WIDTH = 100_000;
 
 function mathJaxCacheRequest(latex: string, display: boolean): { source: string; svgKey: string } {
@@ -47,8 +49,13 @@ async function getMathJax(): Promise<MathJaxApi> {
     mathJaxPromise = import("@mathjax/src").then(async (module) => {
       const mathJax = module.default as unknown as MathJaxApi;
       await mathJax.init({
-        loader: { load: ["input/tex", "output/svg"] },
-        tex: { maxBuffer: 8192 },
+        loader: {
+          load: ["input/tex", "[tex]/mhchem", "[tex]/physics", "output/svg"]
+        },
+        tex: {
+          maxBuffer: 8192,
+          packages: { "[+]": ["mhchem", "physics"] }
+        },
         svg: { fontCache: "local" }
       });
       return mathJax;
@@ -93,6 +100,14 @@ function safeLatex(latex: string): string {
     throw new Error("formula contains a disabled command");
   }
   return latex;
+}
+
+function assertValidMathJaxSvg(svg: string): void {
+  const redErrorText = /<g\b(?=[^>]*\bdata-mml-node=["']mtext["'])(?=[^>]*\bfill=["']red["'])(?=[^>]*\bstroke=["']red["'])[^>]*>/iu;
+  if (/\bdata-mjx-error\s*=|\bdata-mml-node=["']merror["']|<merror\b/iu.test(svg)
+    || redErrorText.test(svg)) {
+    throw new Error("MathJax could not parse the formula");
+  }
 }
 
 export function normalizeLatexForRendering(latex: string): string {
@@ -150,7 +165,7 @@ export async function renderMathJaxSvg(
   // with display:false. Convert in display mode and force textstyle instead;
   // this preserves complete inline expressions without enlarging their glyphs.
   const { source, svgKey } = mathJaxCacheRequest(latex, display);
-  return cache.getOrCreateSvg(svgKey, async () => {
+  const svg = await cache.getOrCreateSvg(svgKey, async () => {
     const mathJax = await getMathJax();
     const node = await mathJax.tex2svgPromise(source, {
       display: true,
@@ -161,8 +176,20 @@ export async function renderMathJaxSvg(
     const adaptor = mathJax.startup.adaptor;
     const svgNode = adaptor.tags(node, "svg")[0];
     if (!svgNode) throw new Error("MathJax produced no SVG");
-    return adaptor.serializeXML(svgNode);
+    const serialized = adaptor.serializeXML(svgNode);
+    assertValidMathJaxSvg(serialized);
+    return serialized;
   });
+  // Validate cache hits too. MathJax also represents unknown commands as red
+  // mtext rather than merror; discard such legacy entries so they cannot
+  // poison every later render of the same source.
+  try {
+    assertValidMathJaxSvg(svg);
+  } catch (error) {
+    await cache.deleteSvg(svgKey);
+    throw error;
+  }
+  return svg;
 }
 
 export class MathRenderer {
@@ -185,6 +212,9 @@ export class MathRenderer {
       svgKey,
       display: region.display,
       compact: Boolean(region.compact),
+      displayRange: region.displayRange,
+      composite: Boolean(region.composite),
+      wrapSegments: region.wrapSegments,
       columns,
       rows,
       cell: { width: capabilities.cell.width, height: capabilities.cell.height },
@@ -202,33 +232,76 @@ export class MathRenderer {
       this.persistentCache
     );
     const dimensions = readSvgDimensions(formulaSvg);
+    const logicalColumns = region.displayRange
+      ? Math.max(1, region.displayRange.endCol - region.displayRange.startCol)
+      : region.wrapSegments
+      ? Math.max(...region.wrapSegments.map((segment) =>
+        segment.logicalStartCol + segment.endCol - segment.startCol
+      ))
+      : columns;
+    const segmented = Boolean(region.wrapSegments?.length);
+    const rangedDisplay = Boolean(region.displayRange);
     const geometry = calculateFormulaGeometry({
       aspectRatio: dimensions.aspectRatio,
       naturalHeightEx: dimensions.heightEx,
       depthEx: dimensions.depthEx,
-      columns,
-      rows,
+      columns: logicalColumns,
+      rows: segmented || rangedDisplay ? 1 : rows,
       cell: capabilities.cell,
       scale,
-      display: region.display,
-      leftAlign: region.compact
+      display: segmented || rangedDisplay ? false : region.display,
+      leftAlign: !region.display || Boolean(region.compact)
     });
+    const nestedX = geometry.offsetX
+      + (region.displayRange?.startCol ?? 0) * capabilities.cell.width;
     const nested = resizeNestedSvg(
       formulaSvg,
-      geometry.offsetX,
+      nestedX,
       geometry.offsetY,
       geometry.formulaWidth,
       geometry.formulaHeight
     );
-    const wrapper = [
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${geometry.canvasWidth}" height="${geometry.canvasHeight}" viewBox="0 0 ${geometry.canvasWidth} ${geometry.canvasHeight}">`,
-      `<rect width="100%" height="100%" fill="${escapeAttribute(background)}"/>`,
-      `<g color="${escapeAttribute(foreground)}" fill="${escapeAttribute(foreground)}">${nested}</g>`,
-      "</svg>"
-    ].join("");
+    const content = `<g color="${escapeAttribute(foreground)}" fill="${escapeAttribute(foreground)}">${nested}</g>`;
+    const canvasWidth = Math.max(1, Math.round(columns * capabilities.cell.width));
+    const canvasHeight = Math.max(1, Math.round(rows * capabilities.cell.height));
+    const sliceBackgrounds = region.wrapSegments?.map((segment) => {
+      const x = segment.startCol * capabilities.cell.width;
+      const y = segment.rowOffset * capabilities.cell.height;
+      const width = (segment.endCol - segment.startCol) * capabilities.cell.width;
+      return `<rect x="${x}" y="${y}" width="${width}" height="${capabilities.cell.height}" fill="${escapeAttribute(background)}"/>`;
+    }) ?? [];
+    const wrapper = region.displayRange && region.wrapSegments?.length
+      ? [
+          `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasWidth}" height="${canvasHeight}" viewBox="0 0 ${canvasWidth} ${canvasHeight}">`,
+          ...sliceBackgrounds,
+          content,
+          "</svg>"
+        ].join("")
+      : region.wrapSegments?.length
+      ? [
+          `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasWidth}" height="${canvasHeight}" viewBox="0 0 ${canvasWidth} ${canvasHeight}">`,
+          ...region.wrapSegments.map((segment) => {
+            const destinationX = segment.startCol * capabilities.cell.width;
+            const destinationY = segment.rowOffset * capabilities.cell.height;
+            const sourceX = segment.logicalStartCol * capabilities.cell.width;
+            const width = (segment.endCol - segment.startCol) * capabilities.cell.width;
+            return [
+              `<svg x="${destinationX}" y="${destinationY}" width="${width}" height="${capabilities.cell.height}" viewBox="${sourceX} 0 ${width} ${capabilities.cell.height}" overflow="hidden">`,
+              `<rect x="${sourceX}" width="${width}" height="${capabilities.cell.height}" fill="${escapeAttribute(background)}"/>`,
+              content,
+              "</svg>"
+            ].join("");
+          }),
+          "</svg>"
+        ].join("")
+      : [
+          `<svg xmlns="http://www.w3.org/2000/svg" width="${geometry.canvasWidth}" height="${geometry.canvasHeight}" viewBox="0 0 ${geometry.canvasWidth} ${geometry.canvasHeight}">`,
+          `<rect width="100%" height="100%" fill="${escapeAttribute(background)}"/>`,
+          content,
+          "</svg>"
+        ].join("");
     const png = await this.persistentCache.getOrCreatePng(cacheKey, async () =>
       new Resvg(wrapper, {
-        background: background,
         fitTo: { mode: "original" }
       }).render().asPng()
     );
@@ -237,8 +310,8 @@ export class MathRenderer {
       cacheKey,
       columns,
       rows,
-      widthPx: geometry.canvasWidth,
-      heightPx: geometry.canvasHeight
+      widthPx: canvasWidth,
+      heightPx: canvasHeight
     };
     this.#cache.set(cacheKey, rendered);
     if (this.#cache.size > 256) this.#cache.delete(this.#cache.keys().next().value!);

@@ -42,6 +42,10 @@ function fail(message: string): never {
   process.exit(2);
 }
 
+export function isTFormulaActive(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.TFORMULA_ACTIVE === "1";
+}
+
 export function parseArgs(argv: string[]): CliOptions | "help" | "version" {
   let cwd = process.cwd();
   let renderMath = true;
@@ -95,8 +99,28 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { capabilities, pendingInput } = await probeTerminal(parsed.cellOverride);
-  const exitCode = await runProxy(parsed, capabilities, pendingInput);
+  // Every TFormula layer owns the same terminal, image-id range, and screen
+  // mirror. Nesting two proxies makes them overwrite and delete each other's
+  // images, and an older outer layer can expose direct-transfer Base64 as
+  // ordinary text. Help/version remain available inside a managed shell, but
+  // starting a second proxy must fail before probing or spawning a PTY.
+  if (isTFormulaActive()) {
+    process.stderr.write(
+      "tformula: TFormula is already active; run the agent command directly inside the existing session\n"
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  const { capabilities, pendingInput, startupProbePending } = await probeTerminal(
+    parsed.cellOverride
+  );
+  const exitCode = await runProxy(
+    parsed,
+    capabilities,
+    pendingInput,
+    startupProbePending
+  );
   process.exitCode = exitCode;
 }
 

@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { detectFormulaRegions, detectorInternals } from "../src/detect.js";
 
 describe("detectFormulaRegions", () => {
+  it("does not infer a second formula inside an explicit delimiter", () => {
+    const regions = detectFormulaRegions(["value \\(\\operatorname{Var}(X_i)\\) suffix"]);
+    expect(regions).toHaveLength(1);
+    expect(regions[0]).toMatchObject({
+      latex: "\\operatorname{Var}(X_i)",
+      confidence: "explicit"
+    });
+  });
+
   it("detects an explicit display block", () => {
     const regions = detectFormulaRegions([
       "before",
@@ -33,6 +42,46 @@ describe("detectFormulaRegions", () => {
   it("does not expand display delimiters embedded in prose", () => {
     const [region] = detectFormulaRegions(["", "before $$x=1$$ after", ""]);
     expect(region).toMatchObject({ startRow: 1, endRow: 1 });
+  });
+
+  it("detects every numbered display equation without assigning layout semantics", () => {
+    const regions = detectFormulaRegions([
+      "1. $$\\oiint_S \\mathbf E \\cdot d\\mathbf A=Q/\\varepsilon_0$$",
+      "2. $$\\oiint_S \\mathbf B \\cdot d\\mathbf A=0$$",
+      "3. $$\\oint_C \\mathbf E \\cdot d\\mathbf l=-\\frac{d}{dt}\\oiint_S \\mathbf B \\cdot d\\mathbf A$$",
+      "4. $$\\oint_C \\mathbf B \\cdot d\\mathbf l=\\mu_0 I+\\mu_0\\varepsilon_0\\frac{d}{dt}\\oiint_S \\mathbf E \\cdot d\\mathbf A$$"
+    ]);
+    expect(regions).toHaveLength(4);
+    expect(regions.map((region) => region.startCol)).toEqual([3, 3, 3, 3]);
+    expect(regions.every((region) => region.display)).toBe(true);
+  });
+
+  it("reassembles display math hard-wrapped by a terminal TUI", () => {
+    const [region] = detectFormulaRegions([
+      "4. $$\\oint_C \\mathbf{B} \\cdot d\\mathbf{l} = \\mu_0 I_{\\mathrm{enc}} +",
+      "\\mu_0\\varepsilon_0\\frac{d}{dt}\\int_S \\mathbf{E} \\cdot d\\mathbf{A}$$"
+    ]);
+    expect(region).toMatchObject({
+      startRow: 0,
+      endRow: 1,
+      startCol: 3,
+      display: true,
+      confidence: "explicit"
+    });
+    expect(region?.latex).toContain("\\oint_C \\mathbf{B}");
+    expect(region?.latex).toContain("d\\mathbf{A}");
+  });
+
+  it("does not give a shared blank row to only one of two displays", () => {
+    const regions = detectFormulaRegions([
+      "$$\\frac{1}{x}$$",
+      "",
+      "$$\\frac{1}{x}$$"
+    ]);
+    expect(regions).toHaveLength(2);
+    expect(regions.map((region) => region.endRow - region.startRow + 1)).toEqual([1, 1]);
+    expect(regions.map((region) => region.endCol - region.startCol))
+      .toEqual([regions[0]!.endCol, regions[0]!.endCol]);
   });
 
   it("infers the bracket form left by terminal markdown renderers", () => {
@@ -79,6 +128,61 @@ describe("detectFormulaRegions", () => {
     expect(detectFormulaRegions(["value is $x_i^2$ today"])).toHaveLength(1);
   });
 
+  it("supports ordinary one-letter and scripted single-dollar math", () => {
+    const regions = detectFormulaRegions([
+      "variables $x$, $c^2$, $E_0$, $f(t)$, and $\\rho$; not prose $USD$ or price $12.50$"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual(["x", "c^2", "E_0", "f(t)", "\\rho"]);
+    expect(regions.every((region) => region.confidence === "explicit")).toBe(true);
+  });
+
+  it("detects compound scripts inside explicit single-dollar delimiters", () => {
+    const regions = detectFormulaRegions([
+      "identities $x^2+y^2$, $10^8$, $a_{n+1}$, and product $xy$"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual([
+      "x^2+y^2",
+      "10^8",
+      "a_{n+1}",
+      "xy"
+    ]);
+  });
+
+  it("leaves TeX-looking Markdown code spans and fences untouched", () => {
+    const regions = detectFormulaRegions([
+      "render $x^2$, but show `$y^2$` and `\\(z^2\\)` literally",
+      "~~~latex",
+      "$$E=mc^2$$",
+      "~~~",
+      "afterwards $p^2$"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual(["x^2", "p^2"]);
+  });
+
+  it("only closes a Markdown fence with the same marker and sufficient length", () => {
+    const regions = detectFormulaRegions([
+      "````math",
+      "$x$",
+      "```",
+      "$y$",
+      "~~~~",
+      "$z$",
+      "````",
+      "$w$"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual(["w"]);
+  });
+
+  it("keeps escaped dollars inside dollar-delimited formulas", () => {
+    const regions = detectFormulaRegions([
+      "inline $x=\\$5$ and display $$y=\\$10$$"
+    ]);
+    expect(regions.map((region) => [region.latex, region.display])).toEqual([
+      ["y=\\$10", true],
+      ["x=\\$5", false]
+    ]);
+  });
+
   it("infers inline math when a TUI strips backslashes from delimiters", () => {
     const regions = detectFormulaRegions([
       "- (\\rho)：电荷密度",
@@ -87,6 +191,66 @@ describe("detectFormulaRegions", () => {
     expect(regions).toHaveLength(1);
     expect(regions[0]?.latex).toBe("\\rho");
     expect(regions.every((region) => region.confidence === "inferred" && !region.display)).toBe(true);
+  });
+
+  it("infers common functions and uppercase Greek after delimiters are stripped", () => {
+    const regions = detectFormulaRegions([
+      "angle (\\Delta) and signal (\\sin x), but note (ordinary prose)"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual(["\\Delta", "\\sin x"]);
+  });
+
+  it("detects each inferred symbol without interpreting its surrounding sentence", () => {
+    const regions = detectFormulaRegions([
+      "其中 (\\mathbf E) 为电场，(\\mathbf B) 为磁感应强度，(\\rho) 为电荷密度"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual([
+      "\\mathbf E",
+      "\\mathbf B",
+      "\\rho"
+    ]);
+    expect(regions.every((region) => region.confidence === "inferred")).toBe(true);
+  });
+
+  it("detects explicit symbols independently from a paired prose clause", () => {
+    const regions = detectFormulaRegions([
+      "其中 \\(\\mathbf E\\) 为电场，\\(\\mathbf B\\) 为磁感应强度，"
+      + "\\(\\varepsilon_0\\)、\\(\\mu_0\\) 分别为真空介电常数与磁导率。"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual([
+      "\\mathbf E",
+      "\\mathbf B",
+      "\\varepsilon_0",
+      "\\mu_0"
+    ]);
+    expect(regions.every((region) => region.confidence === "explicit")).toBe(true);
+  });
+
+  it("infers chemistry and physics commands after delimiters are stripped", () => {
+    const regions = detectFormulaRegions([
+      "reaction (\\ce{2H2 + O2 -> 2H2O}) and rate (\\dv{x}{t})"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual([
+      "\\ce{2H2 + O2 -> 2H2O}",
+      "\\dv{x}{t}"
+    ]);
+  });
+
+  it("renders a lone definition symbol without requiring a consecutive group", () => {
+    const regions = detectFormulaRegions(["- (E): rest energy"]);
+    expect(regions).toEqual([expect.objectContaining({
+      startCol: 2,
+      endCol: 5,
+      latex: "E",
+      display: false,
+      confidence: "inferred"
+    })]);
+  });
+
+  it("does not duplicate a TeX symbol in a lone definition", () => {
+    const regions = detectFormulaRegions(["- (\\rho): charge density"]);
+    expect(regions).toHaveLength(1);
+    expect(regions[0]?.latex).toBe("\\rho");
   });
 
   it("aligns consecutive symbol definitions as a compact two-column group", () => {
@@ -131,9 +295,32 @@ describe("detectFormulaRegions", () => {
     expect(regions.map((region) => region.latex)).toEqual(["p=0", "c^2"]);
   });
 
+  it("infers compound scripted ASCII math after delimiters are stripped", () => {
+    const regions = detectFormulaRegions([
+      "identities (x^2+y^2), scale (10^8), sequence (a_{n+1}), but release (version_2)"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual([
+      "x^2+y^2",
+      "10^8",
+      "a_{n+1}"
+    ]);
+  });
+
   it("supports nested parentheses inside inferred inline formulas", () => {
     const [region] = detectFormulaRegions(["value (\\operatorname{Var}(X_i))：方差"]);
     expect(region?.latex).toBe("\\operatorname{Var}(X_i)");
+  });
+
+  it("detects display blocks longer than the old sixteen-row window", () => {
+    const body = Array.from({ length: 20 }, (_, index) => `x_${index}+`);
+    const [region] = detectFormulaRegions(["\\[", ...body, "x=1", "\\]"]);
+    expect(region).toMatchObject({
+      startRow: 0,
+      endRow: 22,
+      display: true,
+      confidence: "explicit"
+    });
+    expect(region?.latex).toContain("x_19+");
   });
 });
 

@@ -138,6 +138,19 @@ stays next to the rendered expression. The common reciprocal-root form
 `1/\sqrt{...}` is typeset as `\frac{1}{\sqrt{...}}`; slashes in ordinary units
 such as `m/s` are left unchanged.
 
+When TeX soft-wraps at the terminal edge, or a terminal TUI inserts hard rows at
+its own content width, TFormula reassembles the expression and paints it through
+transparent per-row slices. Text sharing the first or last physical row remains
+visible. Inline glyphs are left-aligned with the source span so they stay next
+to preceding prose. Standalone display equations use the full terminal width;
+embedded display equations are centered inside the safe geometric interval
+between their prefix and suffix, so equations with different TeX source lengths
+share one center line. For inline content, the layout layer generically composes
+formula tokens and literal-text tokens from the first formula to the line end.
+It does not interpret the surrounding language. This moves otherwise
+unavoidable source-width padding to the harmless end of the line while the
+original terminal cells remain intact for copying and TUI cursor correctness.
+
 If a terminal does not answer pixel-size queries, TFormula falls back to 9x18
 pixels. You can override that explicitly:
 

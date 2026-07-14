@@ -47,8 +47,10 @@
     "linux"
   ],
   "dependencies": {
+    "@mathjax/mathjax-mhchem-font-extension": "^4.1.3",
     "@mathjax/src": "^4.1.3",
     "@resvg/resvg-js": "^2.6.2",
+    "@xterm/addon-unicode-graphemes": "^0.4.0",
     "@xterm/headless": "^6.0.0",
     "node-pty": "^1.1.0",
     "string-width": "^8.1.0"

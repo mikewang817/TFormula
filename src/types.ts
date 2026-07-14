@@ -12,6 +12,16 @@ export interface TerminalCapabilities {
   windowPixels?: { width: number; height: number };
 }
 
+export interface FormulaWrapSegment {
+  /** Physical row offset from FormulaRegion.startRow. */
+  rowOffset: number;
+  /** Destination columns occupied by source TeX on this physical row. */
+  startCol: number;
+  endCol: number;
+  /** Column offset of this slice in the reassembled source span. */
+  logicalStartCol: number;
+}
+
 export interface FormulaRegion {
   startRow: number;
   endRow: number;
@@ -22,6 +32,16 @@ export interface FormulaRegion {
   confidence: "explicit" | "inferred";
   /** Use the detected region width even when the formula spans several rows. */
   compact?: boolean;
+  /** Safe terminal-column interval used to center an embedded display. */
+  displayRange?: { startCol: number; endCol: number };
+  /** The region combines literal terminal text and inline formula tokens. */
+  composite?: boolean;
+  /**
+   * Slices of a soft- or hard-wrapped source span. The placed image still uses
+   * a rectangular terminal canvas, but pixels outside these slices remain
+   * transparent so prose before and after the formula is not covered.
+   */
+  wrapSegments?: FormulaWrapSegment[];
 }
 
 export interface RenderedFormula {

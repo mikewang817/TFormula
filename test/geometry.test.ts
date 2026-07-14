@@ -53,7 +53,7 @@ describe("calculateFormulaGeometry", () => {
     expect(geometry.formulaWidth / geometry.formulaHeight).toBeGreaterThan(80);
   });
 
-  it("centers ordinary inline math within its source columns", () => {
+  it("left-aligns ordinary inline math beside its preceding text", () => {
     const geometry = calculateFormulaGeometry({
       aspectRatio: 1,
       naturalHeightEx: 1,
@@ -62,9 +62,10 @@ describe("calculateFormulaGeometry", () => {
       rows: 1,
       cell,
       scale: 1,
-      display: false
+      display: false,
+      leftAlign: true
     });
-    expect(geometry.offsetX).toBeGreaterThan(cell.width);
+    expect(geometry.offsetX).toBeLessThan(cell.width);
     expect(geometry.offsetY).toBeGreaterThanOrEqual(0);
   });
 

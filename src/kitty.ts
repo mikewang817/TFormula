@@ -19,13 +19,6 @@ export function kittyDeleteByZIndex(): string {
   return `${APC_START}a=d,d=Z,z=${TFORMULA_Z_INDEX},q=2${ST}`;
 }
 
-export function kittyDeleteRange(
-  firstImageId = TFORMULA_IMAGE_ID_MIN,
-  lastImageId = TFORMULA_IMAGE_ID_MAX
-): string {
-  return `${APC_START}a=d,d=R,x=${firstImageId},y=${lastImageId},q=2${ST}`;
-}
-
 export function kittyTransmitAndPlace(
   png: Uint8Array,
   imageId: number,
@@ -44,9 +37,13 @@ export function kittyTransmitAndPlace(
   return chunks.map((chunk, index) => {
     const first = index === 0;
     const more = index < chunks.length - 1 ? 1 : 0;
+    // Suppress acknowledgements for intermediate chunks, but request one for
+    // the final packet.  The cache must distinguish "queued to stdout" from
+    // "accepted by the terminal" before it can reset an error retry budget.
+    const quiet = more ? 1 : 0;
     const controls = first
-      ? `a=T,f=100,t=d,i=${imageId},q=2,c=${columns},r=${rows},C=1,z=${TFORMULA_Z_INDEX},m=${more}`
-      : `m=${more},q=2`;
+      ? `a=T,f=100,t=d,i=${imageId},q=${quiet},c=${columns},r=${rows},C=1,z=${TFORMULA_Z_INDEX},m=${more}`
+      : `m=${more},q=${quiet}`;
     return `${APC_START}${controls};${chunk}${ST}`;
   }).join("");
 }
@@ -58,11 +55,18 @@ export function kittyTransmitImage(png: Uint8Array, imageId: number): string {
   return chunks.map((chunk, index) => {
     const first = index === 0;
     const more = index < chunks.length - 1 ? 1 : 0;
+    const quiet = more ? 1 : 0;
     const controls = first
-      ? `a=t,f=100,t=d,i=${imageId},q=2,m=${more}`
-      : `m=${more},q=2`;
+      ? `a=t,f=100,t=d,i=${imageId},q=${quiet},m=${more}`
+      : `m=${more},q=${quiet}`;
     return `${APC_START}${controls};${chunk}${ST}`;
   }).join("");
+}
+
+/** Upload a PNG through a terminal-owned temporary file. */
+export function kittyTransmitImageFile(path: string, imageId: number): string {
+  const encodedPath = Buffer.from(path, "utf8").toString("base64");
+  return `${APC_START}a=t,f=100,t=t,i=${imageId},q=0;${encodedPath}${ST}`;
 }
 
 /** Place image data that has already been uploaded to the terminal. */
@@ -72,7 +76,7 @@ export function kittyPlaceImage(
   columns: number,
   rows: number
 ): string {
-  return `${APC_START}a=p,i=${imageId},p=${placementId},q=2,c=${columns},r=${rows},C=1,z=${TFORMULA_Z_INDEX}${ST}`;
+  return `${APC_START}a=p,i=${imageId},p=${placementId},q=0,c=${columns},r=${rows},C=1,z=${TFORMULA_Z_INDEX}${ST}`;
 }
 
 export function cursorPosition(row: number, column: number): string {

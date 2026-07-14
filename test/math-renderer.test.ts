@@ -1,4 +1,8 @@
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { FormulaCache } from "../src/formula-cache.js";
 import {
   MathRenderer,
   normalizeLatexForRendering,
@@ -19,6 +23,66 @@ describe("MathRenderer", () => {
     const dimensions = readSvgDimensions(svg);
     expect(dimensions.aspectRatio).toBeGreaterThan(3);
     expect(svg.match(/<use\b/gu)?.length ?? 0).toBeGreaterThanOrEqual(5);
+  });
+
+  it("rejects MathJax error boxes instead of caching them as formula images", async () => {
+    await expect(renderMathJaxSvg("\\frac{1}", false, 160))
+      .rejects.toThrow("MathJax could not parse the formula");
+  });
+
+  it("rejects unknown commands that MathJax otherwise paints as red source text", async () => {
+    await expect(renderMathJaxSvg("\\unknown{x}", false, 160))
+      .rejects.toThrow("MathJax could not parse the formula");
+  });
+
+  it("removes a semantic-error SVG already stored in the persistent cache", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tformula-math-error-cache-"));
+    try {
+      const cache = new FormulaCache({ root, maxDiskBytes: 0 });
+      await renderMathJaxSvg("x+1", false, 160, cache);
+      cache.clearMemory();
+      const [bucket] = await readdir(join(cache.root, "svg"));
+      const [filename] = await readdir(join(cache.root, "svg", bucket!));
+      const path = join(cache.root, "svg", bucket!, filename!);
+      await writeFile(path, '<svg width="1ex" height="1ex"><g data-mml-node="mtext" fill="red" stroke="red" data-latex="\\unknown"/></svg>');
+
+      await expect(renderMathJaxSvg("x+1", false, 160, cache))
+        .rejects.toThrow("MathJax could not parse the formula");
+      const repaired = await renderMathJaxSvg("x+1", false, 160, cache);
+      expect(repaired).toContain("<svg");
+      expect(repaired).not.toContain('fill="red" stroke="red"');
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("accepts an escaped currency symbol inside valid TeX", async () => {
+    const svg = await renderMathJaxSvg("x=\\$5", false, 160);
+    expect(svg).toContain("<svg");
+    expect(svg).not.toContain("data-mjx-error");
+  });
+
+  it("renders chemistry and physics extension commands used by technical agents", async () => {
+    for (const latex of ["\\ce{2H2 + O2 -> 2H2O}", "\\dv{x}{t}", "\\bra{\\psi}"]) {
+      const svg = await renderMathJaxSvg(latex, true, 240);
+      expect(svg, latex).toContain("<svg");
+      expect(svg, latex).not.toContain("data-mjx-error");
+    }
+  });
+
+  it("renders a representative technical formula corpus without error glyphs", async () => {
+    const formulas = [
+      "\\begin{aligned}a&=b+c\\\\d&=e\\end{aligned}",
+      "f(x)=\\begin{cases}x^2&x>0\\\\0&x\\le0\\end{cases}",
+      "\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}",
+      "\\int_{-\\infty}^{\\infty}e^{-x^2}\\,dx=\\sqrt{\\pi}",
+      "\\text{速度 }v=3.0\\times10^8\\ \\mathrm{m/s}"
+    ];
+    for (const latex of formulas) {
+      const svg = await renderMathJaxSvg(latex, true, 240);
+      expect(svg, latex).toContain("<svg");
+      expect(svg, latex).not.toMatch(/data-mjx-error|data-mml-node="merror"/u);
+    }
   });
 
   it("typesets reciprocal square roots as fractions without changing unit slashes", () => {
