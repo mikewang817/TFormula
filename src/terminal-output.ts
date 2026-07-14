@@ -28,6 +28,14 @@ export class TerminalOutputTransformer {
     input: string,
     preserveImages: boolean
   ): TransformedTerminalOutput {
+    // PTY traffic is overwhelmingly plain text. When no control introducer is
+    // present and no sequence is pending, the parser state cannot change and
+    // the input can be forwarded without a per-code-unit loop or copy.
+    if (this.#state === "ground"
+      && input.indexOf("\x1b") < 0
+      && !/[\u0090\u0098\u009b\u009d\u009e\u009f]/u.test(input)) {
+      return { data: input, preservedEraseDisplayOffsets: [] };
+    }
     let output = "";
     const preservedEraseDisplayOffsets: number[] = [];
 
@@ -199,6 +207,9 @@ export class TerminalControlGate {
 
   push(data: string): string {
     if (!data) return "";
+    if (this.#state === "ground"
+      && data.indexOf("\x1b") < 0
+      && !/[\u0090\u0098\u009b\u009d\u009e\u009f]/u.test(data)) return data;
     let output = "";
     let plainStart = this.#state === "ground" ? 0 : undefined;
 
@@ -355,8 +366,13 @@ interface SynchronizedOutputTransition {
 
 interface ConsumedTerminalText {
   textRunStart?: number;
-  /** Printable ground-state code points and their offsets in the current chunk. */
-  printable: Array<{ start: number; text: string }>;
+  /** Bounds of the last run parsed as printable ground-state text. */
+  lastPrintableRunStart?: number;
+  lastPrintableRunEnd?: number;
+  /** Absolute offset of the final printable grapheme when it starts in this chunk. */
+  lastGraphemeStart?: number;
+  /** Whether that grapheme extends a cell from an earlier chunk or text run. */
+  lastPrintableJoinsEarlier: boolean;
   synchronizedOutputModeBefore: boolean;
   synchronizedOutputTransitions: SynchronizedOutputTransition[];
 }
@@ -391,18 +407,83 @@ export class TerminalCellHoldback {
 
   #consume(data: string, collectPrintable = true): ConsumedTerminalText {
     let textRunStart: number | undefined;
-    const printable: ConsumedTerminalText["printable"] = [];
+    let lastPrintableRunStart: number | undefined;
+    let lastPrintableRunEnd: number | undefined;
+    let lastGraphemeStart: number | undefined;
+    let lastPrintableJoinsEarlier = false;
     const synchronizedOutputModeBefore = this.#synchronizedOutputMode;
     const synchronizedOutputTransitions: SynchronizedOutputTransition[] = [];
+
+    // Segment one contiguous printable run at a time. The previous
+    // implementation allocated an object for every code point, rebuilt the
+    // entire chunk, and segmented its final run a second time. Retaining only
+    // the preceding grapheme is sufficient to decide the next boundary and
+    // makes ordinary PTY output linear with very little allocation.
+    const finishTextRun = (end: number): void => {
+      if (textRunStart === undefined) return;
+      if (collectPrintable) {
+        lastPrintableRunStart = textRunStart;
+        lastPrintableRunEnd = end;
+        const previousGrapheme = this.#trailingGrapheme;
+        const previousLength = this.#trailingGrapheme.length;
+        const currentRun = data.slice(textRunStart, end);
+        const combined = this.#trailingGrapheme + currentRun;
+        const last = this.#graphemes.segment(combined).containing(combined.length - 1);
+        if (last) {
+          this.#trailingGrapheme = last.segment;
+          // xterm is more permissive than Intl.Segmenter around malformed or
+          // non-standard ZWJ chains. A positive-width cluster ending in ZWJ
+          // absorbs a following emoji even when Intl reports a boundary at the
+          // PTY callback. That emoji changes an existing cell rather than
+          // advancing by its standalone width, so it is unsafe to hold alone.
+          const xtermJoinsTrailingZwj = previousLength > 0
+            && previousGrapheme.endsWith("\u200d")
+            && last.index === previousLength
+            && /^\p{Extended_Pictographic}/u.test(last.segment);
+          // A callback that itself begins with `ZWJ + pictograph` also extends
+          // the preceding xterm cell even when the remembered grapheme is an
+          // ordinary ASCII base and Intl keeps both sides separate.
+          const leadingZwjPictograph = /^(\u200d+)\p{Extended_Pictographic}/u.exec(currentRun);
+          const xtermJoinsLeadingZwj = previousLength > 0
+            && leadingZwjPictograph !== null
+            // Only suppress holding when the final candidate is the joining
+            // pictograph itself. A later ordinary cell is independent and is
+            // still valuable as the pending-wrap preview cell.
+            && last.index === previousLength + leadingZwjPictograph[1]!.length;
+          lastPrintableJoinsEarlier = last.index < previousLength
+            || xtermJoinsTrailingZwj
+            || xtermJoinsLeadingZwj;
+          lastGraphemeStart = lastPrintableJoinsEarlier
+            ? undefined
+            : textRunStart + last.index - previousLength;
+        }
+      }
+      textRunStart = undefined;
+    };
+
     for (let index = 0; index < data.length; index += 1) {
       const code = data.codePointAt(index)!;
       const codeUnits = code > 0xffff ? 2 : 1;
+
+      if (this.#state === "ground"
+        && code >= 0x20
+        && !(code >= 0x7f && code <= 0x9f)
+        && !(code >= 0xd800 && code <= 0xdfff)) {
+        textRunStart ??= index;
+        index += codeUnits - 1;
+        continue;
+      }
+
+      // Any non-printing byte ends the current text run. xterm's grapheme
+      // provider also starts a fresh print cluster after parser controls,
+      // including SGR and cursor motion, so no lookbehind may cross one.
+      finishTextRun(index);
+      if (collectPrintable) this.#trailingGrapheme = "";
 
       // CAN and SUB cancel any escape/control string in progress.
       if (code === 0x18 || code === 0x1a) {
         this.#state = "ground";
         this.#csiParameters = "";
-        textRunStart = undefined;
         continue;
       }
 
@@ -413,45 +494,27 @@ export class TerminalCellHoldback {
         if (code === 0x9b) {
           this.#state = "csi";
           this.#csiParameters = "";
-          textRunStart = undefined;
           continue;
         }
         if (code === 0x9d) {
           this.#state = "osc";
           this.#csiParameters = "";
-          textRunStart = undefined;
           continue;
         }
         if (code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) {
           this.#state = "string";
           this.#csiParameters = "";
-          textRunStart = undefined;
           continue;
         }
         if (code === 0x9c) {
           this.#state = "ground";
           this.#csiParameters = "";
-          textRunStart = undefined;
           continue;
         }
       }
 
       if (this.#state === "ground") {
         if (code === 0x1b) this.#state = "escape";
-        else if (code >= 0x20
-          && !(code >= 0x7f && code <= 0x9f)
-          && !(code >= 0xd800 && code <= 0xdfff)) {
-          textRunStart ??= index;
-          if (collectPrintable) {
-            printable.push({
-              start: index,
-              text: data.slice(index, index + codeUnits)
-            });
-          }
-          index += codeUnits - 1;
-          continue;
-        }
-        textRunStart = undefined;
         continue;
       }
 
@@ -471,15 +534,11 @@ export class TerminalCellHoldback {
         else if (/[P_X^]/u.test(data[index]!)) this.#state = "string";
         // C0 controls are executed without cancelling the surrounding ESC
         // sequence. CAN and SUB were handled above and do cancel it.
-        else if (code < 0x20 || code === 0x7f) {
-          textRunStart = undefined;
-          continue;
-        }
+        else if (code < 0x20 || code === 0x7f) continue;
         else if (code > 0x2f) {
           this.#state = "ground";
           this.#csiParameters = "";
         }
-        textRunStart = undefined;
         continue;
       }
 
@@ -501,7 +560,6 @@ export class TerminalCellHoldback {
         } else if (code >= 0x20 && code <= 0x3f) {
           this.#csiParameters += data[index]!;
         }
-        textRunStart = undefined;
         continue;
       }
 
@@ -517,85 +575,64 @@ export class TerminalCellHoldback {
         else if (code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) {
           this.#state = "string";
         }
-        textRunStart = undefined;
         continue;
       }
     }
+
+    const trailingTextRunStart = textRunStart;
+    finishTextRun(data.length);
     return {
-      textRunStart,
-      printable,
+      textRunStart: trailingTextRunStart,
+      lastPrintableRunStart,
+      lastPrintableRunEnd,
+      lastGraphemeStart,
+      lastPrintableJoinsEarlier,
       synchronizedOutputModeBefore,
       synchronizedOutputTransitions
     };
-  }
-
-  /**
-   * Remember the terminal's trailing printable cluster and report whether the
-   * final cluster in this chunk joins text that was already sent to the real
-   * terminal (or an earlier printable run separated by terminal controls).
-   *
-   * A backward-joining suffix consumes no new cells of its own. Treating its
-   * last emoji as a standalone two-column held cell makes the pending-wrap path
-   * restore the real cursor two columns too far left. In that case push() sends
-   * the whole chunk normally instead of creating a false cursor delta.
-   */
-  #lastPrintableJoinsEarlier(consumed: ConsumedTerminalText): boolean {
-    if (consumed.printable.length === 0) return false;
-
-    let current = "";
-    const originalOffsets: number[] = [];
-    for (const printable of consumed.printable) {
-      current += printable.text;
-      for (let offset = 0; offset < printable.text.length; offset += 1) {
-        originalOffsets.push(printable.start + offset);
-      }
-    }
-
-    const previousLength = this.#trailingGrapheme.length;
-    const combined = this.#trailingGrapheme + current;
-    let last: Intl.SegmentData | undefined;
-    for (const segment of this.#graphemes.segment(combined)) last = segment;
-    if (!last) return false;
-
-    this.#trailingGrapheme = last.segment;
-    if (last.index < previousLength) return true;
-    const currentStart = last.index - previousLength;
-    const originalStart = originalOffsets[currentStart];
-    const lastPrintable = consumed.printable.at(-1)!;
-    // The ordinary hold candidate starts at the last grapheme of the final
-    // contiguous text run. If the terminal grapheme began in an earlier run,
-    // an SGR/control split the cluster and its standalone width is also unsafe.
-    let finalRunStart = consumed.printable.length - 1;
-    while (finalRunStart > 0) {
-      const previous = consumed.printable[finalRunStart - 1]!;
-      const next = consumed.printable[finalRunStart]!;
-      if (previous.start + previous.text.length !== next.start) break;
-      finalRunStart -= 1;
-    }
-    const finalRun = consumed.printable.slice(finalRunStart);
-    let candidateStart = lastPrintable.start;
-    if (finalRun.length > 0) {
-      const finalText = finalRun.map((entry) => entry.text).join("");
-      let finalSegment: Intl.SegmentData | undefined;
-      for (const segment of this.#graphemes.segment(finalText)) finalSegment = segment;
-      if (finalSegment) {
-        candidateStart = finalRun[0]!.start + finalSegment.index;
-      }
-    }
-    return originalStart !== undefined && originalStart < candidateStart;
   }
 
   #holdLastGrapheme(
     data: string,
     textRunStart: number,
     textRunEnd: number,
-    consumed: ConsumedTerminalText,
-    joinsEarlier = false
+    consumed: ConsumedTerminalText
   ): HeldTerminalCell {
     const text = data.slice(textRunStart, textRunEnd);
-    let lastGraphemeStart = 0;
-    for (const segment of this.#graphemes.segment(text)) {
-      lastGraphemeStart = segment.index;
+    const segments = this.#graphemes.segment(text);
+    let lastGraphemeStart = consumed.lastGraphemeStart !== undefined
+      && consumed.lastGraphemeStart >= textRunStart
+      && consumed.lastGraphemeStart < textRunEnd
+      ? consumed.lastGraphemeStart - textRunStart
+      : undefined;
+    if (lastGraphemeStart === undefined) {
+      lastGraphemeStart = segments.containing(text.length - 1)?.index ?? 0;
+    }
+    // xterm attaches a leading standalone ZWJ to a following pictograph. Hold
+    // that prefix as well; otherwise previewing only the pictograph can change
+    // an existing one-column placeholder into a two-column cell and make the
+    // pending-wrap cursor delta smaller than `string-width` reports.
+    let unsafeLeadingZeroWidth = false;
+    while (lastGraphemeStart > 0) {
+      const previous = segments.containing(lastGraphemeStart - 1);
+      if (!previous) break;
+      const forward = text.slice(lastGraphemeStart);
+      if (stringWidth(previous.segment) > 0) {
+        // `X ZWJ + emoji` is one xterm cell but two Intl graphemes. Holding
+        // only the emoji would report two columns even though adding it to the
+        // already-written X advances the cursor by just one.
+        if (previous.segment.endsWith("\u200d")
+          && /^\p{Extended_Pictographic}/u.test(forward)) {
+          unsafeLeadingZeroWidth = true;
+        }
+        break;
+      }
+      if (!/^\u200d+$/u.test(previous.segment)
+        || !/\p{Extended_Pictographic}/u.test(forward)) {
+        unsafeLeadingZeroWidth = true;
+        break;
+      }
+      lastGraphemeStart = previous.index;
     }
     const grapheme = text.slice(lastGraphemeStart);
     // Never hand a Writable one half of malformed UTF-16: each write encodes
@@ -604,7 +641,11 @@ export class TerminalCellHoldback {
     // The last printable token is only a suffix of a grapheme whose base cell
     // was already written. Sending the whole chunk keeps mirror and real cursor
     // state identical; there is no positive cell delta that CUP can restore.
-    if (joinsEarlier) return { data };
+    if (consumed.lastPrintableJoinsEarlier) return { data };
+    // xterm gives most isolated zero-width clusters (for example a combining
+    // mark after SGR) a one-column placeholder. `string-width` intentionally
+    // reports zero, so no reliable cursor delta exists for that prefix.
+    if (unsafeLeadingZeroWidth) return { data };
     const heldColumns = stringWidth(grapheme);
     if (heldColumns <= 0) return { data };
     const heldStart = textRunStart + lastGraphemeStart;
@@ -627,16 +668,32 @@ export class TerminalCellHoldback {
   }
 
   push(data: string): HeldTerminalCell {
+    if (!data) return { data };
+    if (this.#state === "ground"
+      && (this.#trailingGrapheme === "" || /^[\x00-\x7f]$/u.test(this.#trailingGrapheme))
+      && data.indexOf("\x1b") < 0
+      && !/[^\x00-\x7f]/u.test(data)) {
+      let lastPrintable = data.length - 1;
+      while (lastPrintable >= 0) {
+        const code = data.charCodeAt(lastPrintable);
+        if (code >= 0x20 && code !== 0x7f) break;
+        lastPrintable -= 1;
+      }
+      if (lastPrintable === data.length - 1) {
+        this.#trailingGrapheme = data[lastPrintable]!;
+        return { data: data.slice(0, -1), held: data.slice(-1) };
+      }
+      this.#trailingGrapheme = "";
+      return { data };
+    }
     const consumed = this.#consume(data);
-    const joinsEarlier = this.#lastPrintableJoinsEarlier(consumed);
     const { textRunStart } = consumed;
     if (this.#state === "ground" && textRunStart !== undefined) {
       return this.#holdLastGrapheme(
         data,
         textRunStart,
         data.length,
-        consumed,
-        joinsEarlier
+        consumed
       );
     }
     if (this.#state === "ground") {
@@ -645,18 +702,15 @@ export class TerminalCellHoldback {
       // final cell together with these trailing controls so the real terminal
       // is still one cell behind the mirror during a scan.
       const zeroCellSuffix = /(?:(?:\x1b\[|\u009b)(?:[0-?]*[ -/]*m|\?2026[hl]))+$/u.exec(data);
-      if (zeroCellSuffix?.index) {
-        const beforeControls = data.slice(0, zeroCellSuffix.index);
-        const textSuffix = /[^\x00-\x1f\x7f-\x9f]+$/u.exec(beforeControls);
-        if (textSuffix?.index !== undefined) {
-          return this.#holdLastGrapheme(
-            data,
-            textSuffix.index,
-            zeroCellSuffix.index,
-            consumed,
-            joinsEarlier
-          );
-        }
+      if (zeroCellSuffix?.index
+        && consumed.lastPrintableRunStart !== undefined
+        && consumed.lastPrintableRunEnd === zeroCellSuffix.index) {
+        return this.#holdLastGrapheme(
+          data,
+          consumed.lastPrintableRunStart,
+          zeroCellSuffix.index,
+          consumed
+        );
       }
     }
     return { data };

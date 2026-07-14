@@ -1,5 +1,11 @@
-import { Resvg } from "@resvg/resvg-js";
-import type { FormulaRegion, RenderedFormula, TerminalCapabilities } from "./types.js";
+import { renderAsync } from "@resvg/resvg-js";
+import type {
+  CellMetrics,
+  FormulaRegion,
+  FormulaWrapSegment,
+  RenderedFormula,
+  TerminalCapabilities
+} from "./types.js";
 import { calculateFormulaGeometry } from "./geometry.js";
 import { FormulaCache, formulaCacheKey, sharedFormulaCache } from "./formula-cache.js";
 
@@ -167,6 +173,70 @@ function resizeNestedSvg(svg: string, x: number, y: number, width: number, heigh
   });
 }
 
+function svgNeedsSystemFonts(svg: string): boolean {
+  // MathJax normally emits every glyph as an SVG path. Resvg otherwise scans
+  // the complete system font collection for every formula, even though those
+  // fonts cannot affect path-only output. Keep font loading for MathJax's
+  // fallback <text> nodes (for example CJK text that is not in its SVG font).
+  return /<(?:[A-Za-z_][\w.-]*:)?text(?=[\s/>])/iu.test(svg);
+}
+
+function sharedContentId(content: string): string {
+  const prefix = "tformula-sliced-content";
+  let id = prefix;
+  let suffix = 0;
+  while (content.includes(`id="${id}"`) || content.includes(`id='${id}'`)) {
+    suffix += 1;
+    id = `${prefix}-${suffix}`;
+  }
+  return id;
+}
+
+function buildHorizontallySlicedSvg(options: {
+  canvasWidth: number;
+  canvasHeight: number;
+  wrapSegments: FormulaWrapSegment[];
+  cell: CellMetrics;
+  background: string;
+  content: string;
+}): string {
+  const contentId = sharedContentId(options.content);
+  const reference = `<use href="#${contentId}"/>`;
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${options.canvasWidth}" height="${options.canvasHeight}" viewBox="0 0 ${options.canvasWidth} ${options.canvasHeight}">`,
+    `<defs><g id="${contentId}">${options.content}</g></defs>`,
+    ...options.wrapSegments.map((segment) => {
+      const destinationX = segment.startCol * options.cell.width;
+      const destinationY = segment.rowOffset * options.cell.height;
+      const sourceX = segment.logicalStartCol * options.cell.width;
+      const width = (segment.endCol - segment.startCol) * options.cell.width;
+      return [
+        `<svg x="${destinationX}" y="${destinationY}" width="${width}" height="${options.cell.height}" viewBox="${sourceX} 0 ${width} ${options.cell.height}" overflow="hidden">`,
+        `<rect x="${sourceX}" width="${width}" height="${options.cell.height}" fill="${escapeAttribute(options.background)}"/>`,
+        reference,
+        "</svg>"
+      ].join("");
+    }),
+    "</svg>"
+  ].join("");
+}
+
+function lruCacheGet<Key, Value>(cache: Map<Key, Value>, key: Key): Value | undefined {
+  const value = cache.get(key);
+  if (value === undefined) return undefined;
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+async function renderSvgToPng(svg: string, loadSystemFonts: boolean): Promise<Buffer> {
+  const rendered = await renderAsync(svg, {
+    fitTo: { mode: "original" },
+    font: { loadSystemFonts }
+  });
+  return rendered.asPng();
+}
+
 export async function renderMathJaxSvg(
   latex: string,
   display: boolean,
@@ -266,7 +336,7 @@ export class MathRenderer {
       foreground,
       background
     });
-    const cached = this.#cache.get(cacheKey);
+    const cached = lruCacheGet(this.#cache, cacheKey);
     if (cached) return cached;
 
     const formulaSvg = await renderMathJaxSvg(
@@ -313,32 +383,22 @@ export class MathRenderer {
           "</svg>"
         ].join("")
       : wrapSegments
-      ? [
-          `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasWidth}" height="${canvasHeight}" viewBox="0 0 ${canvasWidth} ${canvasHeight}">`,
-          ...wrapSegments.map((segment) => {
-            const destinationX = segment.startCol * capabilities.cell.width;
-            const destinationY = segment.rowOffset * capabilities.cell.height;
-            const sourceX = segment.logicalStartCol * capabilities.cell.width;
-            const width = (segment.endCol - segment.startCol) * capabilities.cell.width;
-            return [
-              `<svg x="${destinationX}" y="${destinationY}" width="${width}" height="${capabilities.cell.height}" viewBox="${sourceX} 0 ${width} ${capabilities.cell.height}" overflow="hidden">`,
-              `<rect x="${sourceX}" width="${width}" height="${capabilities.cell.height}" fill="${escapeAttribute(background)}"/>`,
-              content,
-              "</svg>"
-            ].join("");
-          }),
-          "</svg>"
-        ].join("")
+      ? buildHorizontallySlicedSvg({
+          canvasWidth,
+          canvasHeight,
+          wrapSegments,
+          cell: capabilities.cell,
+          background,
+          content
+        })
       : [
           `<svg xmlns="http://www.w3.org/2000/svg" width="${geometry.canvasWidth}" height="${geometry.canvasHeight}" viewBox="0 0 ${geometry.canvasWidth} ${geometry.canvasHeight}">`,
           `<rect width="100%" height="100%" fill="${escapeAttribute(background)}"/>`,
           content,
           "</svg>"
         ].join("");
-    const png = await this.persistentCache.getOrCreatePng(cacheKey, async () =>
-      new Resvg(wrapper, {
-        fitTo: { mode: "original" }
-      }).render().asPng()
+    const png = await this.persistentCache.getOrCreatePng(cacheKey, () =>
+      renderSvgToPng(wrapper, svgNeedsSystemFonts(formulaSvg))
     );
     const rendered: RenderedFormula = {
       png,
@@ -357,3 +417,10 @@ export class MathRenderer {
     this.#cache.clear();
   }
 }
+
+export const mathRendererInternals = {
+  buildHorizontallySlicedSvg,
+  lruCacheGet,
+  renderSvgToPng,
+  svgNeedsSystemFonts
+};

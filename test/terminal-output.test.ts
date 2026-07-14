@@ -343,6 +343,12 @@ describe("TerminalOutputTransformer", () => {
 });
 
 describe("TerminalCellHoldback", () => {
+  it("treats an empty PTY callback as a no-op", () => {
+    const holdback = new TerminalCellHoldback();
+    expect(holdback.push("")).toEqual({ data: "" });
+    expect(holdback.push("x")).toEqual({ data: "", held: "x" });
+  });
+
   it("holds ordinary final cells but never escape-sequence final bytes", () => {
     const holdback = new TerminalCellHoldback();
     expect(holdback.push("\x1b[31mred")).toEqual({ data: "\x1b[31mre", held: "d" });
@@ -423,11 +429,61 @@ describe("TerminalCellHoldback", () => {
     expect(holdback.push("x")).toEqual({ data: "", held: "x" });
   });
 
-  it("does not hold a backward-joining emoji suffix split by SGR controls", () => {
+  it("does not hold a leading ZWJ emoji chain that extends the prior callback", () => {
+    const holdback = new TerminalCellHoldback();
+    expect(holdback.push("a")).toEqual({ data: "", held: "a" });
+    expect(holdback.push("\u200d💻")).toEqual({ data: "\u200d💻" });
+  });
+
+  it("still holds an independent cell after a leading ZWJ emoji chain", () => {
+    const holdback = new TerminalCellHoldback();
+    expect(holdback.push("a")).toEqual({ data: "", held: "a" });
+    expect(holdback.push("\u200d💻x")).toEqual({ data: "\u200d💻", held: "x" });
+  });
+
+  it("starts a fresh held cell after SGR controls", () => {
     const holdback = new TerminalCellHoldback();
     expect(holdback.push("👩\x1b[31m\u200d💻")).toEqual({
-      data: "👩\x1b[31m\u200d💻"
+      data: "👩\x1b[31m",
+      held: "\u200d💻",
+      heldColumns: 2
     });
+  });
+
+  it("does not split xterm's permissive non-standard ZWJ cell", () => {
+    const holdback = new TerminalCellHoldback();
+    expect(holdback.push("X\u200d🧑")).toEqual({ data: "X\u200d🧑" });
+
+    const fragmented = new TerminalCellHoldback();
+    expect(fragmented.push("X\u200d")).toEqual({ data: "", held: "X\u200d" });
+    expect(fragmented.push("🧑")).toEqual({ data: "🧑" });
+  });
+
+  it("does not join regional indicators across cursor-moving controls", () => {
+    for (const control of ["\n", "\t", "\r", "\x1bD"]) {
+      const holdback = new TerminalCellHoldback();
+      expect(holdback.push(`🇳${control}🇨🇳`), JSON.stringify(control)).toEqual({
+        data: `🇳${control}`,
+        held: "🇨🇳",
+        heldColumns: 2
+      });
+    }
+  });
+
+  it("does not guess the placeholder width of an isolated combining mark", () => {
+    const holdback = new TerminalCellHoldback();
+    expect(holdback.push("e\x1b[31m\u0301x")).toEqual({
+      data: "e\x1b[31m\u0301x"
+    });
+  });
+
+  it("does not undercount leading combining or variation-selector placeholders", () => {
+    for (const input of ["\u0301X", "\ufe0fX"]) {
+      const holdback = new TerminalCellHoldback();
+      // xterm allocates placeholder cells to these leading zero-width clusters,
+      // while string-width reports zero. Conservatively forward the whole run.
+      expect(holdback.push(input), JSON.stringify(input)).toEqual({ data: input });
+    }
   });
 
   it("holds the final grapheme together with trailing SGR controls", () => {
@@ -441,6 +497,17 @@ describe("TerminalCellHoldback", () => {
       data: "valu",
       held: "e\x1b[1m\x1b[0m"
     });
+  });
+
+  it("never mistakes ESC or control-string final bytes for printable cells", () => {
+    for (const data of [
+      "\x1bD\x1b[31m",
+      "\x1b_Gx\x1b\\\x1b[31m",
+      "\x1b]0;x\x1b\\\x1b[31m"
+    ]) {
+      const holdback = new TerminalCellHoldback();
+      expect(holdback.push(data), JSON.stringify(data)).toEqual({ data });
+    }
   });
 
   it("holds the final wide grapheme with SGR and DEC 2026 suffixes", () => {

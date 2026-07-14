@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import * as pty from "node-pty";
+import { containsFormulaTrigger } from "./detect.js";
 import { FormulaScreen } from "./screen.js";
 import {
   isGhosttyTerminal,
@@ -121,6 +122,7 @@ export async function runProxy(
   const inputDecoder = new StringDecoder("utf8");
   const outputSplitter = new OutputCheckpointSplitter(Math.max(2, Math.floor(rows / 3)));
   outputSplitter.setCharacterInterval(cols * Math.max(2, Math.floor(rows / 3)));
+  let plainOutputFastPath = false;
 
   const enqueueScreenOperation = (operation: () => Promise<void> | void): void => {
     outputQueue = outputQueue.then(operation).catch((error) => {
@@ -444,12 +446,25 @@ export async function runProxy(
       writeOuter(data);
       return;
     }
-    for (const slice of outputSplitter.push(data)) {
-      // Mark every slice pending before it waits behind the output queue. An
-      // in-flight MathJax render must not commit against a mirror that has not
-      // consumed already-received PTY output yet.
-      screen.queueWrite();
-      enqueueScreenOperation(async () => {
+    // If the stable screen has no formula state and this burst cannot begin or
+    // continue any supported formula syntax, intermediate scans cannot reveal
+    // useful work. Keeping it as one xterm write avoids turning large ordinary
+    // logs into thousands of Promise callbacks and viewport scans. Once
+    // enabled, the fast path may span adjacent queued callbacks because every
+    // one is independently trigger-free.
+    const formulaOrLayoutTrigger = containsFormulaTrigger(data) || data.includes("\x1b");
+    const skipCheckpoints = !formulaOrLayoutTrigger
+      && (plainOutputFastPath || screen.canSkipOutputCheckpoints);
+    plainOutputFastPath = skipCheckpoints;
+    const slices = skipCheckpoints
+      ? [{ data, checkpoint: false }]
+      : outputSplitter.push(data);
+    // Reserve the entire callback before it waits behind outputQueue. This
+    // retains the stale-layout guard without allocating one Promise chain node
+    // and closure for every checkpoint slice in a large PTY burst.
+    screen.queueWrites(slices.length);
+    enqueueScreenOperation(async () => {
+      for (const slice of slices) {
         let queued = true;
         let realCursorCatchupQueued = false;
         try {
@@ -497,12 +512,17 @@ export async function runProxy(
             realCursorCatchupQueued = false;
           }
           if (slice.checkpoint && !scannedBeforeHeldCell) await screen.flushScan(true);
+        } catch (error) {
+          // Match the former one-operation-per-slice queue semantics: a bad
+          // slice must release its reservations without dropping every later
+          // slice from the same PTY callback.
+          debug(`screen operation failed: ${error instanceof Error ? error.message : String(error)}`);
         } finally {
           if (realCursorCatchupQueued) screen.cancelQueuedWrite();
           if (queued) screen.cancelQueuedWrite();
         }
-      });
-    }
+      }
+    });
   };
 
   child.onData((data) => {
@@ -521,6 +541,10 @@ export async function runProxy(
 
   const onResize = (): void => {
     if (exiting) return;
+    // A resize can reveal/reflow formula-bearing scrollback and starts a new
+    // layout epoch. Revalidate the viewport before any later plain burst is
+    // allowed to bypass intermediate checkpoints.
+    plainOutputFastPath = false;
     const nextCols = Math.max(2, process.stdout.columns ?? 80);
     const nextRows = Math.max(2, process.stdout.rows ?? 24);
     outputSplitter.setLineInterval(Math.max(2, Math.floor(nextRows / 3)));

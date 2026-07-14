@@ -22,6 +22,11 @@ const DISPLAY_ENVIRONMENTS = new Set([
 ]);
 
 const MAX_DISPLAY_BLOCK_ROWS = 256;
+const FORMULA_TRIGGER_RE = /[\\$()[\]^_=<>+*/-]|[^\x00-\x7f]/u;
+
+export function containsFormulaTrigger(value: string): boolean {
+  return FORMULA_TRIGGER_RE.test(value);
+}
 
 function mathScore(value: string): number {
   let score = 0;
@@ -54,19 +59,32 @@ interface ParenthesizedSegment {
 }
 
 function parenthesizedSegments(line: string): ParenthesizedSegment[] {
-  const segments: Array<{ start: number; end: number; body: string }> = [];
-  for (let start = 0; start < line.length; start += 1) {
-    if (line[start] !== "(" || line[start - 1] === "\\") continue;
-    let depth = 1;
-    for (let end = start + 1; end < line.length; end += 1) {
-      if (line[end] === "(" && line[end - 1] !== "\\") depth += 1;
-      if (line[end] === ")" && line[end - 1] !== "\\") depth -= 1;
-      if (depth !== 0) continue;
-      const body = line.slice(start + 1, end).trim();
-      if (body) segments.push({ start, end: end + 1, body });
-      start = end;
-      break;
+  const openStack: number[] = [];
+  const matchingEndByStart = new Uint32Array(line.length);
+
+  // Pair every balanced parenthesis in one pass. Keeping the inner matches is
+  // important for recovery: when an outer opener is never closed, the former
+  // implementation retried at the next opener and could still return a
+  // balanced segment inside it.
+  for (let index = 0; index < line.length; index += 1) {
+    if (line[index - 1] === "\\") continue;
+    if (line[index] === "(") {
+      openStack.push(index);
+    } else if (line[index] === ")" && openStack.length > 0) {
+      matchingEndByStart[openStack.pop()!] = index + 1;
     }
+  }
+
+  // Retaining the first matched opener and jumping to its closer reproduces
+  // the old left-to-right skip semantics. An unmatched ancestor has no end,
+  // so scanning continues and can still recover its balanced inner pairs.
+  const segments: ParenthesizedSegment[] = [];
+  for (let start = 0; start < line.length; start += 1) {
+    const end = matchingEndByStart[start]!;
+    if (end === 0) continue;
+    const body = line.slice(start + 1, end - 1).trim();
+    if (body) segments.push({ start, end, body });
+    start = end - 1;
   }
   return segments;
 }
@@ -217,7 +235,30 @@ function inferredDefinitionGroup(lines: string[], startRow: number): FormulaRegi
 
 function isStandaloneDisplayLine(line: string): boolean {
   const trimmed = line.trim();
-  return /^(?:\\\[[\s\S]+\\\]|\$\$(?:\\.|[^$]|\$(?!\$))+\$\$)$/u.test(trimmed);
+  if (trimmed.startsWith("\\[") && trimmed.endsWith("\\]")) {
+    return trimmed.length > 4;
+  }
+  if (!trimmed.startsWith("$$")
+    || !trimmed.endsWith("$$")
+    || trimmed.length <= 4) return false;
+
+  // Keep the body grammar equivalent to `(?:\\.|[^$]|\$(?!\$))+`, but scan
+  // it deterministically. In the former regular expression, `\\.` and
+  // `[^$]` could both consume a backslash. A malformed line ending in a lone
+  // dollar therefore created exponentially many backtracking paths while the
+  // screen was being rescanned.
+  const body = trimmed.slice(2, -2);
+  const reachable = new Uint8Array(body.length + 1);
+  reachable[0] = 1;
+  for (let index = 0; index < body.length; index += 1) {
+    if (!reachable[index]) continue;
+    if (body[index] !== "$"
+      || (index + 1 < body.length && body[index + 1] !== "$")) {
+      reachable[index + 1] = 1;
+    }
+    if (body[index] === "\\" && index + 1 < body.length) reachable[index + 2] = 1;
+  }
+  return Boolean(reachable[body.length]);
 }
 
 interface DelimitedSegment {
@@ -229,6 +270,12 @@ interface DelimitedSegment {
 interface InlineCodeRange {
   start: number;
   end: number;
+}
+
+interface BacktickRun {
+  start: number;
+  end: number;
+  length: number;
 }
 
 interface DetectionLineContext {
@@ -251,29 +298,99 @@ function isEscapedAt(value: string, index: number): boolean {
 
 /** Finds Markdown backtick spans so TeX-looking examples remain plain code. */
 function inlineCodeRanges(line: string): InlineCodeRange[] {
-  const ranges: InlineCodeRange[] = [];
-  for (let start = 0; start < line.length; start += 1) {
-    if (line[start] !== "`" || isEscapedAt(line, start)) continue;
-    let runLength = 1;
-    while (line[start + runLength] === "`") runLength += 1;
-    const delimiter = "`".repeat(runLength);
-    let searchFrom = start + runLength;
-    while (searchFrom < line.length) {
-      const end = line.indexOf(delimiter, searchFrom);
-      if (end < 0) break;
-      if (line[end - 1] !== "`" && line[end + runLength] !== "`") {
-        ranges.push({ start, end: end + runLength });
-        start = end + runLength - 1;
-        break;
-      }
-      searchFrom = end + runLength;
+  const runs: BacktickRun[] = [];
+  let maxRunLength = 0;
+  for (let index = 0; index < line.length;) {
+    if (line[index] !== "`") {
+      index += 1;
+      continue;
     }
+    const start = index;
+    while (line[index] === "`") index += 1;
+    const length = index - start;
+    runs.push({ start, end: index, length });
+    maxRunLength = Math.max(maxRunLength, length);
+  }
+  if (runs.length < 2) return [];
+
+  // For each run, retain the next run of the same exact length. Markdown code
+  // spans require equal-length delimiters. The predecessor disjoint-set below
+  // finds the largest still-available delimiter length no greater than an
+  // opener's length in amortized linear time.
+  const nextSameLength = new Int32Array(runs.length);
+  nextSameLength.fill(-1);
+  const nextIndexByLength = new Int32Array(maxRunLength + 1);
+  nextIndexByLength.fill(-1);
+  for (let index = runs.length - 1; index >= 0; index -= 1) {
+    const length = runs[index]!.length;
+    nextSameLength[index] = nextIndexByLength[length]!;
+    nextIndexByLength[length] = index;
+  }
+
+  const availablePredecessor = new Int32Array(maxRunLength + 1);
+  for (let length = 1; length <= maxRunLength; length += 1) {
+    availablePredecessor[length] = nextIndexByLength[length]! >= 0
+      ? length
+      : availablePredecessor[length - 1]!;
+  }
+  const greatestAvailable = (limit: number): number => {
+    let cursor = Math.min(limit, maxRunLength);
+    while (availablePredecessor[cursor] !== cursor) {
+      cursor = availablePredecessor[cursor]!;
+    }
+    const root = cursor;
+    cursor = Math.min(limit, maxRunLength);
+    while (availablePredecessor[cursor] !== cursor) {
+      const parent = availablePredecessor[cursor]!;
+      availablePredecessor[cursor] = root;
+      cursor = parent;
+    }
+    return root;
+  };
+
+  let consumedThrough = -1;
+  const consumeThrough = (target: number): void => {
+    while (consumedThrough < target) {
+      consumedThrough += 1;
+      const length = runs[consumedThrough]!.length;
+      if (nextIndexByLength[length] !== consumedThrough) continue;
+      nextIndexByLength[length] = nextSameLength[consumedThrough]!;
+      if (nextIndexByLength[length] < 0) {
+        availablePredecessor[length] = greatestAvailable(length - 1);
+      }
+    }
+  };
+
+  const ranges: InlineCodeRange[] = [];
+  for (let index = 0; index < runs.length; index += 1) {
+    consumeThrough(index);
+    const run = runs[index]!;
+    // If the first backtick is escaped, the old recovery loop retried at the
+    // second backtick, so suffixes of this run remain eligible openers.
+    const maximumLength = run.length - (isEscapedAt(line, run.start) ? 1 : 0);
+    const delimiterLength = greatestAvailable(maximumLength);
+    if (delimiterLength === 0) continue;
+    const closingIndex = nextIndexByLength[delimiterLength]!;
+    const closingRun = runs[closingIndex]!;
+    ranges.push({
+      start: run.end - delimiterLength,
+      end: closingRun.end
+    });
+    index = closingIndex;
   }
   return ranges;
 }
 
 function overlapsInlineCode(start: number, end: number, ranges: InlineCodeRange[]): boolean {
-  return ranges.some((range) => start < range.end && end > range.start);
+  let low = 0;
+  let high = ranges.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (ranges[middle]!.end <= start) low = middle + 1;
+    else high = middle;
+  }
+  const range = ranges[low];
+  return range !== undefined && start < range.end && end > range.start;
 }
 
 function detectionLineContexts(lines: string[]): DetectionLineContext[] {
@@ -577,21 +694,6 @@ interface DollarPair {
   span: number;
 }
 
-interface DollarSolution {
-  pairs: DollarPair[];
-  quality: number;
-  span: number;
-}
-
-function betterDollarSolution(left: DollarSolution, right: DollarSolution): DollarSolution {
-  if (left.pairs.length !== right.pairs.length) {
-    return left.pairs.length > right.pairs.length ? left : right;
-  }
-  if (left.quality !== right.quality) return left.quality > right.quality ? left : right;
-  if (left.span !== right.span) return left.span < right.span ? left : right;
-  return left;
-}
-
 function dollarDelimitedRegions(
   lines: string[],
   contexts: DetectionLineContext[],
@@ -607,7 +709,7 @@ function dollarDelimitedRegions(
     }
   }
 
-  const candidates = new Map<number, DollarPair>();
+  const candidates = new Array<DollarPair | undefined>(positions.length);
   for (let index = 0; index + 1 < positions.length; index += 1) {
     const start = positions[index]!;
     const end = positions[index + 1]!;
@@ -620,36 +722,66 @@ function dollarDelimitedRegions(
       && !(/\\[A-Za-z]+|[_^=<>+*/-]/u.test(latex)
         || isLikelyInferredUnicodeMath(latex)
         || /^[A-Za-z][A-Za-z0-9]*\s*\([^()]+\)$/su.test(latex))) continue;
-    candidates.set(index, {
+    candidates[index] = {
       start,
       end,
       latex,
       quality: mathScore(latex) + (hasStrongUnicodeMath(latex) ? 3 : 0),
       span: (end.row - start.row) * 10_000 + Math.max(1, end.index - start.index)
-    });
+    };
   }
 
-  const solutions: DollarSolution[] = Array.from(
-    { length: positions.length + 2 },
-    () => ({ pairs: [], quality: 0, span: 0 })
-  );
+  // Store only the score and the chosen edge for each dynamic-programming
+  // state. Keeping `[pair, ...tail.pairs]` at every position copied a
+  // quadratic number of references on dollar-dense output, even though only
+  // the first solution survived.
+  const pairCounts = new Uint32Array(positions.length + 2);
+  const qualities = new Float64Array(positions.length + 2);
+  const spans = new Float64Array(positions.length + 2);
+  const takesPair = new Uint8Array(positions.length);
   for (let index = positions.length - 1; index >= 0; index -= 1) {
-    const skipped = solutions[index + 1]!;
-    const pair = candidates.get(index);
+    const pair = candidates[index];
     if (!pair) {
-      solutions[index] = skipped;
+      pairCounts[index] = pairCounts[index + 1]!;
+      qualities[index] = qualities[index + 1]!;
+      spans[index] = spans[index + 1]!;
       continue;
     }
-    const tail = solutions[index + 2]!;
-    const paired: DollarSolution = {
-      pairs: [pair, ...tail.pairs],
-      quality: pair.quality + tail.quality,
-      span: pair.span + tail.span
-    };
-    solutions[index] = betterDollarSolution(paired, skipped);
+    const pairedCount = 1 + pairCounts[index + 2]!;
+    const pairedQuality = pair.quality + qualities[index + 2]!;
+    const pairedSpan = pair.span + spans[index + 2]!;
+    const skippedCount = pairCounts[index + 1]!;
+    const skippedQuality = qualities[index + 1]!;
+    const skippedSpan = spans[index + 1]!;
+    const takePair = pairedCount > skippedCount
+      || (pairedCount === skippedCount && pairedQuality > skippedQuality)
+      || (pairedCount === skippedCount
+        && pairedQuality === skippedQuality
+        && pairedSpan <= skippedSpan);
+    if (takePair) {
+      pairCounts[index] = pairedCount;
+      qualities[index] = pairedQuality;
+      spans[index] = pairedSpan;
+      takesPair[index] = 1;
+    } else {
+      pairCounts[index] = skippedCount;
+      qualities[index] = skippedQuality;
+      spans[index] = skippedSpan;
+    }
   }
 
-  return solutions[0]!.pairs.map(({ start, end, latex }) => {
+  const pairs: DollarPair[] = [];
+  for (let index = 0; index < positions.length;) {
+    const pair = candidates[index];
+    if (takesPair[index] && pair) {
+      pairs.push(pair);
+      index += 2;
+    } else {
+      index += 1;
+    }
+  }
+
+  return pairs.map(({ start, end, latex }) => {
     if (start.row === end.row && !display) {
       return trailingInlineRegion(
         lines,
@@ -878,6 +1010,11 @@ function trailingInlineRegion(
  * into bare bracket lines while leaving the TeX body visible.
  */
 export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
+  // Every supported explicit delimiter, TeX command, inferred ASCII form, and
+  // Unicode-math form contains at least one of these characters. Most TUI
+  // frames are plain status/log text, so avoid building code-range contexts
+  // and running every detector when a formula is structurally impossible.
+  if (!lines.some(containsFormulaTrigger)) return [];
   const contexts = detectionLineContexts(lines);
   const regions: FormulaRegion[] = [
     ...environmentRegions(lines, contexts),

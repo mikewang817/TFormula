@@ -1,9 +1,11 @@
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Resvg } from "@resvg/resvg-js";
 import { describe, expect, it } from "vitest";
 import { FormulaCache } from "../src/formula-cache.js";
 import {
+  mathRendererInternals,
   MathRenderer,
   normalizeLatexForRendering,
   readSvgDimensions,
@@ -23,6 +25,93 @@ describe("MathRenderer", () => {
     const dimensions = readSvgDimensions(svg);
     expect(dimensions.aspectRatio).toBeGreaterThan(3);
     expect(svg.match(/<use\b/gu)?.length ?? 0).toBeGreaterThanOrEqual(5);
+  });
+
+  it("loads system fonts only when MathJax leaves real SVG text nodes", async () => {
+    const pathOnly = await renderMathJaxSvg("\\text{velocity }v=3", false, 160);
+    const cjkFallback = await renderMathJaxSvg("\\text{中文}", false, 160);
+
+    expect(pathOnly).not.toMatch(/<text(?=[\s/>])/iu);
+    expect(mathRendererInternals.svgNeedsSystemFonts(pathOnly)).toBe(false);
+    expect(cjkFallback).toMatch(/<text(?=[\s/>])/iu);
+    expect(mathRendererInternals.svgNeedsSystemFonts(cjkFallback)).toBe(true);
+    expect(mathRendererInternals.svgNeedsSystemFonts("<svg><svg:text>字</svg:text></svg>"))
+      .toBe(true);
+    expect(mathRendererInternals.svgNeedsSystemFonts('<svg data-label="&lt;text&gt;"/>'))
+      .toBe(false);
+  });
+
+  it("shares one formula definition across wrapped slices without changing pixels", async () => {
+    const canvasWidth = 90;
+    const canvasHeight = 36;
+    const cell = { width: 9, height: 18, source: "cell-query" as const };
+    const wrapSegments = [
+      { rowOffset: 0, startCol: 1, endCol: 5, logicalStartCol: 0 },
+      { rowOffset: 1, startCol: 0, endCol: 4, logicalStartCol: 4 }
+    ];
+    // Deliberately collide with the preferred shared-content id and include
+    // an internal SVG reference, as MathJax's real output does for glyphs.
+    const content = [
+      '<g color="#eeeeee" fill="#eeeeee">',
+      '<svg x="1" y="2" width="70" height="14" viewBox="0 0 70 14">',
+      '<defs><linearGradient id="tformula-sliced-content">',
+      '<stop stop-color="#ffffff"/><stop offset="1" stop-color="#888888"/>',
+      "</linearGradient></defs>",
+      '<rect width="70" height="14" fill="url(#tformula-sliced-content)"/>',
+      "</svg></g>"
+    ].join("");
+    const optimized = mathRendererInternals.buildHorizontallySlicedSvg({
+      canvasWidth,
+      canvasHeight,
+      wrapSegments,
+      cell,
+      background: "#202030",
+      content
+    });
+    const legacy = [
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasWidth}" height="${canvasHeight}" viewBox="0 0 ${canvasWidth} ${canvasHeight}">`,
+      ...wrapSegments.map((segment) => {
+        const destinationX = segment.startCol * cell.width;
+        const destinationY = segment.rowOffset * cell.height;
+        const sourceX = segment.logicalStartCol * cell.width;
+        const width = (segment.endCol - segment.startCol) * cell.width;
+        return [
+          `<svg x="${destinationX}" y="${destinationY}" width="${width}" height="${cell.height}" viewBox="${sourceX} 0 ${width} ${cell.height}" overflow="hidden">`,
+          `<rect x="${sourceX}" width="${width}" height="${cell.height}" fill="#202030"/>`,
+          content,
+          "</svg>"
+        ].join("");
+      }),
+      "</svg>"
+    ].join("");
+
+    expect(optimized.indexOf(content)).toBeGreaterThanOrEqual(0);
+    expect(optimized.indexOf(content, optimized.indexOf(content) + content.length)).toBe(-1);
+    expect(optimized.match(/<use href="#tformula-sliced-content-1"\/>/gu)).toHaveLength(2);
+    const options = { fitTo: { mode: "original" as const }, font: { loadSystemFonts: false } };
+    const optimizedPng = new Resvg(optimized, options).render().asPng();
+    const legacyPng = new Resvg(legacy, options).render().asPng();
+    expect(optimizedPng).toEqual(legacyPng);
+    expect(await mathRendererInternals.renderSvgToPng(optimized, false))
+      .toEqual(optimizedPng);
+  });
+
+  it("propagates asynchronous Resvg parse failures", async () => {
+    await expect(mathRendererInternals.renderSvgToPng("<svg><broken>", false))
+      .rejects.toThrow();
+  });
+
+  it("refreshes a rendered formula on an in-memory cache hit", () => {
+    const cache = new Map([
+      ["frequent", 1],
+      ["older", 2],
+      ["newest", 3]
+    ]);
+
+    expect(mathRendererInternals.lruCacheGet(cache, "frequent")).toBe(1);
+    expect(Array.from(cache.keys())).toEqual(["older", "newest", "frequent"]);
+    expect(mathRendererInternals.lruCacheGet(cache, "missing")).toBeUndefined();
+    expect(Array.from(cache.keys())).toEqual(["older", "newest", "frequent"]);
   });
 
   it("keeps inline output unbroken and independent of the display container width", async () => {

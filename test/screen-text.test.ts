@@ -1,7 +1,65 @@
 import { describe, expect, it } from "vitest";
-import { detectScreenFormulaRegions } from "../src/screen-text.js";
+import {
+  detectScreenFormulaRegions,
+  screenTextInternals
+} from "../src/screen-text.js";
 
 describe("soft-wrapped terminal formula detection", () => {
+  it("indexes ASCII directly and never splits Unicode grapheme clusters", () => {
+    const ascii = screenTextInternals.createVisualColumnIndex("abc");
+    expect(ascii.width).toBe(3);
+    expect(ascii.utf16IndexAt(2)).toBe(2);
+    expect(ascii.visualColumnAt(2)).toBe(2);
+
+    const unicode = screenTextInternals.createVisualColumnIndex("A👩‍💻e\u0301界Z");
+    expect(unicode.width).toBe(7);
+    expect([
+      unicode.utf16IndexAt(0),
+      unicode.utf16IndexAt(1),
+      unicode.utf16IndexAt(2),
+      unicode.utf16IndexAt(3),
+      unicode.utf16IndexAt(4),
+      unicode.utf16IndexAt(5),
+      unicode.utf16IndexAt(6),
+      unicode.utf16IndexAt(7)
+    ]).toEqual([0, 1, 6, 6, 8, 9, 9, 10]);
+    expect([
+      unicode.visualColumnAt(0),
+      unicode.visualColumnAt(1),
+      unicode.visualColumnAt(2),
+      unicode.visualColumnAt(5),
+      unicode.visualColumnAt(6),
+      unicode.visualColumnAt(7),
+      unicode.visualColumnAt(8),
+      unicode.visualColumnAt(9),
+      unicode.visualColumnAt(10)
+    ]).toEqual([0, 1, 1, 1, 3, 3, 4, 6, 7]);
+  });
+
+  it("composes formula-dense rows without changing detection order", () => {
+    const physical = Array.from({ length: 32 }, (_, row) => ({
+      row,
+      text: Array.from({ length: 12 }, (_unused, index) =>
+        `\\(x_${index}^2\\) term-${index}`
+      ).join(" "),
+      isWrapped: false
+    }));
+
+    const snapshot = detectScreenFormulaRegions(physical, 240);
+    expect(snapshot.regions).toHaveLength(32);
+    expect(snapshot.regions.every((region) => region.composite)).toBe(true);
+    expect(snapshot.regions.map((region) => region.startRow)).toEqual(
+      Array.from({ length: 32 }, (_, row) => row)
+    );
+    expect(snapshot.regions[0]).toMatchObject({
+      startCol: 0,
+      endCol: physical[0]!.text.length,
+      confidence: "explicit"
+    });
+    expect(snapshot.regions[0]!.latex).toContain("x_0^2\\text{ term-0 }");
+    expect(snapshot.regions[0]!.latex).toContain("x_11^2\\text{ term-11}");
+  });
+
   it("reassembles a standalone display split across physical rows", () => {
     const snapshot = detectScreenFormulaRegions([
       { row: 0, text: "\\[\\nabla \\cdot \\mathbf{E}=", isWrapped: false },

@@ -1,5 +1,5 @@
 import stringWidth from "string-width";
-import { detectFormulaRegions, escapeTexText } from "./detect.js";
+import { containsFormulaTrigger, detectFormulaRegions, escapeTexText } from "./detect.js";
 import type { FormulaRegion, FormulaWrapSegment } from "./types.js";
 
 export interface PhysicalScreenLine {
@@ -30,6 +30,7 @@ interface LogicalSpan {
   textEnd: number;
   text: string;
   columnMap?: number[];
+  visualIndex?: VisualColumnIndex;
 }
 
 interface LogicalLine {
@@ -39,19 +40,83 @@ interface LogicalLine {
   truncatedEnd: boolean;
   uniformStyle: boolean;
   styleKey?: string;
+  visualIndex?: VisualColumnIndex;
 }
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const UNIT_WIDTH_ASCII_RE = /^[\x20-\x7e]*$/u;
 
-function visualWidthAtUtf16Index(value: string, utf16Index: number): number {
-  let width = 0;
-  for (const part of graphemeSegmenter.segment(value)) {
-    if (part.index >= utf16Index) break;
-    const end = part.index + part.segment.length;
-    if (end > utf16Index) break;
-    width += stringWidth(part.segment);
+/**
+ * Bidirectional index between JavaScript string offsets and terminal columns.
+ * Formula detection asks for both directions several times per region. ASCII
+ * text needs no tables at all; Unicode text is segmented once and thereafter
+ * both lookups are constant-time.
+ */
+class VisualColumnIndex {
+  readonly width: number;
+  readonly #utf16Length: number;
+  readonly #unitWidthAscii: boolean;
+  readonly #utf16ToVisual?: Uint32Array;
+  readonly #visualToUtf16?: Uint32Array;
+
+  constructor(value: string) {
+    this.#utf16Length = value.length;
+    this.#unitWidthAscii = UNIT_WIDTH_ASCII_RE.test(value);
+    if (this.#unitWidthAscii) {
+      this.width = value.length;
+      return;
+    }
+
+    const utf16ToVisual = new Uint32Array(value.length + 1);
+    const visualToUtf16: number[] = [0];
+    let width = 0;
+    for (const part of graphemeSegmenter.segment(value)) {
+      const start = part.index;
+      const end = start + part.segment.length;
+      const nextWidth = width + stringWidth(part.segment);
+      // An offset inside a grapheme maps to its leading column. The offset at
+      // its end maps after the complete grapheme, matching the old scanner.
+      utf16ToVisual.fill(width, start, end);
+      utf16ToVisual[end] = nextWidth;
+      // An interior visual column consumes the whole grapheme so callers can
+      // never split a wide glyph, emoji ZWJ sequence, or combining cluster.
+      for (let column = width + 1; column <= nextWidth; column += 1) {
+        visualToUtf16[column] = end;
+      }
+      width = nextWidth;
+    }
+    this.width = width;
+    this.#utf16ToVisual = utf16ToVisual;
+    this.#visualToUtf16 = Uint32Array.from(visualToUtf16);
   }
-  return width;
+
+  utf16IndexAt(column: number): number {
+    if (column <= 0) return 0;
+    if (!Number.isFinite(column)) return this.#utf16Length;
+    if (this.#unitWidthAscii) {
+      return Math.min(this.#utf16Length, Math.ceil(column));
+    }
+    const integralColumn = Math.ceil(column);
+    if (integralColumn >= this.#visualToUtf16!.length) return this.#utf16Length;
+    return this.#visualToUtf16![integralColumn]!;
+  }
+
+  visualColumnAt(utf16Index: number): number {
+    if (utf16Index <= 0) return 0;
+    if (!Number.isFinite(utf16Index)) return this.width;
+    const integralIndex = Math.floor(utf16Index);
+    if (integralIndex >= this.#utf16Length) return this.width;
+    if (this.#unitWidthAscii) return integralIndex;
+    return this.#utf16ToVisual![integralIndex]!;
+  }
+}
+
+function lineVisualIndex(line: LogicalLine): VisualColumnIndex {
+  return line.visualIndex ??= new VisualColumnIndex(line.text);
+}
+
+function spanVisualIndex(span: LogicalSpan): VisualColumnIndex {
+  return span.visualIndex ??= new VisualColumnIndex(span.text);
 }
 
 export interface FormulaSnapshot {
@@ -88,7 +153,11 @@ function collapseSoftWrappedLines(
     }
     const logicalStart = logical.spans.at(-1)?.logicalEnd ?? 0;
     const textStart = logical.text.length;
-    const physicalColumns = physical.cellColumns ?? stringWidth(physical.text);
+    const visualIndex = physical.cellColumns === undefined
+      ? new VisualColumnIndex(physical.text)
+      : undefined;
+    const physicalColumns = physical.cellColumns ?? visualIndex!.width;
+    const isFirstSpan = logical.spans.length === 0;
     logical.text += physical.text;
     logical.spans.push({
       row: physical.row,
@@ -97,8 +166,13 @@ function collapseSoftWrappedLines(
       textStart,
       textEnd: textStart + physical.text.length,
       text: physical.text,
-      columnMap: physical.columnMap
+      columnMap: physical.columnMap,
+      visualIndex
     });
+    // The overwhelmingly common unwrapped case can share one immutable index
+    // between its logical line and sole physical span. Appending a soft-wrap
+    // invalidates only the line-level view; each span keeps its own index.
+    logical.visualIndex = isFirstSpan ? visualIndex : undefined;
   }
   if (continuesAfterViewport && logicalLines.length > 0) {
     logicalLines.at(-1)!.truncatedEnd = true;
@@ -106,19 +180,37 @@ function collapseSoftWrappedLines(
   return logicalLines;
 }
 
+function spanAtTextIndex(spans: LogicalSpan[], utf16Index: number): LogicalSpan {
+  let low = 0;
+  let high = spans.length - 1;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (utf16Index < spans[middle]!.textEnd) high = middle;
+    else low = middle + 1;
+  }
+  return spans[low]!;
+}
+
+function spanAtLogicalColumn(spans: LogicalSpan[], logicalColumn: number): LogicalSpan {
+  let low = 0;
+  let high = spans.length - 1;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (logicalColumn < spans[middle]!.logicalEnd) high = middle;
+    else low = middle + 1;
+  }
+  return spans[low]!;
+}
+
 function logicalColumnAtUtf16Index(line: LogicalLine, utf16Index: number): number {
-  const span = line.spans.find((candidate, index) =>
-    utf16Index < candidate.textEnd || index === line.spans.length - 1
-  ) ?? line.spans[0]!;
+  const span = spanAtTextIndex(line.spans, utf16Index);
   const localIndex = Math.max(0, Math.min(span.text.length, utf16Index - span.textStart));
   const mapped = span.columnMap?.[localIndex];
-  return span.logicalStart + (mapped ?? visualWidthAtUtf16Index(span.text, localIndex));
+  return span.logicalStart + (mapped ?? spanVisualIndex(span).visualColumnAt(localIndex));
 }
 
 function mapStart(spans: LogicalSpan[], logicalColumn: number): { row: number; column: number } {
-  const span = spans.find((candidate, index) =>
-    logicalColumn < candidate.logicalEnd || index === spans.length - 1
-  ) ?? spans[0]!;
+  const span = spanAtLogicalColumn(spans, logicalColumn);
   return {
     row: span.row,
     column: Math.max(0, logicalColumn - span.logicalStart)
@@ -127,9 +219,7 @@ function mapStart(spans: LogicalSpan[], logicalColumn: number): { row: number; c
 
 function mapEnd(spans: LogicalSpan[], logicalColumn: number): { row: number; column: number } {
   const lastCoveredColumn = Math.max(0, logicalColumn - 1);
-  const span = spans.find((candidate, index) =>
-    lastCoveredColumn < candidate.logicalEnd || index === spans.length - 1
-  ) ?? spans.at(-1)!;
+  const span = spanAtLogicalColumn(spans, lastCoveredColumn);
   return {
     row: span.row,
     column: Math.max(1, logicalColumn - span.logicalStart)
@@ -218,18 +308,7 @@ function compactFormulaSegments(
 }
 
 function utf16IndexAtVisualColumn(line: string, column: number): number {
-  if (column <= 0) return 0;
-  let width = 0;
-  for (const part of graphemeSegmenter.segment(line)) {
-    const nextWidth = width + stringWidth(part.segment);
-    const end = part.index + part.segment.length;
-    // Detector columns always fall on a grapheme boundary. If a caller gives
-    // an interior column anyway, consume the whole grapheme rather than
-    // returning an index that splits a ZWJ/combining sequence.
-    if (nextWidth >= column) return end;
-    width = nextWidth;
-  }
-  return line.length;
+  return new VisualColumnIndex(line).utf16IndexAt(column);
 }
 
 function containsFragileLiteralGrapheme(value: string): boolean {
@@ -247,22 +326,44 @@ function composeInlineFormulaTails(
 ): FormulaRegion[] {
   const replacements = new Map<FormulaRegion, FormulaRegion>();
   const removed = new Set<FormulaRegion>();
+  const inlineByRow: Array<FormulaRegion[] | undefined> = new Array(lines.length);
+  const displayCoverageDelta = new Int32Array(lines.length + 1);
+  const detectionOrder = new Map<FormulaRegion, number>();
 
+  for (let index = 0; index < regions.length; index += 1) {
+    const region = regions[index]!;
+    if (!detectionOrder.has(region)) detectionOrder.set(region, index);
+    if (region.display) {
+      const startRow = Math.max(0, region.startRow);
+      const endRow = Math.min(lines.length - 1, region.endRow);
+      if (startRow <= endRow) {
+        displayCoverageDelta[startRow]! += 1;
+        displayCoverageDelta[endRow + 1]! -= 1;
+      }
+    } else if (region.startRow === region.endRow
+      && region.startRow >= 0
+      && region.startRow < lines.length) {
+      (inlineByRow[region.startRow] ??= []).push(region);
+    }
+  }
+  for (const candidates of inlineByRow) {
+    if (candidates && candidates.length > 1) {
+      candidates.sort((left, right) => left.startCol - right.startCol);
+    }
+  }
+
+  let displayCoverage = 0;
   for (let row = 0; row < lines.length; row += 1) {
-    if (regions.some((region) => region.display
-      && region.startRow <= row
-      && region.endRow >= row)) continue;
+    displayCoverage += displayCoverageDelta[row]!;
+    if (displayCoverage > 0) continue;
     const line = lines[row]!.text;
-    const candidates = regions
-      .filter((region) => region.startRow === row
-        && region.endRow === row
-        && !region.display)
-      .sort((left, right) => left.startCol - right.startCol);
-    if (candidates.length === 0) continue;
+    const candidates = inlineByRow[row];
+    if (!candidates || candidates.length === 0) continue;
+    const visualIndex = lineVisualIndex(lines[row]!);
     const last = candidates.at(-1)!;
-    const lastEnd = utf16IndexAtVisualColumn(line, last.endCol);
+    const lastEnd = visualIndex.utf16IndexAt(last.endCol);
     if (candidates.length === 1 && !line.slice(lastEnd).trim()) continue;
-    const firstStart = utf16IndexAtVisualColumn(line, candidates[0]!.startCol);
+    const firstStart = visualIndex.utf16IndexAt(candidates[0]!.startCol);
     // MathJax's \text{} intentionally performs text shaping of its own. It
     // cannot preserve terminal rendition runs or every emoji/combining
     // grapheme, so leave those literal cells to the terminal and overlay only
@@ -273,8 +374,8 @@ function composeInlineFormulaTails(
     const latex: string[] = [];
     let cursor = firstStart;
     for (const candidate of candidates) {
-      const start = utf16IndexAtVisualColumn(line, candidate.startCol);
-      const end = utf16IndexAtVisualColumn(line, candidate.endCol);
+      const start = visualIndex.utf16IndexAt(candidate.startCol);
+      const end = visualIndex.utf16IndexAt(candidate.endCol);
       if (start > cursor) latex.push(`\\text{${escapeTexText(line.slice(cursor, start))}}`);
       latex.push(candidate.latex);
       cursor = Math.max(cursor, end);
@@ -285,7 +386,7 @@ function composeInlineFormulaTails(
       startRow: row,
       endRow: row,
       startCol: candidates[0]!.startCol,
-      endCol: stringWidth(line),
+      endCol: visualIndex.width,
       latex: latex.join(""),
       display: false,
       confidence: candidates.some((candidate) => candidate.confidence === "explicit")
@@ -294,7 +395,7 @@ function composeInlineFormulaTails(
       composite: true
     };
     const firstInDetectionOrder = candidates.reduce((first, candidate) =>
-      regions.indexOf(candidate) < regions.indexOf(first) ? candidate : first
+      detectionOrder.get(candidate)! < detectionOrder.get(first)! ? candidate : first
     );
     replacements.set(firstInDetectionOrder, replacement);
     for (const candidate of candidates) {
@@ -302,11 +403,13 @@ function composeInlineFormulaTails(
     }
   }
 
-  return regions.flatMap((region) => {
+  const composed: FormulaRegion[] = [];
+  for (const region of regions) {
     const replacement = replacements.get(region);
-    if (replacement) return [replacement];
-    return removed.has(region) ? [] : [region];
-  });
+    if (replacement) composed.push(replacement);
+    else if (!removed.has(region)) composed.push(region);
+  }
+  return composed;
 }
 
 /**
@@ -319,6 +422,9 @@ export function detectScreenFormulaRegions(
   terminalColumns: number,
   continuesAfterViewport = false
 ): FormulaSnapshot {
+  if (!physicalLines.some((line) => containsFormulaTrigger(line.text))) {
+    return { regions: [], deferred: [] };
+  }
   const logicalLines = collapseSoftWrappedLines(physicalLines, continuesAfterViewport);
   const detected = composeInlineFormulaTails(
     logicalLines,
@@ -339,17 +445,25 @@ export function detectScreenFormulaRegions(
     if (region.confidence !== "explicit"
       && involved.some((line) => line.truncatedStart || line.truncatedEnd)) continue;
 
-    const startIndex = utf16IndexAtVisualColumn(startLine.text, region.startCol);
+    const startIndex = lineVisualIndex(startLine).utf16IndexAt(region.startCol);
     const mappedStartCol = logicalColumnAtUtf16Index(startLine, startIndex);
-    const mappedEndCol = region.startRow === region.endRow || !region.compact
-      ? logicalColumnAtUtf16Index(
-          endLine,
-          utf16IndexAtVisualColumn(endLine.text, region.endCol)
-        )
-      : Math.max(...involved.map((line) => {
-          const visualEnd = Math.min(region.endCol, stringWidth(line.text));
-          return logicalColumnAtUtf16Index(line, utf16IndexAtVisualColumn(line.text, visualEnd));
-        }), 1);
+    let mappedEndCol: number;
+    if (region.startRow === region.endRow || !region.compact) {
+      mappedEndCol = logicalColumnAtUtf16Index(
+        endLine,
+        lineVisualIndex(endLine).utf16IndexAt(region.endCol)
+      );
+    } else {
+      mappedEndCol = 1;
+      for (const line of involved) {
+        const visualIndex = lineVisualIndex(line);
+        const visualEnd = Math.min(region.endCol, visualIndex.width);
+        mappedEndCol = Math.max(
+          mappedEndCol,
+          logicalColumnAtUtf16Index(line, visualIndex.utf16IndexAt(visualEnd))
+        );
+      }
+    }
     region = { ...region, startCol: mappedStartCol, endCol: mappedEndCol };
 
     const hasSoftWrap = involved.some((line) => line.spans.length > 1);
@@ -508,6 +622,7 @@ export const screenTextInternals = {
   collapseSoftWrappedLines,
   compactFormulaSegments,
   composeInlineFormulaTails,
+  createVisualColumnIndex: (value: string) => new VisualColumnIndex(value),
   mapEnd,
   mapStart,
   multilineFormulaSegments,

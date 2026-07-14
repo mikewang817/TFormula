@@ -7,6 +7,7 @@ import type {
   ITerminalAddon,
   Terminal as XtermTerminal
 } from "@xterm/headless";
+import { containsFormulaTrigger } from "./detect.js";
 import { MathRenderer } from "./math-renderer.js";
 import {
   cursorPosition,
@@ -134,7 +135,23 @@ function cellStyleKey(cell: IBufferCell): string {
   ].join(":");
 }
 
-function lineTextSnapshot(line: IBufferLine | undefined): {
+function cellsHaveSameStyle(left: IBufferCell, right: IBufferCell): boolean {
+  return left.getFgColorMode() === right.getFgColorMode()
+    && left.getFgColor() === right.getFgColor()
+    && left.getBgColorMode() === right.getBgColorMode()
+    && left.getBgColor() === right.getBgColor()
+    && left.isBold() === right.isBold()
+    && left.isDim() === right.isDim()
+    && left.isItalic() === right.isItalic()
+    && left.isUnderline() === right.isUnderline()
+    && left.isBlink() === right.isBlink()
+    && left.isInverse() === right.isInverse()
+    && left.isInvisible() === right.isInvisible()
+    && left.isStrikethrough() === right.isStrikethrough()
+    && left.isOverline() === right.isOverline();
+}
+
+function lineTextSnapshot(line: IBufferLine | undefined, translatedText?: string): {
   text: string;
   columnMap?: number[];
   cellColumns?: number;
@@ -145,7 +162,8 @@ function lineTextSnapshot(line: IBufferLine | undefined): {
   const endColumn = lineTrimmedColumns(line);
   let text = "";
   const columnMap: number[] = [0];
-  const styles = new Set<string>();
+  let firstStyledCell: IBufferCell | undefined;
+  let uniformStyle = true;
   for (let column = 0; column < endColumn; column += 1) {
     const cell = line.getCell(column);
     if (!cell || cell.getWidth() === 0) continue;
@@ -157,19 +175,22 @@ function lineTextSnapshot(line: IBufferLine | undefined): {
       columnMap[startIndex + offset] = column + cell.getWidth();
     }
     columnMap[text.length] = column + cell.getWidth();
-    if (cell.getChars()) styles.add(cellStyleKey(cell));
+    if (cell.getChars()) {
+      if (!firstStyledCell) firstStyledCell = cell;
+      else if (uniformStyle && !cellsHaveSameStyle(firstStyledCell, cell)) uniformStyle = false;
+    }
   }
   // Keep the public xterm translation as the text oracle. The cell walk above
   // should match it, but feature-detect a future xterm representation change
   // and safely fall back to string-based columns rather than using a bad map.
-  const translated = line.translateToString(true);
+  const translated = translatedText ?? line.translateToString(true);
   if (translated !== text) return { text: translated };
   return {
     text,
     columnMap,
     cellColumns: endColumn,
-    uniformStyle: styles.size <= 1,
-    styleKey: styles.size === 1 ? styles.values().next().value : undefined
+    uniformStyle,
+    styleKey: uniformStyle && firstStyledCell ? cellStyleKey(firstStyledCell) : undefined
   };
 }
 
@@ -224,6 +245,12 @@ export class FormulaScreen {
   #resizing = false;
   #disposed = false;
   #controlTail = "";
+  #regionValidationCache?: {
+    version: number;
+    viewportY: number;
+    bufferType: string;
+    identities: Set<string>;
+  };
 
   constructor(options: {
     cols: number;
@@ -320,7 +347,13 @@ export class FormulaScreen {
   }
 
   queueWrite(): void {
-    this.#pendingWrites += 1;
+    this.queueWrites(1);
+  }
+
+  queueWrites(count: number): void {
+    const reservations = Math.max(0, Math.floor(count));
+    if (reservations === 0) return;
+    this.#pendingWrites += reservations;
     this.#scanVersion += 1;
     this.#rescanRequested = true;
   }
@@ -335,6 +368,17 @@ export class FormulaScreen {
     preservedEraseDisplayOffsets: readonly number[] = []
   ): Promise<void> {
     if (!alreadyQueued) this.queueWrite();
+    if (this.#controlTail === ""
+      && preservedEraseDisplayOffsets.length === 0
+      && data.indexOf("\x1b") < 0
+      && data.indexOf("\u009b") < 0) {
+      try {
+        await this.#writeTerminal(data);
+      } finally {
+        this.#completeWrite();
+      }
+      return;
+    }
     const initialBufferType = this.terminal.buffer.active.type;
     const controls = this.#controlTail + data;
     this.#controlTail = this.#incompleteControlSuffix(controls);
@@ -469,6 +513,34 @@ export class FormulaScreen {
   /** True while at least one terminal-side placement must survive ED 2. */
   get hasTerminalPlacements(): boolean {
     return this.#placed.size > 0 || this.#detachedPlacements.size > 0;
+  }
+
+  /**
+   * True only when no formula-bearing screen state could be lost by allowing a
+   * formula-free PTY burst through without intermediate viewport checkpoints.
+   */
+  get canSkipOutputCheckpoints(): boolean {
+    if (this.#disposed
+      || this.#layoutSuspended
+      || this.#pendingWrites !== 0
+      || this.#scanning
+      || this.#rescanRequested
+      || this.#scanTimer !== undefined
+      || this.#placed.size !== 0
+      || this.#detachedPlacements.size !== 0
+      || this.#imageRetries.size !== 0
+      || this.#placementRetries.size !== 0) return false;
+
+    // A stable but incomplete opener such as `x-`, `$`, or `\(` may become a
+    // real formula when the next callback contains only operands. Require the
+    // existing viewport to be trigger-free before extending the plain-output
+    // fast path across callback boundaries.
+    const buffer = this.terminal.buffer.active;
+    for (let row = 0; row < this.terminal.rows; row += 1) {
+      const text = buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? "";
+      if (containsFormulaTrigger(text)) return false;
+    }
+    return true;
   }
 
   #completeWrite(): void {
@@ -1313,19 +1385,55 @@ export class FormulaScreen {
 
   #formulaSnapshot(): ReturnType<typeof detectScreenFormulaRegions> {
     const buffer = this.terminal.buffer.active;
-    const physicalLines = Array.from({ length: this.terminal.rows }, (_, row) => {
-      const line = buffer.getLine(buffer.viewportY + row);
+    const bufferLines = Array.from(
+      { length: this.terminal.rows },
+      (_, row) => buffer.getLine(buffer.viewportY + row)
+    );
+    const physicalLines = bufferLines.map((line, row) => ({
+      row,
+      text: line?.translateToString(true) ?? "",
+      isWrapped: line?.isWrapped ?? false
+    }));
+    const nextLine = buffer.getLine(buffer.viewportY + this.terminal.rows);
+    const continuesAfterViewport = nextLine?.isWrapped ?? false;
+    const quickSnapshot = detectScreenFormulaRegions(
+      physicalLines,
+      this.terminal.cols,
+      continuesAfterViewport
+    );
+
+    // Most TUI frames contain no formula at all. Avoid walking every xterm
+    // cell, hashing its rendition, and allocating UTF-16/column maps until the
+    // string-only pass proves that detailed coordinates are actually needed.
+    if (quickSnapshot.regions.length === 0) return quickSnapshot;
+
+    const detailedRows = new Set<number>();
+    const addWrappedLogicalLine = (row: number): void => {
+      let start = row;
+      while (start > 0 && physicalLines[start]!.isWrapped) start -= 1;
+      let end = row;
+      while (end + 1 < physicalLines.length && physicalLines[end + 1]!.isWrapped) end += 1;
+      for (let physicalRow = start; physicalRow <= end; physicalRow += 1) {
+        detailedRows.add(physicalRow);
+      }
+    };
+    for (const region of quickSnapshot.regions) {
+      for (let row = region.startRow; row <= region.endRow; row += 1) {
+        addWrappedLogicalLine(row);
+      }
+    }
+    const detailedLines = bufferLines.map((line, row) => {
+      if (!detailedRows.has(row)) return physicalLines[row]!;
       return {
         row,
-        ...lineTextSnapshot(line),
+        ...lineTextSnapshot(line, physicalLines[row]!.text),
         isWrapped: line?.isWrapped ?? false
       };
     });
-    const nextLine = buffer.getLine(buffer.viewportY + this.terminal.rows);
     return detectScreenFormulaRegions(
-      physicalLines,
+      detailedLines,
       this.terminal.cols,
-      nextLine?.isWrapped ?? false
+      continuesAfterViewport
     );
   }
 
@@ -1345,9 +1453,12 @@ export class FormulaScreen {
     return /[\x40-\x7e]/u.test(suffix.slice(2)) ? "" : suffix.slice(-32);
   }
 
-  #regionCells(region: FormulaRegion): IBufferCell[] {
+  #regionPresentation(region: FormulaRegion): {
+    invisible: boolean;
+    foreground: string;
+    background: string;
+  } {
     const buffer = this.terminal.buffer.active;
-    const cells: IBufferCell[] = [];
     const ranges = region.wrapSegments?.length
       ? region.wrapSegments.map((segment) => ({
           row: region.startRow + segment.rowOffset,
@@ -1373,6 +1484,9 @@ export class FormulaScreen {
             endCol: region.endCol
           })
         );
+    let invisible = false;
+    let bodyCell: IBufferCell | undefined;
+    let fallbackCell: IBufferCell | undefined;
     for (const range of ranges) {
       const line = buffer.getLine(buffer.viewportY + range.row);
       if (!line) continue;
@@ -1380,26 +1494,23 @@ export class FormulaScreen {
         column < Math.min(this.terminal.cols, range.endCol);
         column += 1) {
         const cell = line.getCell(column);
-        if (cell && cell.getWidth() !== 0) cells.push(cell);
+        if (!cell || cell.getWidth() === 0) continue;
+        const chars = cell.getChars();
+        if (chars && cell.isInvisible()) invisible = true;
+        if (!fallbackCell && /\S/u.test(chars)) fallbackCell = cell;
+        if (!bodyCell && /[^\s\\()[\]$]/u.test(chars)) bodyCell = cell;
       }
     }
-    return cells;
-  }
-
-  #regionIsInvisible(region: FormulaRegion): boolean {
     // Never turn SGR 8 concealed source into a visible image. Checking every
     // occupied source cell also protects partially concealed expressions.
-    return this.#regionCells(region).some((cell) =>
-      Boolean(cell.getChars() && cell.isInvisible())
-    );
-  }
-
-  #regionColors(region: FormulaRegion): { foreground: string; background: string } {
-    const cells = this.#regionCells(region);
-    const cell = cells.find((candidate) =>
-      /[^\s\\()[\]$]/u.test(candidate.getChars())
-    ) ?? cells.find((candidate) => /\S/u.test(candidate.getChars()));
-    if (!cell) return this.#capabilities;
+    const cell = bodyCell ?? fallbackCell;
+    if (!cell) {
+      return {
+        invisible,
+        foreground: this.#capabilities.foreground,
+        background: this.#capabilities.background
+      };
+    }
 
     let foreground = cell.isFgRGB()
       ? rgbHex(cell.getFgColor())
@@ -1412,7 +1523,7 @@ export class FormulaScreen {
         ? paletteHex(cell.getBgColor())
         : this.#capabilities.background;
     if (cell.isInverse()) [foreground, background] = [background, foreground];
-    return { foreground, background };
+    return { invisible, foreground, background };
   }
 
   #regionSourceText(region: FormulaRegion): string {
@@ -1434,21 +1545,41 @@ export class FormulaScreen {
     return `${bufferType}:${viewportY + region.startRow}:${region.startCol}:${columns}:${rows}`;
   }
 
+  #regionIdentity(region: FormulaRegion): string {
+    return JSON.stringify([
+      region.startRow,
+      region.endRow,
+      region.startCol,
+      region.endCol,
+      region.latex,
+      region.display,
+      region.compact ?? false,
+      region.displayRange ?? null,
+      region.composite ?? false,
+      region.wrapSegments ?? null
+    ]);
+  }
+
   #regionStillVisible(region: FormulaRegion, viewportY: number, bufferType: string): boolean {
     const buffer = this.terminal.buffer.active;
     if (buffer.viewportY !== viewportY || buffer.type !== bufferType) return false;
-    return this.#formulaSnapshot().regions.some((candidate) =>
-      candidate.startRow === region.startRow
-      && candidate.endRow === region.endRow
-      && candidate.startCol === region.startCol
-      && candidate.endCol === region.endCol
-      && candidate.latex === region.latex
-      && candidate.display === region.display
-      && candidate.compact === region.compact
-      && JSON.stringify(candidate.displayRange) === JSON.stringify(region.displayRange)
-      && candidate.composite === region.composite
-      && JSON.stringify(candidate.wrapSegments) === JSON.stringify(region.wrapSegments)
-    );
+    const version = this.#scanVersion;
+    let cached = this.#regionValidationCache;
+    if (!cached
+      || cached.version !== version
+      || cached.viewportY !== viewportY
+      || cached.bufferType !== bufferType) {
+      cached = {
+        version,
+        viewportY,
+        bufferType,
+        identities: new Set(
+          this.#formulaSnapshot().regions.map((candidate) => this.#regionIdentity(candidate))
+        )
+      };
+      this.#regionValidationCache = cached;
+    }
+    return cached.identities.has(this.#regionIdentity(region));
   }
 
   #replacementForRegion(
@@ -1547,13 +1678,24 @@ export class FormulaScreen {
       this.#detachExpiredMarkerPlacements();
       const snapshot = this.#formulaSnapshot();
       const regions = snapshot.regions;
-      const prepared = regions.filter((region) => !this.#regionIsInvisible(region)).map((region) => {
+      const prepared = regions.flatMap((region) => {
+        const presentation = this.#regionPresentation(region);
+        if (presentation.invisible) return [];
         const rows = region.endRow - region.startRow + 1;
         const columns = rows > 1 && !region.compact
           ? this.terminal.cols
           : Math.max(1, Math.min(this.terminal.cols - region.startCol, region.endCol - region.startCol));
         const anchor = this.#anchor(region, columns, rows, bufferType, viewportY);
-        return { region, rows, columns, anchor };
+        return [{
+          region,
+          rows,
+          columns,
+          anchor,
+          colors: {
+            foreground: presentation.foreground,
+            background: presentation.background
+          }
+        }];
       });
       const desiredAnchors = new Set(prepared.map(({ anchor }) => anchor));
       // A resize can move the same formula to a new anchor. Keep its last
@@ -1563,15 +1705,22 @@ export class FormulaScreen {
       const retainedReplacementAnchors = new Set<string>();
       const claimedReplacementAnchors = new Set<string>();
 
-      for (const { region, rows, columns, anchor } of prepared) {
+      for (const { region, rows, columns, anchor, colors } of prepared) {
         if (this.#disposed
           || (!allowQueuedWrites && this.#pendingWrites > 0)
           || this.#layoutSuspended
           || layoutVersion !== this.#layoutVersion
           || this.terminal.buffer.active.type !== bufferType) break;
-        if (version !== this.#scanVersion
-          && !this.#regionStillVisible(region, viewportY, bufferType)) continue;
-        const colors = this.#regionColors(region);
+        let renderColors = colors;
+        if (version !== this.#scanVersion) {
+          if (!this.#regionStillVisible(region, viewportY, bufferType)) continue;
+          const currentPresentation = this.#regionPresentation(region);
+          if (currentPresentation.invisible) continue;
+          renderColors = {
+            foreground: currentPresentation.foreground,
+            background: currentPresentation.background
+          };
+        }
         const fingerprint = createHash("sha1").update(JSON.stringify({
           latex: region.latex,
           display: region.display,
@@ -1579,7 +1728,7 @@ export class FormulaScreen {
           displayRange: region.displayRange,
           composite: region.composite,
           wrapSegments: region.wrapSegments,
-          colors,
+          colors: renderColors,
           cell: this.#capabilities.cell,
           scale: this.#scale
         })).digest("hex");
@@ -1637,8 +1786,8 @@ export class FormulaScreen {
             rows,
             this.#capabilities,
             this.#scale,
-            colors.foreground,
-            colors.background
+            renderColors.foreground,
+            renderColors.background
           );
           if (this.#disposed
             || (!allowQueuedWrites && this.#pendingWrites > 0)
@@ -1655,8 +1804,16 @@ export class FormulaScreen {
           }
           // Unrelated output (for example a spinner in the status bar) should
           // not starve formulas that are unchanged at their screen location.
-          if (version !== this.#scanVersion
-            && !this.#regionStillVisible(region, viewportY, bufferType)) continue;
+          if (version !== this.#scanVersion) {
+            if (!this.#regionStillVisible(region, viewportY, bufferType)) continue;
+            const currentPresentation = this.#regionPresentation(region);
+            if (currentPresentation.invisible
+              || currentPresentation.foreground !== renderColors.foreground
+              || currentPresentation.background !== renderColors.background) {
+              this.#rescanRequested = true;
+              continue;
+            }
+          }
 
           const buffer = this.terminal.buffer.active;
           // CUP cannot reproduce xterm's pending-wrap state exactly.

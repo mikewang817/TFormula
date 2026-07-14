@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import { detectFormulaRegions, detectorInternals } from "../src/detect.js";
 
@@ -42,6 +43,35 @@ describe("detectFormulaRegions", () => {
   it("does not expand display delimiters embedded in prose", () => {
     const [region] = detectFormulaRegions(["", "before $$x=1$$ after", ""]);
     expect(region).toMatchObject({ startRow: 1, endRow: 1 });
+  });
+
+  it("rejects malformed standalone displays without exponential backtracking", () => {
+    const line = `$$${"\\a".repeat(24)}\\[x\\]$`;
+    const started = performance.now();
+    expect(detectFormulaRegions([line]).map((region) => region.latex)).toEqual(["x"]);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  it("preserves escaped dollars while classifying standalone displays", () => {
+    expect(detectorInternals.isStandaloneDisplayLine("$$x\\$$y$$")).toBe(true);
+    expect(detectorInternals.isStandaloneDisplayLine("$$x$$y$$")).toBe(false);
+    expect(detectorInternals.isStandaloneDisplayLine("$$$$")).toBe(false);
+  });
+
+  it("recovers balanced suffix delimiters after unmatched outer openers", () => {
+    expect(detectorInternals.parenthesizedSegments("prefix ((x)")).toEqual([
+      { start: 8, end: 11, body: "x" }
+    ]);
+    expect(detectorInternals.inlineCodeRanges("```open `` tail")).toEqual([
+      { start: 1, end: 10 }
+    ]);
+  });
+
+  it("handles long unmatched parentheses and backticks without quadratic rescans", () => {
+    const started = performance.now();
+    expect(detectorInternals.parenthesizedSegments("(".repeat(30_000))).toEqual([]);
+    expect(detectorInternals.inlineCodeRanges("`".repeat(30_000))).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(250);
   });
 
   it("detects every numbered display equation without assigning layout semantics", () => {

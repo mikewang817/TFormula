@@ -83,6 +83,29 @@ class CapturingMathRenderer extends FastMathRenderer {
 }
 
 describe("FormulaScreen lifecycle", () => {
+  it("enables checkpoint bypass only for a stable trigger-free viewport", async () => {
+    const screen = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      writeOuter: () => undefined
+    });
+    try {
+      await screen.write("ordinary status text");
+      await screen.flushScan();
+      expect(screen.canSkipOutputCheckpoints).toBe(true);
+
+      // This is not yet a detected formula, but a later operand-only callback
+      // could complete it and must therefore retain bounded checkpoints.
+      await screen.write("\r\nx-");
+      await screen.flushScan();
+      expect(screen.canSkipOutputCheckpoints).toBe(false);
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it("uses grapheme-aware cell widths like modern Ghostty", async () => {
     const screen = new FormulaScreen({
       cols: 80,

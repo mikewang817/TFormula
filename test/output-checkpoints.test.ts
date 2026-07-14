@@ -93,6 +93,36 @@ describe("OutputCheckpointSplitter", () => {
     }
   });
 
+  it("queries Unicode boundaries sparsely for a large mixed burst", () => {
+    const splitter = new OutputCheckpointSplitter(10_000, 257);
+    const unit = "界e\u0301🧑‍💻";
+    const data = unit.repeat(20_000);
+    const slices = splitter.push(data);
+    expect(slices.map((slice) => slice.data).join("")).toBe(data);
+
+    const segments = new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(data);
+    let offset = 0;
+    for (const slice of slices) {
+      offset += slice.data.length;
+      if (!slice.checkpoint) continue;
+      const containing = segments.containing(offset - 1);
+      expect(containing && containing.index + containing.segment.length, String(offset))
+        .toBe(offset);
+    }
+  });
+
+  it("does not repeatedly inspect a long combining sequence after reaching its budget", () => {
+    const splitter = new OutputCheckpointSplitter(10_000, 32);
+    const cluster = `e${"\u0301".repeat(20_000)}`;
+    const data = `${"x".repeat(31)}${cluster}tail`;
+    const slices = splitter.push(data);
+    expect(slices.map((slice) => slice.data).join("")).toBe(data);
+    expect(slices[0]).toEqual({
+      data: `${"x".repeat(31)}${cluster}`,
+      checkpoint: true
+    });
+  });
+
   it("does not add a size checkpoint between CR and LF", () => {
     const splitter = new OutputCheckpointSplitter(100, 32);
     const prefix = "x".repeat(31);
@@ -114,6 +144,57 @@ describe("OutputCheckpointSplitter", () => {
     ]);
   });
 
+  it("never checkpoints after a trailing ZWJ before its pictograph", () => {
+    const splitter = new OutputCheckpointSplitter(100, 32);
+    const prefix = `${"x".repeat(31)}A`;
+    expect(splitter.push(prefix)).toEqual([{ data: prefix, checkpoint: false }]);
+    expect(splitter.push("\u200d💻tail")).toEqual([
+      { data: "\u200d💻", checkpoint: true },
+      { data: "tail", checkpoint: false }
+    ]);
+  });
+
+  it("keeps every fragmented 7-bit and C1 control atomic", () => {
+    const controls = [
+      "\x1b[38;2;1;2;3m",
+      "\x1b]0;window title\x07",
+      "\x1bP1;2|payload\x1b\\",
+      "\x1b_Gi=42;OK\x1b\\",
+      "\u009b2J",
+      "\u009d0;title\u009c",
+      "\u009fGi=42;OK\u009c",
+      "\x1b[31;\u009dreset title\u009c",
+      "\x1bPpayload\u009b2J"
+    ];
+    const transcript = `prefix-${controls.join("-visible-")}-suffix`;
+    const protectedRanges: Array<[number, number]> = [];
+    let searchFrom = 0;
+    for (const control of controls) {
+      const start = transcript.indexOf(control, searchFrom);
+      protectedRanges.push([start, start + control.length]);
+      searchFrom = start + control.length;
+    }
+
+    for (const width of [1, 2, 3, 5, 11]) {
+      const splitter = new OutputCheckpointSplitter(100, 32);
+      let output = "";
+      const checkpointOffsets: number[] = [];
+      for (let offset = 0; offset < transcript.length; offset += width) {
+        for (const slice of splitter.push(transcript.slice(offset, offset + width))) {
+          output += slice.data;
+          if (slice.checkpoint) checkpointOffsets.push(output.length);
+        }
+      }
+      expect(output, `width ${width}`).toBe(transcript);
+      for (const checkpoint of checkpointOffsets) {
+        expect(
+          protectedRanges.some(([start, end]) => checkpoint > start && checkpoint < end),
+          `width ${width}, checkpoint ${checkpoint}`
+        ).toBe(false);
+      }
+    }
+  });
+
   it("checkpoints before repeated IND controls can scroll a formula away", () => {
     const splitter = new OutputCheckpointSplitter(2, 32);
     const formula = "\\(x\\)";
@@ -130,6 +211,28 @@ describe("OutputCheckpointSplitter", () => {
     expect(splitter.push("\\(x\\)\x1b[100S")).toEqual([
       { data: "\\(x\\)", checkpoint: true },
       { data: "\x1b[100S", checkpoint: false }
+    ]);
+  });
+
+  it("keeps an aborted control string with the motion that terminates it", () => {
+    const splitter = new OutputCheckpointSplitter(2, 32);
+    const atomicMotion = "\x1b]unfinished title\x1b[100S";
+    expect(splitter.push(`\\(x\\)${atomicMotion}`)).toEqual([
+      { data: "\\(x\\)", checkpoint: true },
+      { data: atomicMotion, checkpoint: false }
+    ]);
+  });
+
+  it("recognizes large C1 motions without treating private CSI as motion", () => {
+    const splitter = new OutputCheckpointSplitter(2, 32);
+    expect(splitter.push("\\(x\\)\u009b100S")).toEqual([
+      { data: "\\(x\\)", checkpoint: true },
+      { data: "\u009b100S", checkpoint: false }
+    ]);
+
+    const privateCsi = new OutputCheckpointSplitter(2, 32);
+    expect(privateCsi.push("\\(x\\)\x1b[?100S")).toEqual([
+      { data: "\\(x\\)\x1b[?100S", checkpoint: false }
     ]);
   });
 
