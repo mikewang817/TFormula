@@ -17,6 +17,14 @@ visible TeX, renders it locally with MathJax, and places the result over the
 source text using the Kitty graphics protocol. The original text remains in
 the terminal buffer for copying.
 
+## See it in action
+
+This example shows a CLI agent explaining Maxwell's equations in Ghostty.
+TFormula detects the LaTeX in the live terminal output and renders the equations
+in place without replacing the surrounding text.
+
+![TFormula rendering Maxwell's equations in Ghostty](assets/tformula-maxwell.png)
+
 ## Quick start in Ghostty
 
 Recommended global installation. With npm 11, allow `node-pty` to run its
@@ -63,11 +71,6 @@ tformula --shell
 ```
 
 Running `tformula` without arguments is equivalent to `tformula --shell`.
-
-![TFormula rendering Maxwell's equations in Ghostty](assets/tformula-maxwell.png)
-
-TFormula renders LaTeX equations inline while preserving the Agent's terminal
-interface and surrounding text.
 
 ## Requirements
 
