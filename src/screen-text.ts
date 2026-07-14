@@ -8,12 +8,28 @@ export interface PhysicalScreenLine {
   text: string;
   /** xterm marks a physical row that continues the previous row. */
   isWrapped: boolean;
+  /**
+   * Optional UTF-16-boundary to terminal-column map built from xterm cells.
+   * Detection itself works on strings, but xterm's grapheme width rules are
+   * deliberately not identical to `string-width` for every Unicode script.
+   */
+  columnMap?: number[];
+  /** Occupied terminal columns represented by `text`. */
+  cellColumns?: number;
+  /** A stable style key when every visible cell has the same rendition. */
+  styleKey?: string;
+  /** False when visible cells use more than one rendition. */
+  uniformStyle?: boolean;
 }
 
 interface LogicalSpan {
   row: number;
   logicalStart: number;
   logicalEnd: number;
+  textStart: number;
+  textEnd: number;
+  text: string;
+  columnMap?: number[];
 }
 
 interface LogicalLine {
@@ -21,6 +37,21 @@ interface LogicalLine {
   spans: LogicalSpan[];
   truncatedStart: boolean;
   truncatedEnd: boolean;
+  uniformStyle: boolean;
+  styleKey?: string;
+}
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+function visualWidthAtUtf16Index(value: string, utf16Index: number): number {
+  let width = 0;
+  for (const part of graphemeSegmenter.segment(value)) {
+    if (part.index >= utf16Index) break;
+    const end = part.index + part.segment.length;
+    if (end > utf16Index) break;
+    width += stringWidth(part.segment);
+  }
+  return width;
 }
 
 export interface FormulaSnapshot {
@@ -41,22 +72,47 @@ function collapseSoftWrappedLines(
         text: "",
         spans: [],
         truncatedStart: physical.isWrapped,
-        truncatedEnd: false
+        truncatedEnd: false,
+        uniformStyle: physical.uniformStyle !== false,
+        styleKey: physical.styleKey
       };
       logicalLines.push(logical);
+    } else {
+      logical.uniformStyle &&= physical.uniformStyle !== false;
+      if (logical.styleKey !== undefined
+        && physical.styleKey !== undefined
+        && logical.styleKey !== physical.styleKey) {
+        logical.uniformStyle = false;
+      }
+      logical.styleKey ??= physical.styleKey;
     }
-    const logicalStart = stringWidth(logical.text);
+    const logicalStart = logical.spans.at(-1)?.logicalEnd ?? 0;
+    const textStart = logical.text.length;
+    const physicalColumns = physical.cellColumns ?? stringWidth(physical.text);
     logical.text += physical.text;
     logical.spans.push({
       row: physical.row,
       logicalStart,
-      logicalEnd: logicalStart + stringWidth(physical.text)
+      logicalEnd: logicalStart + physicalColumns,
+      textStart,
+      textEnd: textStart + physical.text.length,
+      text: physical.text,
+      columnMap: physical.columnMap
     });
   }
   if (continuesAfterViewport && logicalLines.length > 0) {
     logicalLines.at(-1)!.truncatedEnd = true;
   }
   return logicalLines;
+}
+
+function logicalColumnAtUtf16Index(line: LogicalLine, utf16Index: number): number {
+  const span = line.spans.find((candidate, index) =>
+    utf16Index < candidate.textEnd || index === line.spans.length - 1
+  ) ?? line.spans[0]!;
+  const localIndex = Math.max(0, Math.min(span.text.length, utf16Index - span.textStart));
+  const mapped = span.columnMap?.[localIndex];
+  return span.logicalStart + (mapped ?? visualWidthAtUtf16Index(span.text, localIndex));
 }
 
 function mapStart(spans: LogicalSpan[], logicalColumn: number): { row: number; column: number } {
@@ -114,7 +170,9 @@ function multilineFormulaSegments(
   for (let row = startRow; row <= endRow; row += 1) {
     const line = lines[row]!;
     const sliceStart = row === startRow ? startColumn : 0;
-    const sliceEnd = row === endRow ? endColumn : stringWidth(line.text);
+    const sliceEnd = row === endRow
+      ? endColumn
+      : line.spans.at(-1)?.logicalEnd ?? stringWidth(line.text);
     for (const span of line.spans) {
       const logicalStart = Math.max(sliceStart, span.logicalStart);
       const logicalEnd = Math.min(sliceEnd, span.logicalEnd);
@@ -131,11 +189,51 @@ function multilineFormulaSegments(
   return segments;
 }
 
+function compactFormulaSegments(
+  lines: LogicalLine[],
+  startRow: number,
+  endRow: number,
+  startColumn: number,
+  firstPhysicalRow: number
+): FormulaWrapSegment[] {
+  const segments: FormulaWrapSegment[] = [];
+  let sourceOffset = 0;
+  for (let row = startRow; row <= endRow; row += 1) {
+    const line = lines[row]!;
+    const lineEnd = line.spans.at(-1)?.logicalEnd ?? stringWidth(line.text);
+    for (const span of line.spans) {
+      const logicalStart = Math.max(startColumn, span.logicalStart);
+      const logicalEnd = Math.min(lineEnd, span.logicalEnd);
+      if (logicalEnd <= logicalStart) continue;
+      segments.push({
+        rowOffset: span.row - firstPhysicalRow,
+        startCol: logicalStart - span.logicalStart,
+        endCol: logicalEnd - span.logicalStart,
+        logicalStartCol: sourceOffset + logicalStart - startColumn
+      });
+    }
+    sourceOffset += Math.max(0, lineEnd - startColumn);
+  }
+  return segments;
+}
+
 function utf16IndexAtVisualColumn(line: string, column: number): number {
-  for (let index = 0; index <= line.length; index += 1) {
-    if (stringWidth(line.slice(0, index)) >= column) return index;
+  if (column <= 0) return 0;
+  let width = 0;
+  for (const part of graphemeSegmenter.segment(line)) {
+    const nextWidth = width + stringWidth(part.segment);
+    const end = part.index + part.segment.length;
+    // Detector columns always fall on a grapheme boundary. If a caller gives
+    // an interior column anyway, consume the whole grapheme rather than
+    // returning an index that splits a ZWJ/combining sequence.
+    if (nextWidth >= column) return end;
+    width = nextWidth;
   }
   return line.length;
+}
+
+function containsFragileLiteralGrapheme(value: string): boolean {
+  return /[\u200d\ufe0e\ufe0f\p{Emoji_Modifier}\p{Regional_Indicator}\p{Mark}]/u.test(value);
 }
 
 /**
@@ -164,9 +262,16 @@ function composeInlineFormulaTails(
     const last = candidates.at(-1)!;
     const lastEnd = utf16IndexAtVisualColumn(line, last.endCol);
     if (candidates.length === 1 && !line.slice(lastEnd).trim()) continue;
+    const firstStart = utf16IndexAtVisualColumn(line, candidates[0]!.startCol);
+    // MathJax's \text{} intentionally performs text shaping of its own. It
+    // cannot preserve terminal rendition runs or every emoji/combining
+    // grapheme, so leave those literal cells to the terminal and overlay only
+    // the formulas instead of corrupting the surrounding text.
+    if (!lines[row]!.uniformStyle
+      || containsFragileLiteralGrapheme(line.slice(firstStart))) continue;
 
     const latex: string[] = [];
-    let cursor = utf16IndexAtVisualColumn(line, candidates[0]!.startCol);
+    let cursor = firstStart;
     for (const candidate of candidates) {
       const start = utf16IndexAtVisualColumn(line, candidate.startCol);
       const end = utf16IndexAtVisualColumn(line, candidate.endCol);
@@ -222,12 +327,30 @@ export function detectScreenFormulaRegions(
   const regions: FormulaRegion[] = [];
   const deferred: FormulaSnapshot["deferred"] = [];
 
-  for (const region of detected) {
+  for (const detectedRegion of detected) {
+    let region = detectedRegion;
     const startLine = logicalLines[region.startRow];
     const endLine = logicalLines[region.endRow];
     if (!startLine || !endLine) continue;
     const involved = logicalLines.slice(region.startRow, region.endRow + 1);
-    if (involved.some((line) => line.truncatedStart || line.truncatedEnd)) continue;
+    // A complete explicit delimiter pair inside the visible fragment is safe
+    // even when the logical line itself began or ends outside the viewport.
+    // Inferred math has no such boundary proof and remains conservative.
+    if (region.confidence !== "explicit"
+      && involved.some((line) => line.truncatedStart || line.truncatedEnd)) continue;
+
+    const startIndex = utf16IndexAtVisualColumn(startLine.text, region.startCol);
+    const mappedStartCol = logicalColumnAtUtf16Index(startLine, startIndex);
+    const mappedEndCol = region.startRow === region.endRow || !region.compact
+      ? logicalColumnAtUtf16Index(
+          endLine,
+          utf16IndexAtVisualColumn(endLine.text, region.endCol)
+        )
+      : Math.max(...involved.map((line) => {
+          const visualEnd = Math.min(region.endCol, stringWidth(line.text));
+          return logicalColumnAtUtf16Index(line, utf16IndexAtVisualColumn(line.text, visualEnd));
+        }), 1);
+    region = { ...region, startCol: mappedStartCol, endCol: mappedEndCol };
 
     const hasSoftWrap = involved.some((line) => line.spans.length > 1);
     const borrowsTrailingBlank = Boolean(region.compact
@@ -269,8 +392,9 @@ export function detectScreenFormulaRegions(
         start.row
       );
       if (wrapSegments.length === 0) continue;
-      const endLineWidth = stringWidth(endLine.text);
+      const endLineWidth = endLine.spans.at(-1)?.logicalEnd ?? stringWidth(endLine.text);
       const hasSuffix = region.endCol < endLineWidth;
+      const commonRangeEnd = hasSuffix ? end.column : terminalColumns;
       regions.push({
         ...region,
         startRow: start.row,
@@ -278,10 +402,9 @@ export function detectScreenFormulaRegions(
         startCol: 0,
         endCol: terminalColumns,
         wrapSegments,
-        displayRange: {
-          startCol: start.column,
-          endCol: Math.max(start.column + 1, hasSuffix ? end.column : terminalColumns)
-        }
+        ...(commonRangeEnd > start.column
+          ? { displayRange: { startCol: start.column, endCol: commonRangeEnd } }
+          : { displayRange: undefined })
       });
       continue;
     }
@@ -313,13 +436,26 @@ export function detectScreenFormulaRegions(
       && formulaCrossesPhysicalRows
       && region.compact
       && !borrowsTrailingBlank) {
-      // Compact definition arrays combine several logical rows, so there is no
-      // one-dimensional source strip to slice. Keep their conservative
-      // fallback until they can be mapped independently row by row.
-      deferred.push({
-        latex: region.latex,
+      // A compact definition array is intrinsically two-dimensional. Keep its
+      // MathJax content whole, but paint backgrounds only over the physical
+      // source slices so a wrapped continuation at column zero is not leaked
+      // beside the array and unrelated terminal cells stay transparent.
+      const wrapSegments = compactFormulaSegments(
+        logicalLines,
+        region.startRow,
+        region.endRow,
+        region.startCol,
+        startLine.spans[0]!.row
+      );
+      if (wrapSegments.length < 2 || start.column >= terminalColumns) continue;
+      regions.push({
+        ...region,
         startRow: startLine.spans[0]!.row,
-        endRow: endLine.spans.at(-1)!.row
+        endRow: endLine.spans.at(-1)!.row,
+        startCol: 0,
+        endCol: terminalColumns,
+        displayRange: { startCol: start.column, endCol: terminalColumns },
+        wrapSegments
       });
       continue;
     }
@@ -370,6 +506,7 @@ export function detectScreenFormulaRegions(
 
 export const screenTextInternals = {
   collapseSoftWrappedLines,
+  compactFormulaSegments,
   composeInlineFormulaTails,
   mapEnd,
   mapStart,

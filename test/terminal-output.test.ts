@@ -90,6 +90,22 @@ describe("TerminalControlGate", () => {
       expect(gate.isGround).toBe(true);
     }
   });
+
+  it("treats ESC inside a control string as a new atomic escape sequence", () => {
+    const gate = new TerminalControlGate();
+    expect(gate.push("\x1b]open title\x1b[")).toBe("");
+    expect(gate.isGround).toBe(false);
+    expect(gate.push("2Jafter")).toBe("\x1b]open title\x1b[2Jafter");
+    expect(gate.isGround).toBe(true);
+  });
+
+  it("treats a C1 introducer inside a control string as an atomic restart", () => {
+    const gate = new TerminalControlGate();
+    expect(gate.push("\x1bPpayload\u009b2")).toBe("");
+    expect(gate.isGround).toBe(false);
+    expect(gate.push("Jafter")).toBe("\x1bPpayload\u009b2Jafter");
+    expect(gate.isGround).toBe(true);
+  });
 });
 
 describe("TerminalOutputTransformer", () => {
@@ -155,16 +171,82 @@ describe("TerminalOutputTransformer", () => {
       .toEqual({ data: "\x1b[2J", preservedEraseDisplayOffsets: [] });
   });
 
-  it("never rewrites ED-like bytes inside OSC or APC payload strings", () => {
+  it("never rewrites plain ED-like text inside OSC or APC payload strings", () => {
     const transformer = new TerminalOutputTransformer();
     const transcript = [
-      "\x1b]0;literal \x1b[2J title\x07",
-      "\x1b_Gi=7;literal \x1b[2J response\x1b\\"
+      "\x1b]0;literal [2J title\x07",
+      "\x1b_Gi=7;literal [2J response\x1b\\"
     ].join("");
     expect(transformer.push(transcript, true)).toEqual({
       data: transcript,
       preservedEraseDisplayOffsets: []
     });
+  });
+
+  it("rewrites ED 2 started by an ESC that aborts an OSC or APC string", async () => {
+    for (const prefix of ["\x1b]0;title ", "\x1b_Gi=7;payload "]) {
+      const input = `${prefix}\x1b[2Jafter`;
+      for (let split = 0; split <= input.length; split += 1) {
+        const transformer = new TerminalOutputTransformer();
+        const first = transformer.push(input.slice(0, split), true);
+        const second = transformer.push(input.slice(split), true);
+        const transformed = first.data + second.data;
+        expect(
+          first.preservedEraseDisplayOffsets.length
+            + second.preservedEraseDisplayOffsets.length,
+          `${JSON.stringify(prefix)} split ${split}`
+        ).toBe(1);
+        expect(transformed).toBe(`${prefix}\x1b[0J\x1b[1Jafter`);
+
+        const raw = new Terminal({ cols: 20, rows: 4, allowProposedApi: true });
+        const rewritten = new Terminal({ cols: 20, rows: 4, allowProposedApi: true });
+        try {
+          const setup = "first\r\nsecond\r\nthird";
+          await write(raw, setup + input);
+          await write(rewritten, setup + transformed);
+          const snapshot = (terminal: XtermTerminal) => ({
+            lines: Array.from({ length: terminal.rows }, (_, row) =>
+              terminal.buffer.active.getLine(row)?.translateToString(true) ?? ""
+            ),
+            cursorX: terminal.buffer.active.cursorX,
+            cursorY: terminal.buffer.active.cursorY
+          });
+          expect(snapshot(rewritten)).toEqual(snapshot(raw));
+        } finally {
+          raw.dispose();
+          rewritten.dispose();
+        }
+      }
+    }
+  });
+
+  it("rewrites C1 ED 2 that aborts an OSC or DCS string", async () => {
+    for (const prefix of ["\x1b]0;title ", "\x1bPpayload "]) {
+      const input = `${prefix}\u009b2Jafter`;
+      const transformer = new TerminalOutputTransformer();
+      const transformed = transformer.push(input, true);
+      expect(transformed.preservedEraseDisplayOffsets).toHaveLength(1);
+      expect(transformed.data).toBe(`${prefix}\x1b[0J\x1b[1Jafter`);
+
+      const raw = new Terminal({ cols: 20, rows: 4, allowProposedApi: true });
+      const rewritten = new Terminal({ cols: 20, rows: 4, allowProposedApi: true });
+      try {
+        const setup = "first\r\nsecond\r\nthird";
+        await write(raw, setup + input);
+        await write(rewritten, setup + transformed.data);
+        const snapshot = (terminal: XtermTerminal) => ({
+          lines: Array.from({ length: terminal.rows }, (_, row) =>
+            terminal.buffer.active.getLine(row)?.translateToString(true) ?? ""
+          ),
+          cursorX: terminal.buffer.active.cursorX,
+          cursorY: terminal.buffer.active.cursorY
+        });
+        expect(snapshot(rewritten)).toEqual(snapshot(raw));
+      } finally {
+        raw.dispose();
+        rewritten.dispose();
+      }
+    }
   });
 
   it("recognizes a real ED 2 after an earlier CSI is aborted by ESC", () => {
@@ -292,6 +374,15 @@ describe("TerminalCellHoldback", () => {
     expect(holdback.isGround).toBe(true);
   });
 
+  it("recognizes printable text after ESC aborts a control string", () => {
+    const holdback = new TerminalCellHoldback();
+    expect(holdback.push("\x1b]title\x1b[2JX")).toEqual({
+      data: "\x1b]title\x1b[2J",
+      held: "X"
+    });
+    expect(holdback.isGround).toBe(true);
+  });
+
   it("holds a complete Unicode grapheme and reports wide terminal cells", () => {
     const holdback = new TerminalCellHoldback();
     expect(holdback.push("中文")).toEqual({
@@ -307,6 +398,35 @@ describe("TerminalCellHoldback", () => {
     expect(holdback.push("Cafe\u0301")).toEqual({
       data: "Caf",
       held: "e\u0301"
+    });
+  });
+
+  it("does not invent a cursor delta for an emoji cluster continued by a later chunk", () => {
+    const holdback = new TerminalCellHoldback();
+    expect(holdback.push("abc👩")).toEqual({
+      data: "abc",
+      held: "👩",
+      heldColumns: 2
+    });
+    // The first held cell has drained before the next PTY callback. ZWJ + laptop
+    // extends that existing two-column cell; it is not a new two-column cell
+    // which the pending-wrap cursor restore may subtract from cursorX.
+    expect(holdback.push("\u200d💻")).toEqual({ data: "\u200d💻" });
+  });
+
+  it("retains grapheme lookbehind when ZWJ and its pictograph arrive separately", () => {
+    const holdback = new TerminalCellHoldback();
+    expect(holdback.push("👩")).toEqual({ held: "👩", data: "", heldColumns: 2 });
+    expect(holdback.push("\u200d")).toEqual({ data: "\u200d" });
+    expect(holdback.push("💻")).toEqual({ data: "💻" });
+    // A later ordinary cell still gets the usual one-cell holdback.
+    expect(holdback.push("x")).toEqual({ data: "", held: "x" });
+  });
+
+  it("does not hold a backward-joining emoji suffix split by SGR controls", () => {
+    const holdback = new TerminalCellHoldback();
+    expect(holdback.push("👩\x1b[31m\u200d💻")).toEqual({
+      data: "👩\x1b[31m\u200d💻"
     });
   });
 
@@ -353,14 +473,14 @@ describe("TerminalCellHoldback", () => {
     });
   });
 
-  it("ignores apparent DEC 2026 controls inside OSC payload text", () => {
+  it("tracks DEC 2026 after ESC aborts an OSC payload", () => {
     const holdback = new TerminalCellHoldback();
     expect(
       holdback.push("\x1b]0;literal \x1b[?2026h title\x07value\x1b[?2026l")
     ).toEqual({
       data: "\x1b]0;literal \x1b[?2026h title\x07valu",
       held: "e\x1b[?2026l",
-      heldSynchronizedOutputMode: false
+      heldSynchronizedOutputMode: true
     });
   });
 

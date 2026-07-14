@@ -178,7 +178,12 @@ TFormula 支持这些显式形式：
 $$ ... $$
 \( ... \)
 $ ... $
+\begin{equation} ... \end{equation}
+\begin{align} ... \end{align}
 ```
+
+标准的 equation、align、gather、cases 和 matrix 等环境无论外层是否带美元
+符号分隔符，均可识别。
 
 某些 Agent TUI 在渲染 Markdown 时会吃掉 `\[`、`\]` 或 `\(`、`\)` 外层的
 反斜杠。为兼容这种情况，TFormula 也会谨慎识别：

@@ -5,6 +5,33 @@ export interface OutputSlice {
   checkpoint: boolean;
 }
 
+interface TerminalMotion {
+  start: number;
+  lines?: number;
+  cells?: number;
+}
+
+function positiveParameter(value: string | undefined): number {
+  const parsed = Number(value || "1");
+  if (!Number.isFinite(parsed) || parsed <= 0) return 1;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.floor(parsed));
+}
+
+/** Screen-expanding controls which can outrun a raw-character checkpoint. */
+function terminalMotionAtEnd(value: string): TerminalMotion | undefined {
+  const single = /\x1b([DEM])$/u.exec(value);
+  if (single?.index !== undefined) {
+    return { start: single.index, lines: 1 };
+  }
+
+  const csi = /(?:\x1b\[|\u009b)([0-9;]*)([LMSTb])$/u.exec(value);
+  if (!csi || csi.index === undefined) return undefined;
+  const amount = positiveParameter(csi[1]?.split(";", 1)[0]);
+  return csi[2] === "b"
+    ? { start: csi.index, cells: amount }
+    : { start: csi.index, lines: amount };
+}
+
 /**
  * Splits a streaming PTY transcript at safe line or size boundaries. A
  * checkpoint lets the renderer place formulas before a large burst scrolls
@@ -57,6 +84,39 @@ export class OutputCheckpointSplitter {
       const code = character.charCodeAt(0);
       const ordinaryText = code >= 0x20 && !(code >= 0x7f && code <= 0x9f);
       const completedControl = !wasGround && this.#controlTracker.isGround;
+      const c1Motion: TerminalMotion | undefined = wasGround && this.#controlTracker.isGround
+        && (code === 0x84 || code === 0x85 || code === 0x8d)
+        ? { start: index, lines: 1 }
+        : undefined;
+      const controlTailStart = Math.max(0, index + 1 - 256);
+      const completedMotion = completedControl
+        ? terminalMotionAtEnd(data.slice(controlTailStart, index + 1))
+        : undefined;
+      if (completedMotion) completedMotion.start += controlTailStart;
+      const motion = c1Motion ?? completedMotion;
+      if (motion) {
+        const crossesLineBudget = motion.lines !== undefined
+          && this.#linesSinceCheckpoint + motion.lines >= this.#lineInterval;
+        const crossesCharacterBudget = motion.cells !== undefined
+          && this.#charactersSinceCheckpoint + motion.cells >= this.#characterInterval;
+        if (crossesLineBudget || crossesCharacterBudget) {
+          // A single REP/scroll command can move thousands of cells despite
+          // occupying only a few bytes. Scan the preceding mirror state before
+          // the real terminal executes it. An empty slice is intentional when
+          // the control begins a new PTY callback: it forms a barrier for text
+          // returned by the preceding callback.
+          slices.push({
+            data: data.slice(sliceStart, Math.max(sliceStart, motion.start)),
+            checkpoint: true
+          });
+          sliceStart = Math.max(sliceStart, motion.start);
+          this.#linesSinceCheckpoint = 0;
+          this.#charactersSinceCheckpoint = 0;
+          continue;
+        }
+        this.#linesSinceCheckpoint += motion.lines ?? 0;
+        this.#charactersSinceCheckpoint += motion.cells ?? 0;
+      }
       const safeCharacterBoundary = ordinaryText || completedControl;
       // Never insert a checkpoint after a high surrogate. When it is paired,
       // the next iteration can checkpoint after the complete code point. This

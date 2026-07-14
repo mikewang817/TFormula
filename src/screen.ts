@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import type {
+  IBufferCell,
   IBufferLine,
   IMarker,
   ITerminalAddon,
@@ -101,6 +102,75 @@ function mutableXtermBufferCursor(
 
 function rgbHex(value: number): string {
   return `#${value.toString(16).padStart(6, "0").slice(-6)}`;
+}
+
+function paletteHex(index: number): string {
+  const base = [
+    "#000000", "#cd0000", "#00cd00", "#cdcd00",
+    "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5",
+    "#7f7f7f", "#ff0000", "#00ff00", "#ffff00",
+    "#5c5cff", "#ff00ff", "#00ffff", "#ffffff"
+  ];
+  if (index < base.length) return base[Math.max(0, index)]!;
+  if (index >= 232) {
+    const level = Math.max(0, Math.min(255, 8 + (index - 232) * 10));
+    return rgbHex((level << 16) | (level << 8) | level);
+  }
+  const value = Math.max(0, Math.min(215, index - 16));
+  const levels = [0, 95, 135, 175, 215, 255];
+  const red = levels[Math.floor(value / 36)]!;
+  const green = levels[Math.floor(value / 6) % 6]!;
+  const blue = levels[value % 6]!;
+  return rgbHex((red << 16) | (green << 8) | blue);
+}
+
+function cellStyleKey(cell: IBufferCell): string {
+  return [
+    cell.getFgColorMode(), cell.getFgColor(),
+    cell.getBgColorMode(), cell.getBgColor(),
+    cell.isBold(), cell.isDim(), cell.isItalic(), cell.isUnderline(),
+    cell.isBlink(), cell.isInverse(), cell.isInvisible(),
+    cell.isStrikethrough(), cell.isOverline()
+  ].join(":");
+}
+
+function lineTextSnapshot(line: IBufferLine | undefined): {
+  text: string;
+  columnMap?: number[];
+  cellColumns?: number;
+  styleKey?: string;
+  uniformStyle?: boolean;
+} {
+  if (!line) return { text: "" };
+  const endColumn = lineTrimmedColumns(line);
+  let text = "";
+  const columnMap: number[] = [0];
+  const styles = new Set<string>();
+  for (let column = 0; column < endColumn; column += 1) {
+    const cell = line.getCell(column);
+    if (!cell || cell.getWidth() === 0) continue;
+    const chars = cell.getChars() || " ";
+    const startIndex = text.length;
+    columnMap[startIndex] = column;
+    text += chars;
+    for (let offset = 1; offset < chars.length; offset += 1) {
+      columnMap[startIndex + offset] = column + cell.getWidth();
+    }
+    columnMap[text.length] = column + cell.getWidth();
+    if (cell.getChars()) styles.add(cellStyleKey(cell));
+  }
+  // Keep the public xterm translation as the text oracle. The cell walk above
+  // should match it, but feature-detect a future xterm representation change
+  // and safely fall back to string-based columns rather than using a bad map.
+  const translated = line.translateToString(true);
+  if (translated !== text) return { text: translated };
+  return {
+    text,
+    columnMap,
+    cellColumns: endColumn,
+    uniformStyle: styles.size <= 1,
+    styleKey: styles.size === 1 ? styles.values().next().value : undefined
+  };
 }
 
 export class FormulaScreen {
@@ -338,6 +408,18 @@ export class FormulaScreen {
     return this.terminal.buffer.active.cursorX >= this.terminal.cols;
   }
 
+  #rightMarginGraphemeWidth(fallback: number): number {
+    const buffer = this.terminal.buffer.active;
+    const line = buffer.getLine(buffer.baseY + buffer.cursorY);
+    if (!line) return fallback;
+    for (let column = this.terminal.cols - 1; column >= 0; column -= 1) {
+      const cell = line.getCell(column);
+      if (!cell || cell.getWidth() === 0) continue;
+      return cell.getChars() ? Math.max(1, cell.getWidth()) : fallback;
+    }
+    return fallback;
+  }
+
   /**
    * Scan while the real terminal is still one ordinary cell behind the mirror.
    * Every CUP restore targets that pre-cell position; the proxy writes the held
@@ -365,7 +447,13 @@ export class FormulaScreen {
           await new Promise<void>((resolve) => this.#layoutWaiters.push(resolve));
           continue;
         }
-        this.#pendingWrapHeldColumns = Math.max(1, Math.floor(heldColumns));
+        // Derive the width from the same xterm grapheme provider that previewed
+        // the held cell. Unicode versions can disagree with `string-width`
+        // (for example U+1FA77), and trusting the caller would restore the real
+        // cursor one column too far left.
+        this.#pendingWrapHeldColumns = this.#rightMarginGraphemeWidth(
+          Math.max(1, Math.floor(heldColumns))
+        );
         try {
           await this.flushScan(true);
         } finally {
@@ -1229,7 +1317,7 @@ export class FormulaScreen {
       const line = buffer.getLine(buffer.viewportY + row);
       return {
         row,
-        text: line?.translateToString(true) ?? "",
+        ...lineTextSnapshot(line),
         isWrapped: line?.isWrapped ?? false
       };
     });
@@ -1257,15 +1345,72 @@ export class FormulaScreen {
     return /[\x40-\x7e]/u.test(suffix.slice(2)) ? "" : suffix.slice(-32);
   }
 
-  #regionColors(region: FormulaRegion): { foreground: string; background: string } {
+  #regionCells(region: FormulaRegion): IBufferCell[] {
     const buffer = this.terminal.buffer.active;
-    const line = buffer.getLine(buffer.viewportY + region.startRow);
-    const colorColumn = region.wrapSegments?.[0]?.startCol ?? region.startCol;
-    const cell = line?.getCell(Math.min(colorColumn, this.terminal.cols - 1));
+    const cells: IBufferCell[] = [];
+    const ranges = region.wrapSegments?.length
+      ? region.wrapSegments.map((segment) => ({
+          row: region.startRow + segment.rowOffset,
+          startCol: segment.startCol,
+          endCol: segment.endCol
+        }))
+      : region.startRow < region.endRow && !region.compact
+      ? Array.from(
+          { length: region.endRow - region.startRow + 1 },
+          (_, offset) => ({
+            row: region.startRow + offset,
+            startCol: offset === 0 ? region.startCol : 0,
+            endCol: offset === region.endRow - region.startRow
+              ? region.endCol
+              : this.terminal.cols
+          })
+        )
+      : Array.from(
+          { length: region.endRow - region.startRow + 1 },
+          (_, offset) => ({
+            row: region.startRow + offset,
+            startCol: region.startCol,
+            endCol: region.endCol
+          })
+        );
+    for (const range of ranges) {
+      const line = buffer.getLine(buffer.viewportY + range.row);
+      if (!line) continue;
+      for (let column = Math.max(0, range.startCol);
+        column < Math.min(this.terminal.cols, range.endCol);
+        column += 1) {
+        const cell = line.getCell(column);
+        if (cell && cell.getWidth() !== 0) cells.push(cell);
+      }
+    }
+    return cells;
+  }
+
+  #regionIsInvisible(region: FormulaRegion): boolean {
+    // Never turn SGR 8 concealed source into a visible image. Checking every
+    // occupied source cell also protects partially concealed expressions.
+    return this.#regionCells(region).some((cell) =>
+      Boolean(cell.getChars() && cell.isInvisible())
+    );
+  }
+
+  #regionColors(region: FormulaRegion): { foreground: string; background: string } {
+    const cells = this.#regionCells(region);
+    const cell = cells.find((candidate) =>
+      /[^\s\\()[\]$]/u.test(candidate.getChars())
+    ) ?? cells.find((candidate) => /\S/u.test(candidate.getChars()));
     if (!cell) return this.#capabilities;
 
-    let foreground = cell.isFgRGB() ? rgbHex(cell.getFgColor()) : this.#capabilities.foreground;
-    let background = cell.isBgRGB() ? rgbHex(cell.getBgColor()) : this.#capabilities.background;
+    let foreground = cell.isFgRGB()
+      ? rgbHex(cell.getFgColor())
+      : cell.isFgPalette()
+        ? paletteHex(cell.getFgColor())
+        : this.#capabilities.foreground;
+    let background = cell.isBgRGB()
+      ? rgbHex(cell.getBgColor())
+      : cell.isBgPalette()
+        ? paletteHex(cell.getBgColor())
+        : this.#capabilities.background;
     if (cell.isInverse()) [foreground, background] = [background, foreground];
     return { foreground, background };
   }
@@ -1402,7 +1547,7 @@ export class FormulaScreen {
       this.#detachExpiredMarkerPlacements();
       const snapshot = this.#formulaSnapshot();
       const regions = snapshot.regions;
-      const prepared = regions.map((region) => {
+      const prepared = regions.filter((region) => !this.#regionIsInvisible(region)).map((region) => {
         const rows = region.endRow - region.startRow + 1;
         const columns = rows > 1 && !region.compact
           ? this.terminal.cols

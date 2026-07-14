@@ -97,6 +97,50 @@ describe("FormulaCache", () => {
     expect(left).toEqual(right);
   });
 
+  it("falls back to the in-memory cache when the disk root is unavailable", async () => {
+    const root = await cacheRoot();
+    const rootFile = join(root, "not-a-directory");
+    await writeFile(rootFile, "occupied");
+    const key = formulaCacheKey({ variant: "memory-fallback" });
+    const cache = new FormulaCache({ root: rootFile });
+    let producers = 0;
+
+    const first = await cache.getOrCreateSvg(key, async () => {
+      producers += 1;
+      return '<svg width="1ex" height="1ex"/>';
+    });
+    const second = await cache.getOrCreateSvg(key, async () => {
+      producers += 1;
+      return '<svg width="2ex" height="2ex"/>';
+    });
+
+    expect(first).toBe('<svg width="1ex" height="1ex"/>');
+    expect(second).toBe(first);
+    expect(producers).toBe(1);
+  });
+
+  it("deduplicates concurrent producers after falling back to memory", async () => {
+    const root = await cacheRoot();
+    const rootFile = join(root, "not-a-directory");
+    await writeFile(rootFile, "occupied");
+    const key = formulaCacheKey({ variant: "concurrent-memory-fallback" });
+    const cache = new FormulaCache({ root: rootFile });
+    let producers = 0;
+    const produce = async (): Promise<string> => {
+      producers += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return '<svg width="1ex" height="1ex"/>';
+    };
+
+    const [left, right] = await Promise.all([
+      cache.getOrCreateSvg(key, produce),
+      cache.getOrCreateSvg(key, produce)
+    ]);
+
+    expect(left).toBe(right);
+    expect(producers).toBe(1);
+  });
+
   it("rejects a corrupt disk entry and regenerates it", async () => {
     const root = await cacheRoot();
     const key = formulaCacheKey({ variant: "corrupt" });
@@ -212,6 +256,38 @@ describe("FormulaCache", () => {
 
     expect(producers).toBe(0);
     await expect(stat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("falls back to memory when lock initialization is denied", async () => {
+    const root = await cacheRoot();
+    const key = formulaCacheKey({ variant: "denied-lock-initialization" });
+    const cache = new FormulaCache({ root });
+    const probePath = join(root, "file-handle-permission-probe");
+    const probe = await open(probePath, "w");
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+      writeFile: (...args: unknown[]) => Promise<void>;
+    };
+    await probe.close();
+    await rm(probePath, { force: true });
+
+    const permissionFailure = Object.assign(new Error("injected permission failure"), {
+      code: "EPERM"
+    });
+    const writeSpy = vi.spyOn(fileHandlePrototype, "writeFile")
+      .mockRejectedValueOnce(permissionFailure);
+    let producers = 0;
+    try {
+      const svg = await cache.getOrCreateSvg(key, async () => {
+        producers += 1;
+        return '<svg width="1ex" height="1ex"/>';
+      });
+      expect(svg).toContain("<svg");
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    expect(producers).toBe(1);
+    expect(await cache.getSvg(key)).toContain("<svg");
   });
 
   it("expires an old lock even when its recorded PID is currently alive", async () => {

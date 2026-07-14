@@ -113,4 +113,50 @@ describe("OutputCheckpointSplitter", () => {
       { data: "tail", checkpoint: false }
     ]);
   });
+
+  it("checkpoints before repeated IND controls can scroll a formula away", () => {
+    const splitter = new OutputCheckpointSplitter(2, 32);
+    const formula = "\\(x\\)";
+    const ind = "\x1bD";
+    expect(splitter.push(formula + ind.repeat(4))).toEqual([
+      { data: formula + ind, checkpoint: true },
+      { data: ind.repeat(2), checkpoint: true },
+      { data: ind, checkpoint: false }
+    ]);
+  });
+
+  it("checkpoints before one large CSI scroll command", () => {
+    const splitter = new OutputCheckpointSplitter(2, 32);
+    expect(splitter.push("\\(x\\)\x1b[100S")).toEqual([
+      { data: "\\(x\\)", checkpoint: true },
+      { data: "\x1b[100S", checkpoint: false }
+    ]);
+  });
+
+  it("emits an empty barrier when a large motion starts the next PTY callback", () => {
+    const splitter = new OutputCheckpointSplitter(2, 32);
+    expect(splitter.push("\\(x\\)")).toEqual([
+      { data: "\\(x\\)", checkpoint: false }
+    ]);
+    expect(splitter.push("\x1b[100S")).toEqual([
+      { data: "", checkpoint: true },
+      { data: "\x1b[100S", checkpoint: false }
+    ]);
+  });
+
+  it("checkpoints before REP expands a short byte sequence into many cells", () => {
+    const splitter = new OutputCheckpointSplitter(100, 32);
+    expect(splitter.push("\\(x\\)A\x1b[100b")).toEqual([
+      { data: "\\(x\\)A", checkpoint: true },
+      { data: "\x1b[100b", checkpoint: false }
+    ]);
+  });
+
+  it("budgets C1 IND, NEL, and RI as line motions", () => {
+    const splitter = new OutputCheckpointSplitter(2, 32);
+    expect(splitter.push("formula\u0084\u0085\u008d")).toEqual([
+      { data: "formula\u0084", checkpoint: true },
+      { data: "\u0085\u008d", checkpoint: false }
+    ]);
+  });
 });

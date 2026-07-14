@@ -134,9 +134,9 @@ with prose are never expanded, so neighboring text is not covered.
 
 A trailing inline formula can similarly use one following blank row for tall
 fraction content. TFormula absorbs terminal punctuation into that overlay so it
-stays next to the rendered expression. The common reciprocal-root form
-`1/\sqrt{...}` is typeset as `\frac{1}{\sqrt{...}}`; slashes in ordinary units
-such as `m/s` are left unchanged.
+stays next to the rendered expression. Valid TeX is passed to MathJax without
+algebraic rewrites, so forms such as `1/\sqrt{...}`, superscripts, and unit
+slashes retain exactly the semantics emitted by the child program.
 
 When TeX soft-wraps at the terminal edge, or a terminal TUI inserts hard rows at
 its own content width, TFormula reassembles the expression and paints it through
@@ -198,7 +198,12 @@ TFormula recognizes these explicit forms:
 $$ ... $$
 \( ... \)
 $ ... $
+\begin{equation} ... \end{equation}
+\begin{align} ... \end{align}
 ```
+
+The standard equation, alignment, gather, cases, and matrix environments are
+recognized with or without surrounding dollar delimiters.
 
 Some agent TUIs consume the backslashes around `\[` and `\]` while rendering
 Markdown. For that case TFormula conservatively recognizes a bare `[`/`]`

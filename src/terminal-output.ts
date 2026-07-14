@@ -21,8 +21,7 @@ function textOnlyEraseDisplay(): string {
  * recreated when a user later scrolls locally. ED 0/1 leave those pins intact.
  */
 export class TerminalOutputTransformer {
-  #state: "ground" | "escape" | "csi" | "osc" | "string" | "string-escape" = "ground";
-  #stringState: "osc" | "string" = "string";
+  #state: "ground" | "escape" | "csi" | "osc" | "string" = "ground";
   #pending = "";
 
   push(
@@ -64,24 +63,26 @@ export class TerminalOutputTransformer {
       }
 
       if (this.#state === "osc" || this.#state === "string") {
-        output += character;
         if (code === 0x18 || code === 0x1a || code === 0x9c
           || (this.#state === "osc" && code === 0x07)) {
+          output += character;
           this.#state = "ground";
         } else if (code === 0x1b) {
-          this.#stringState = this.#state;
-          this.#state = "string-escape";
-        }
-        continue;
-      }
-
-      if (this.#state === "string-escape") {
-        output += character;
-        if (code === 0x18 || code === 0x1a || code === 0x9c || character === "\\") {
-          this.#state = "ground";
-        } else if (code !== 0x1b) {
-          this.#state = this.#stringState;
-        }
+          // ESC aborts the current control string and starts a fresh escape
+          // sequence. ESC \\ is therefore parsed as an ordinary ST, while
+          // ESC [ starts a real CSI that must still be inspected for ED 2.
+          this.#pending = character;
+          this.#state = "escape";
+        } else if (code === 0x9b) {
+          this.#pending = character;
+          this.#state = "csi";
+        } else if (code === 0x9d) {
+          output += character;
+          this.#state = "osc";
+        } else if (code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) {
+          output += character;
+          this.#state = "string";
+        } else output += character;
         continue;
       }
 
@@ -171,7 +172,7 @@ export class TerminalOutputTransformer {
 
 export const terminalOutputInternals = { textOnlyEraseDisplay };
 
-type ControlState = "ground" | "escape" | "csi" | "osc" | "string" | "string-escape";
+type ControlState = "ground" | "escape" | "csi" | "osc" | "string";
 
 /**
  * Keeps an incomplete child control sequence off the real terminal until its
@@ -186,7 +187,6 @@ type ControlState = "ground" | "escape" | "csi" | "osc" | "string" | "string-esc
  */
 export class TerminalControlGate {
   #state: ControlState = "ground";
-  #stringState: "osc" | "string" = "string";
   #pending = "";
 
   get isGround(): boolean {
@@ -242,14 +242,10 @@ export class TerminalControlGate {
         continue;
       }
 
-      // C1 introducers are "anywhere" transitions outside payload strings.
-      // In particular, a C1 OSC/APC can abort an incomplete ESC or CSI. If we
-      // kept parsing the old CSI, its first ASCII payload letter would look
-      // like a final byte and we could release while the real terminal is
-      // still inside the newly opened string.
+      // C1 introducers are "anywhere" transitions. The string-specific branch
+      // below handles the same restarts while an OSC/DCS/APC is active.
       if (this.#state !== "osc"
-        && this.#state !== "string"
-        && this.#state !== "string-escape") {
+        && this.#state !== "string") {
         if (code === 0x9b) {
           this.#state = "csi";
           continue;
@@ -301,20 +297,17 @@ export class TerminalControlGate {
           releasePending();
           plainStart = index + 1;
         } else if (code === 0x1b) {
-          this.#stringState = this.#state;
-          this.#state = "string-escape";
+          // Keep the complete aborted string plus the new ESC atomic until
+          // the replacement escape sequence itself reaches a final byte.
+          this.#state = "escape";
+        } else if (code === 0x9b) {
+          this.#state = "csi";
+        } else if (code === 0x9d) {
+          this.#state = "osc";
+        } else if (code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) {
+          this.#state = "string";
         }
         continue;
-      }
-
-      if (this.#state === "string-escape") {
-        if (character === "\\" || code === 0x9c) {
-          this.#state = "ground";
-          releasePending();
-          plainStart = index + 1;
-        } else if (code !== 0x1b) {
-          this.#state = this.#stringState;
-        }
       }
     }
 
@@ -362,16 +355,27 @@ interface SynchronizedOutputTransition {
 
 interface ConsumedTerminalText {
   textRunStart?: number;
+  /** Printable ground-state code points and their offsets in the current chunk. */
+  printable: Array<{ start: number; text: string }>;
   synchronizedOutputModeBefore: boolean;
   synchronizedOutputTransitions: SynchronizedOutputTransition[];
 }
 
 export class TerminalCellHoldback {
   #state: ControlState = "ground";
-  #stringState: "osc" | "string" = "string";
   #csiParameters = "";
   #synchronizedOutputMode = false;
   readonly #graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  /**
+   * Last printable terminal grapheme after the previous push has fully drained.
+   *
+   * Intl.Segmenter operates on one string at a time. Remembering this suffix is
+   * therefore essential when a PTY callback splits a cluster after an emoji,
+   * ZWJ, regional indicator, or base character. The value represents terminal
+   * text, not bytes currently held by this object: callers write `held` before
+   * invoking push again.
+   */
+  #trailingGrapheme = "";
 
   get isGround(): boolean {
     return this.#state === "ground";
@@ -382,11 +386,12 @@ export class TerminalCellHoldback {
    * individual UTF-16 units and does not need grapheme segmentation/width.
    */
   track(data: string): void {
-    this.#consume(data);
+    this.#consume(data, false);
   }
 
-  #consume(data: string): ConsumedTerminalText {
+  #consume(data: string, collectPrintable = true): ConsumedTerminalText {
     let textRunStart: number | undefined;
+    const printable: ConsumedTerminalText["printable"] = [];
     const synchronizedOutputModeBefore = this.#synchronizedOutputMode;
     const synchronizedOutputTransitions: SynchronizedOutputTransition[] = [];
     for (let index = 0; index < data.length; index += 1) {
@@ -401,12 +406,10 @@ export class TerminalCellHoldback {
         continue;
       }
 
-      // C1 introducers are "anywhere" transitions in the VT parser (outside
-      // payload strings). Handling them only from ground can expose the bytes
-      // after a restarted/aborted escape sequence as ordinary text.
+      // C1 introducers are "anywhere" transitions. The string-specific branch
+      // below handles the same restarts while an OSC/DCS/APC is active.
       if (this.#state !== "osc"
-        && this.#state !== "string"
-        && this.#state !== "string-escape") {
+        && this.#state !== "string") {
         if (code === 0x9b) {
           this.#state = "csi";
           this.#csiParameters = "";
@@ -439,6 +442,12 @@ export class TerminalCellHoldback {
           && !(code >= 0x7f && code <= 0x9f)
           && !(code >= 0xd800 && code <= 0xdfff)) {
           textRunStart ??= index;
+          if (collectPrintable) {
+            printable.push({
+              start: index,
+              text: data.slice(index, index + codeUnits)
+            });
+          }
           index += codeUnits - 1;
           continue;
         }
@@ -499,32 +508,89 @@ export class TerminalCellHoldback {
       if (this.#state === "osc" || this.#state === "string") {
         if (this.#state === "osc" && code === 0x07) this.#state = "ground";
         else if (code === 0x9c) this.#state = "ground";
-        else if (code === 0x1b) {
-          this.#stringState = this.#state;
-          this.#state = "string-escape";
+        else if (code === 0x1b) this.#state = "escape";
+        else if (code === 0x9b) {
+          this.#state = "csi";
+          this.#csiParameters = "";
+        }
+        else if (code === 0x9d) this.#state = "osc";
+        else if (code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) {
+          this.#state = "string";
         }
         textRunStart = undefined;
         continue;
       }
-
-      if (this.#state === "string-escape") {
-        if (data[index] === "\\" || code === 0x9c) this.#state = "ground";
-        else if (code !== 0x1b) this.#state = this.#stringState;
-        textRunStart = undefined;
-      }
     }
     return {
       textRunStart,
+      printable,
       synchronizedOutputModeBefore,
       synchronizedOutputTransitions
     };
+  }
+
+  /**
+   * Remember the terminal's trailing printable cluster and report whether the
+   * final cluster in this chunk joins text that was already sent to the real
+   * terminal (or an earlier printable run separated by terminal controls).
+   *
+   * A backward-joining suffix consumes no new cells of its own. Treating its
+   * last emoji as a standalone two-column held cell makes the pending-wrap path
+   * restore the real cursor two columns too far left. In that case push() sends
+   * the whole chunk normally instead of creating a false cursor delta.
+   */
+  #lastPrintableJoinsEarlier(consumed: ConsumedTerminalText): boolean {
+    if (consumed.printable.length === 0) return false;
+
+    let current = "";
+    const originalOffsets: number[] = [];
+    for (const printable of consumed.printable) {
+      current += printable.text;
+      for (let offset = 0; offset < printable.text.length; offset += 1) {
+        originalOffsets.push(printable.start + offset);
+      }
+    }
+
+    const previousLength = this.#trailingGrapheme.length;
+    const combined = this.#trailingGrapheme + current;
+    let last: Intl.SegmentData | undefined;
+    for (const segment of this.#graphemes.segment(combined)) last = segment;
+    if (!last) return false;
+
+    this.#trailingGrapheme = last.segment;
+    if (last.index < previousLength) return true;
+    const currentStart = last.index - previousLength;
+    const originalStart = originalOffsets[currentStart];
+    const lastPrintable = consumed.printable.at(-1)!;
+    // The ordinary hold candidate starts at the last grapheme of the final
+    // contiguous text run. If the terminal grapheme began in an earlier run,
+    // an SGR/control split the cluster and its standalone width is also unsafe.
+    let finalRunStart = consumed.printable.length - 1;
+    while (finalRunStart > 0) {
+      const previous = consumed.printable[finalRunStart - 1]!;
+      const next = consumed.printable[finalRunStart]!;
+      if (previous.start + previous.text.length !== next.start) break;
+      finalRunStart -= 1;
+    }
+    const finalRun = consumed.printable.slice(finalRunStart);
+    let candidateStart = lastPrintable.start;
+    if (finalRun.length > 0) {
+      const finalText = finalRun.map((entry) => entry.text).join("");
+      let finalSegment: Intl.SegmentData | undefined;
+      for (const segment of this.#graphemes.segment(finalText)) finalSegment = segment;
+      if (finalSegment) {
+        candidateStart = finalRun[0]!.start + finalSegment.index;
+      }
+    }
+    return originalStart !== undefined && originalStart < candidateStart;
   }
 
   #holdLastGrapheme(
     data: string,
     textRunStart: number,
     textRunEnd: number,
-    consumed: ConsumedTerminalText
+    consumed: ConsumedTerminalText,
+    joinsEarlier = false
   ): HeldTerminalCell {
     const text = data.slice(textRunStart, textRunEnd);
     let lastGraphemeStart = 0;
@@ -535,6 +601,10 @@ export class TerminalCellHoldback {
     // Never hand a Writable one half of malformed UTF-16: each write encodes
     // strings independently and would turn that half into U+FFFD.
     if (/[\ud800-\udfff]/u.test(grapheme)) return { data };
+    // The last printable token is only a suffix of a grapheme whose base cell
+    // was already written. Sending the whole chunk keeps mirror and real cursor
+    // state identical; there is no positive cell delta that CUP can restore.
+    if (joinsEarlier) return { data };
     const heldColumns = stringWidth(grapheme);
     if (heldColumns <= 0) return { data };
     const heldStart = textRunStart + lastGraphemeStart;
@@ -558,9 +628,16 @@ export class TerminalCellHoldback {
 
   push(data: string): HeldTerminalCell {
     const consumed = this.#consume(data);
+    const joinsEarlier = this.#lastPrintableJoinsEarlier(consumed);
     const { textRunStart } = consumed;
     if (this.#state === "ground" && textRunStart !== undefined) {
-      return this.#holdLastGrapheme(data, textRunStart, data.length, consumed);
+      return this.#holdLastGrapheme(
+        data,
+        textRunStart,
+        data.length,
+        consumed,
+        joinsEarlier
+      );
     }
     if (this.#state === "ground") {
       // SGR and DEC synchronized-output toggles change presentation state but
@@ -576,7 +653,8 @@ export class TerminalCellHoldback {
             data,
             textSuffix.index,
             zeroCellSuffix.index,
-            consumed
+            consumed,
+            joinsEarlier
           );
         }
       }

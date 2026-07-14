@@ -72,6 +72,80 @@ describe("detectFormulaRegions", () => {
     expect(region?.latex).toContain("d\\mathbf{A}");
   });
 
+  it("reassembles every explicit delimiter across TUI hard rows without losing suffix formulas", () => {
+    const cases: Array<{ lines: string[]; latex: string; display: boolean }> = [
+      {
+        lines: ["prefix \\(x_i +", "y_i\\) suffix $z$"],
+        latex: "x_i +\ny_i",
+        display: false
+      },
+      {
+        lines: ["prefix \\[x_i +", "y_i\\] suffix $z$"],
+        latex: "x_i +\ny_i",
+        display: true
+      },
+      {
+        lines: ["prefix $x_i +", "y_i$ suffix \\(z\\)"],
+        latex: "x_i +\ny_i",
+        display: false
+      },
+      {
+        lines: ["prefix $$x_i +", "y_i$$ suffix $z$"],
+        latex: "x_i +\ny_i",
+        display: true
+      }
+    ];
+
+    for (const { lines, latex, display } of cases) {
+      const regions = detectFormulaRegions(lines);
+      expect(regions, lines.join(" | ")).toContainEqual(expect.objectContaining({
+        startRow: 0,
+        endRow: 1,
+        latex,
+        display,
+        confidence: "explicit"
+      }));
+      expect(regions.map((region) => region.latex), lines.join(" | ")).toContain("z");
+    }
+  });
+
+  it("repairs a TeX control word split by a TUI hard row", () => {
+    const regions = detectFormulaRegions([
+      "prefix $$\\frac{1}{\\varep",
+      "silon_0}$$ suffix $x$"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual([
+      "\\frac{1}{\\varepsilon_0}",
+      "x"
+    ]);
+  });
+
+  it("detects TeX display environments without dollar delimiters", () => {
+    const regions = detectFormulaRegions([
+      "before \\begin{align}",
+      "a&=b+c\\\\",
+      "d&=e",
+      "\\end{align} after \\(z\\)"
+    ]);
+    expect(regions).toContainEqual(expect.objectContaining({
+      startRow: 0,
+      endRow: 3,
+      latex: "\\begin{align}\na&=b+c\\\\\nd&=e\n\\end{align}",
+      display: true,
+      confidence: "explicit"
+    }));
+    expect(regions.map((region) => region.latex)).toContain("z");
+  });
+
+  it("leaves TeX environments in Markdown code untouched", () => {
+    expect(detectFormulaRegions([
+      "`\\begin{equation}x=1\\end{equation}`",
+      "```latex",
+      "\\begin{align}a&=b\\end{align}",
+      "```"
+    ])).toEqual([]);
+  });
+
   it("does not give a shared blank row to only one of two displays", () => {
     const regions = detectFormulaRegions([
       "$$\\frac{1}{x}$$",
@@ -181,6 +255,85 @@ describe("detectFormulaRegions", () => {
       ["y=\\$10", true],
       ["x=\\$5", false]
     ]);
+  });
+
+  it("recovers dollar math after unmatched prices, variables, and code-span dollars", () => {
+    const cases = [
+      "cost is $12; variable $x$",
+      "environment $HOME then variable $x$",
+      "code `$`, then variable $x$"
+    ];
+    for (const line of cases) {
+      expect(detectFormulaRegions([line]).map((region) => region.latex), line).toEqual(["x"]);
+    }
+
+    expect(detectFormulaRegions(["cost $12, vars $x$ and $y$"])
+      .map((region) => region.latex)).toEqual(["x", "y"]);
+    expect(detectFormulaRegions(["code `$$`, then display $$x=1$$"])
+      .map((region) => region.latex)).toEqual(["x=1"]);
+    expect(detectFormulaRegions(["orphan $$ text, then display $$x=1$$"])
+      .map((region) => region.latex)).toEqual(["x=1"]);
+  });
+
+  it("does not recognize slash delimiters whose backslash is itself escaped", () => {
+    expect(detectFormulaRegions([String.raw`literal \\(x^2\\) and \\[y^2\\]`])).toEqual([]);
+    expect(detectFormulaRegions(["valid \\(x^2\\)"]))
+      .toEqual([expect.objectContaining({ latex: "x^2", confidence: "explicit" })]);
+  });
+
+  it("accepts Unicode math and arbitrary TeX commands in explicit dollar delimiters", () => {
+    const regions = detectFormulaRegions([
+      "$π$, $α_i$, $E₀$, $x²$, $∑$, $\\hbar$, and $\\langle x \\rangle$"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual([
+      "π",
+      "α_i",
+      "E₀",
+      "x²",
+      "∑",
+      "\\hbar",
+      "\\langle x \\rangle"
+    ]);
+  });
+
+  it("recovers Unicode math after a TUI strips inline delimiters", () => {
+    const regions = detectFormulaRegions([
+      "circle ratio (π), field (α_i), but ordinary (note)"
+    ]);
+    expect(regions.map((region) => region.latex)).toEqual(["π", "α_i"]);
+  });
+
+  it("does not infer an entire prose clause from one Unicode math character", () => {
+    const regions = detectFormulaRegions([
+      "圆周率 π 约等于 3.14",
+      "结果≤上限",
+      "普通希腊字母 α 表示系数",
+      "note (alpha α here)",
+      "use α",
+      "via π",
+      "per π",
+      "note (use α)"
+    ]);
+    expect(regions).toEqual([]);
+  });
+
+  it("does not overlap bare bracket displays with standalone inference", () => {
+    for (const line of ["[π]", "[E=mc^2]"]) {
+      expect(detectFormulaRegions([line]), line).toEqual([
+        expect.objectContaining({ display: true })
+      ]);
+    }
+  });
+
+  it("does not treat a short prose word in dollar markers as math", () => {
+    expect(detectFormulaRegions(["literal $the$ but variable $xy$"])
+      .map((region) => region.latex)).toEqual(["xy"]);
+  });
+
+  it("does not pair unrelated single-dollar fragments across hard rows", () => {
+    expect(detectFormulaRegions(["prefix $x", "$y suffix"])).toEqual([]);
+    expect(detectFormulaRegions(["prefix $x_i+", "y_i$ suffix"]))
+      .toEqual([expect.objectContaining({ latex: "x_i+\ny_i", startRow: 0, endRow: 1 })]);
   });
 
   it("infers inline math when a TUI strips backslashes from delimiters", () => {
@@ -293,6 +446,33 @@ describe("detectFormulaRegions", () => {
       "当粒子静止，即动量 (p=0) 时，光速平方为 (c^2)，单位制 (SI)，接口为 (input/output)"
     ]);
     expect(regions.map((region) => region.latex)).toEqual(["p=0", "c^2"]);
+  });
+
+  it("rejects prose and configuration assignments inside parentheses", () => {
+    const regions = detectFormulaRegions([
+      "Use the option (set x=1 in config)",
+      "HTTP (status=ok)",
+      "Run (FOO=bar)",
+      "Use (a=b or c=d)"
+    ]);
+    expect(regions).toEqual([]);
+  });
+
+  it("infers same-line bare bracket math and standalone short equations conservatively", () => {
+    const regions = detectFormulaRegions([
+      "value [x^2+y^2] suffix",
+      "[alpha, beta, gamma]",
+      "E=mc^2",
+      "p=0",
+      "c^2",
+      "status=ok"
+    ]);
+    expect(regions.map((region) => [region.latex, region.display])).toEqual([
+      ["x^2+y^2", true],
+      ["E=mc^2", false],
+      ["p=0", false],
+      ["c^2", false]
+    ]);
   });
 
   it("infers compound scripted ASCII math after delimiters are stripped", () => {

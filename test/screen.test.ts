@@ -71,6 +71,17 @@ class FastMathRenderer extends MathRenderer {
   }
 }
 
+class CapturingMathRenderer extends FastMathRenderer {
+  readonly arguments: Array<Parameters<MathRenderer["render"]>> = [];
+
+  override async render(
+    ...args: Parameters<MathRenderer["render"]>
+  ): ReturnType<MathRenderer["render"]> {
+    this.arguments.push(args);
+    return super.render(...args);
+  }
+}
+
 describe("FormulaScreen lifecycle", () => {
   it("uses grapheme-aware cell widths like modern Ghostty", async () => {
     const screen = new FormulaScreen({
@@ -83,6 +94,43 @@ describe("FormulaScreen lifecycle", () => {
     try {
       await screen.write("😀🧪⚠️👨‍👩‍👧‍👦");
       expect(screen.terminal.buffer.active.cursorX).toBe(8);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("uses formula-body ANSI palette colors and never reveals concealed math", async () => {
+    const renderer = new CapturingMathRenderer();
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined
+    });
+    try {
+      await screen.write("\\(\x1b[31mx^2\x1b[39m\\)");
+      await screen.flushScan();
+      expect(renderer.arguments).toHaveLength(1);
+      expect(renderer.arguments[0]?.[5]).toBe("#cd0000");
+
+      await screen.write("\r\x1b[2K\x1b[8m\\(secret=42\\)\x1b[28m");
+      await screen.flushScan();
+      expect(renderer.arguments).toHaveLength(1);
+
+      await screen.write("\r\x1b[2K\\(visible=42\\)");
+      await screen.flushScan();
+      expect(renderer.arguments).toHaveLength(2);
+
+      await screen.write("\x1b[2J\x1b[H\\[\r\nE=\x1b[8msecret\x1b[28m\r\n\\]");
+      await screen.flushScan();
+      expect(renderer.arguments).toHaveLength(2);
+
+      await screen.write("\x1b[2J\x1b[H\\[\r\n\x1b[31mE=mc^2\x1b[39m\r\n\\]");
+      await screen.flushScan();
+      expect(renderer.arguments).toHaveLength(3);
+      expect(renderer.arguments[2]?.[5]).toBe("#cd0000");
     } finally {
       screen.dispose();
     }
@@ -336,6 +384,31 @@ describe("FormulaScreen lifecycle", () => {
       await screen.flushScanBeforeHeldCell(2);
       expect(output.join("")).toContain("a=p");
       expect(output.join("")).toContain("\x1b[5;19H");
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("uses xterm's right-margin width when string-width disagrees", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 20,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write(
+        "\\[\r\nx=1\r\n\\]\x1b[5;1H1234567890123456789🩷"
+      );
+      expect(screen.pendingWrap).toBe(true);
+      output.length = 0;
+      // string-width 8 reports two cells for U+1FA77, while the active xterm
+      // grapheme provider used by the mirror reports one.
+      await screen.flushScanBeforeHeldCell(2);
+      expect(output.join("")).toContain("a=p");
+      expect(output.join("")).toContain("\x1b[5;20H");
     } finally {
       screen.dispose();
     }

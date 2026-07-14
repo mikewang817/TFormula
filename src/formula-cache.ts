@@ -128,6 +128,11 @@ function isCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
 
+function isUnavailableDisk(error: unknown): boolean {
+  return ["EACCES", "EDQUOT", "ENOSPC", "ENOTDIR", "EPERM", "EROFS"]
+    .some((code) => isCode(error, code));
+}
+
 function parseLockOwner(contents: string): Pick<LockSnapshot, "pid" | "token"> {
   const match = /^(\d+)(?:\s+(\S+))?\s*$/u.exec(contents);
   if (!match) return {};
@@ -274,6 +279,7 @@ export class FormulaCache {
   readonly #maxDiskBytes: number;
   readonly #memory = new Map<string, Buffer>();
   readonly #inFlight = new Map<string, Promise<Buffer>>();
+  #diskDisabled = false;
   #cleanupRunning = false;
   #hasCleaned = false;
   #writesSinceCleanup = 0;
@@ -304,7 +310,13 @@ export class FormulaCache {
 
   async deleteSvg(key: string): Promise<void> {
     this.#memory.delete(this.#memoryKey("svg", key));
-    await rm(this.#path("svg", key), { force: true });
+    if (this.#diskDisabled) return;
+    try {
+      await rm(this.#path("svg", key), { force: true });
+    } catch (error) {
+      if (!isUnavailableDisk(error)) throw error;
+      this.#diskDisabled = true;
+    }
   }
 
   clearMemory(): void {
@@ -339,6 +351,7 @@ export class FormulaCache {
     const memoryKey = this.#memoryKey(kind, key);
     const memory = this.#memory.get(memoryKey);
     if (memory) return this.#remember(kind, key, memory);
+    if (this.#diskDisabled) return undefined;
 
     const path = this.#path(kind, key);
     try {
@@ -352,8 +365,22 @@ export class FormulaCache {
       return this.#remember(kind, key, data);
     } catch (error) {
       if (isCode(error, "ENOENT")) return undefined;
+      if (isUnavailableDisk(error)) {
+        this.#diskDisabled = true;
+        return undefined;
+      }
       throw error;
     }
+  }
+
+  async #createInMemory(
+    kind: CacheKind,
+    key: string,
+    create: () => Promise<Buffer>
+  ): Promise<Buffer> {
+    const data = await create();
+    if (!isValid(kind, data)) throw new Error(`refusing to cache invalid ${kind} data`);
+    return this.#remember(kind, key, data);
   }
 
   async #getOrCreate(
@@ -368,7 +395,22 @@ export class FormulaCache {
     const existing = this.#inFlight.get(inFlightKey);
     if (existing) return existing;
 
-    const promise = this.#createWithLock(kind, key, create).finally(() => {
+    let produced: Promise<Buffer> | undefined;
+    const produceOnce = (): Promise<Buffer> => {
+      produced ??= create();
+      return produced;
+    };
+    const createAvailable = async (): Promise<Buffer> => {
+      if (this.#diskDisabled) return this.#createInMemory(kind, key, produceOnce);
+      try {
+        return await this.#createWithLock(kind, key, produceOnce);
+      } catch (error) {
+        if (!isUnavailableDisk(error)) throw error;
+        this.#diskDisabled = true;
+        return this.#createInMemory(kind, key, produceOnce);
+      }
+    };
+    const promise = createAvailable().finally(() => {
       this.#inFlight.delete(inFlightKey);
     });
     this.#inFlight.set(inFlightKey, promise);

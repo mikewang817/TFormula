@@ -186,14 +186,70 @@ describe("soft-wrapped terminal formula detection", () => {
     expect(fourth?.startCol).toBe(0);
   });
 
-  it("defers a compact definition group whose prose soft-wraps", () => {
+  it("renders a compact definition group whose prose soft-wraps", () => {
     const snapshot = detectScreenFormulaRegions([
       { row: 0, text: "- (E): a very long description", isWrapped: false },
       { row: 1, text: "continued here", isWrapped: true },
       { row: 2, text: "- (B): magnetic field", isWrapped: false }
     ], 30);
-    expect(snapshot.regions).toEqual([]);
-    expect(snapshot.deferred).toHaveLength(1);
-    expect(snapshot.deferred[0]).toMatchObject({ startRow: 0, endRow: 2 });
+    expect(snapshot.deferred).toEqual([]);
+    expect(snapshot.regions).toEqual([expect.objectContaining({
+      startRow: 0,
+      endRow: 2,
+      startCol: 0,
+      endCol: 30,
+      compact: true,
+      latex: expect.stringContaining("\\begin{array}{ll}"),
+      displayRange: { startCol: 2, endCol: 30 },
+      wrapSegments: [
+        expect.objectContaining({ rowOffset: 0, startCol: 2 }),
+        expect.objectContaining({ rowOffset: 1, startCol: 0 }),
+        expect.objectContaining({ rowOffset: 2, startCol: 2 })
+      ]
+    })]);
+  });
+
+  it("renders an explicit formula wholly contained in a viewport-edge continuation", () => {
+    const snapshot = detectScreenFormulaRegions([{
+      row: 0,
+      text: "continued prose \\(x^2\\) tail",
+      isWrapped: true
+    }], 80);
+
+    expect(snapshot.regions).toEqual([expect.objectContaining({
+      latex: "x^2\\text{ tail}",
+      confidence: "explicit"
+    })]);
+  });
+
+  it("uses xterm cell maps instead of string-width for terminal anchors", () => {
+    // U+1FA77 is two columns in string-width 8 but one in xterm's active
+    // Unicode grapheme provider. The delimiter therefore starts at column 2.
+    const text = "🩷 \\(x\\)";
+    const snapshot = detectScreenFormulaRegions([{
+      row: 0,
+      text,
+      isWrapped: false,
+      cellColumns: 7,
+      columnMap: [0, 1, 1, 2, 3, 4, 5, 6, 7]
+    }], 80);
+
+    expect(snapshot.regions[0]).toMatchObject({ startCol: 2, endCol: 7 });
+  });
+
+  it("leaves fragile graphemes and mixed terminal styles outside composites", () => {
+    for (const physical of [
+      [{ row: 0, text: "\\(x\\)👨‍👩‍👧‍👦\\(y\\)", isWrapped: false }],
+      [{
+        row: 0,
+        text: "\\(x\\) colored \\(y\\)",
+        isWrapped: false,
+        uniformStyle: false
+      }]
+    ]) {
+      const snapshot = detectScreenFormulaRegions(physical, 80);
+      expect(snapshot.regions.map((region) => region.latex)).toEqual(["x", "y"]);
+      expect(snapshot.regions.every((region) => !region.composite)).toBe(true);
+    }
   });
 });
