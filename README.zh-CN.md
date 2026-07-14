@@ -63,6 +63,11 @@ tformula --shell
 
 不带参数运行 `tformula` 等价于 `tformula --shell`。
 
+![TFormula 在 Ghostty 中渲染麦克斯韦方程](assets/tformula-maxwell.png)
+
+TFormula 会在保留 Agent 终端界面和周围文字的同时，直接渲染行内 LaTeX
+公式。
+
 ## 环境要求
 
 - 推荐 Ghostty；也支持 Kitty、WezTerm 或其他兼容 Kitty 图形协议的终端

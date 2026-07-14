@@ -64,6 +64,11 @@ tformula --shell
 
 Running `tformula` without arguments is equivalent to `tformula --shell`.
 
+![TFormula rendering Maxwell's equations in Ghostty](assets/tformula-maxwell.png)
+
+TFormula renders LaTeX equations inline while preserving the Agent's terminal
+interface and surrounding text.
+
 ## Requirements
 
 - Ghostty recommended; Kitty, WezTerm, or another Kitty-graphics terminal
