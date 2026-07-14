@@ -25,10 +25,11 @@ Open Ghostty and run an agent immediately without a global install:
 npx --yes tformula@latest codex
 ```
 
-Or install the short `tformula` command once:
+Or install the short `tformula` command once. With npm 11, allow `node-pty`
+to run its native install script:
 
 ```sh
-npm install --global tformula
+npm install -g tformula --allow-scripts=node-pty
 ```
 
 Then place `tformula` before whichever agent command you already use:
