@@ -200,6 +200,40 @@ describe("FormulaScreen lifecycle", () => {
     }
   });
 
+  it("repairs Markdown-stripped aligned rows before rendering the block", async () => {
+    const renderer = new CapturingMathRenderer();
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 100,
+      rows: 24,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      const strippedRowBreak = "\\";
+      await screen.write([
+        "[",
+        "\\begin{aligned}",
+        `\\ce{H4Y <=> H+ + H3Y-} &\\quad K_{a1}${strippedRowBreak}`,
+        `\\ce{H3Y- <=> H+ + H2Y^{2-}} &\\quad K_{a2}${strippedRowBreak}`,
+        "\\ce{Ca^{2+} + Y^{4-} <=> CaY^{2-}} &\\quad K_f",
+        "\\end{aligned}",
+        "]"
+      ].join("\r\n"));
+      await screen.flushScan();
+
+      expect(renderer.arguments).toHaveLength(1);
+      expect(renderer.arguments[0]?.[0].latex).toContain(
+        "K_{a1}\\\\\n\\ce{H3Y-"
+      );
+      expect(output.join("")).toContain("c=100,r=7,C=1");
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it("places display math hard-wrapped by a terminal TUI", async () => {
     const output: string[] = [];
     const screen = new FormulaScreen({

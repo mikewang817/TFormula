@@ -21,6 +21,22 @@ const DISPLAY_ENVIRONMENTS = new Set([
   "pmatrix", "smallmatrix", "split", "Vmatrix", "vmatrix", "bmatrix", "Bmatrix"
 ]);
 
+// Terminal Markdown renderers commonly consume one of the two slashes in a
+// TeX row separator. These are the environments where a hard source line can be
+// restored as a TeX row without changing an ordinary equation/displaymath
+// newline into a forced break.
+const ROW_BREAK_ENVIRONMENTS = new Set([
+  "align", "align*", "aligned", "alignedat", "alignat", "alignat*",
+  "flalign", "flalign*", "gather", "gather*", "gathered", "multline",
+  "multline*", "split", "cases", "matrix", "pmatrix", "smallmatrix",
+  "Vmatrix", "vmatrix", "bmatrix", "Bmatrix"
+]);
+
+const ALIGNMENT_ENVIRONMENTS = new Set([
+  "align", "align*", "aligned", "alignedat", "alignat", "alignat*",
+  "flalign", "flalign*", "split"
+]);
+
 const MAX_DISPLAY_BLOCK_ROWS = 256;
 const FORMULA_TRIGGER_RE = /[\\$()[\]^_=<>+*/-]|[^\x00-\x7f]/u;
 
@@ -471,8 +487,132 @@ function shouldJoinHardWrappedToken(left: string, right: string): boolean {
   return mathScore(`\\${command}`) < 3;
 }
 
+interface RowEnvironmentState {
+  name: string;
+  braceDepth: number;
+}
+
+function trailingSingleBackslash(value: string): boolean {
+  const trimmed = value.trimEnd();
+  let count = 0;
+  for (let index = trimmed.length - 1; index >= 0 && trimmed[index] === "\\"; index -= 1) {
+    count += 1;
+  }
+  return count === 1;
+}
+
+function topLevelAlignmentMarker(value: string): boolean {
+  let braceDepth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (isEscapedAt(value, index)) continue;
+    if (value[index] === "{") braceDepth += 1;
+    else if (value[index] === "}") braceDepth = Math.max(0, braceDepth - 1);
+    else if (value[index] === "&" && braceDepth === 0) return true;
+  }
+  return false;
+}
+
+function startsWithRelation(value: string): boolean {
+  return /^(?:=|<|>|≤|≥|≈|≃|≡|∼|\\(?:leq?|geq?|neq?|approx|sim|simeq|equiv|propto)\b)/u
+    .test(value.trimStart());
+}
+
+function appendMissingRowSlash(value: string): string {
+  const trailingWhitespace = value.match(/\s*$/u)?.[0] ?? "";
+  const body = value.slice(0, value.length - trailingWhitespace.length);
+  return `${body}\\${trailingWhitespace}`;
+}
+
+function appendRowBreak(value: string): string {
+  const trailingWhitespace = value.match(/\s*$/u)?.[0] ?? "";
+  const body = value.slice(0, value.length - trailingWhitespace.length);
+  return `${body}\\\\${trailingWhitespace}`;
+}
+
+function hasExplicitRowBreak(value: string): boolean {
+  return /\\\\(?:\s*\[[^\]]*\])?\s*$/u.test(value) || /\\cr\s*$/u.test(value);
+}
+
+/**
+ * Repair the lossy Markdown form of row-oriented TeX environments.
+ *
+ * Several terminal Markdown renderers strip the slash from display delimiters
+ * and reduce a two-slash row separator to one trailing slash. MathJax accepts that
+ * damaged input, but treats every aligned row as one enormous equation.  The
+ * result is the characteristic full-width strip of detached numerators and
+ * denominators.  A single trailing slash is strong evidence that this exact
+ * transformation occurred.  Once seen, also restore top-level hard lines that
+ * carry an alignment tab or begin with a continuation relation; those lines
+ * sometimes lose the separator completely during Markdown layout.
+ *
+ * Boundaries inside an open TeX group are deliberately left alone, as are
+ * formulas with no stripped-separator evidence.
+ */
+function repairStrippedEnvironmentRowBreaks(value: string): string {
+  const lines = value.split("\n");
+  if (lines.length < 2 || !lines.some(trailingSingleBackslash)) return value;
+
+  const stack: RowEnvironmentState[] = [];
+  let braceDepth = 0;
+  for (let row = 0; row + 1 < lines.length; row += 1) {
+    const line = lines[row]!;
+    for (let index = 0; index < line.length;) {
+      const environment = line.slice(index).match(/^\\(begin|end)\{([A-Za-z]+\*?)\}/u);
+      if (environment) {
+        const name = environment[2]!;
+        if (environment[1] === "begin") {
+          if (ROW_BREAK_ENVIRONMENTS.has(name)) stack.push({ name, braceDepth });
+        } else {
+          let matching = -1;
+          for (let candidate = stack.length - 1; candidate >= 0; candidate -= 1) {
+            if (stack[candidate]!.name === name) {
+              matching = candidate;
+              break;
+            }
+          }
+          if (matching >= 0) stack.splice(matching);
+        }
+        index += environment[0].length;
+        continue;
+      }
+      if (!isEscapedAt(line, index)) {
+        if (line[index] === "{") braceDepth += 1;
+        else if (line[index] === "}") braceDepth = Math.max(0, braceDepth - 1);
+      }
+      index += 1;
+    }
+
+    const active = stack.at(-1);
+    if (!active || braceDepth !== active.braceDepth) continue;
+    const contentProbe = line
+      .replace(/\\(?:begin|end)\{[A-Za-z]+\*?\}(?:\{[^{}]*\})?/gu, "")
+      .trim();
+    if (!contentProbe) continue;
+    const next = lines[row + 1]!;
+    if (next.trimStart().startsWith(`\\end{${active.name}}`)) continue;
+    if (hasExplicitRowBreak(line)) continue;
+
+    if (trailingSingleBackslash(line)) {
+      lines[row] = appendMissingRowSlash(line);
+      continue;
+    }
+
+    const nextHasAlignment = topLevelAlignmentMarker(next);
+    const nextStartsRelation = startsWithRelation(next);
+    if (!nextHasAlignment && !nextStartsRelation) continue;
+    lines[row] = appendRowBreak(line);
+    if (nextStartsRelation && ALIGNMENT_ENVIRONMENTS.has(active.name)) {
+      const indentation = next.match(/^\s*/u)?.[0] ?? "";
+      lines[row + 1] = `${indentation}&${next.slice(indentation.length)}`;
+    }
+  }
+  return lines.join("\n");
+}
+
 function normalizeHardWrappedLatex(parts: string[]): string {
-  const normalized = parts.map((part) => part.trim());
+  const normalized = repairStrippedEnvironmentRowBreaks(
+    parts.map((part) => part.trim()).join("\n")
+  ).split("\n");
   let result = normalized.shift() ?? "";
   for (const part of normalized) {
     if (!result) {
@@ -902,6 +1042,11 @@ function isLikelyStandaloneMath(value: string): boolean {
   return /[=<>^_+*/-]/u.test(trimmed);
 }
 
+function isStandaloneDisplayEnvironmentToken(value: string): boolean {
+  const match = value.trim().match(/^\\(?:begin|end)\{([A-Za-z]+\*?)\}$/u);
+  return Boolean(match && DISPLAY_ENVIRONMENTS.has(match[1]!));
+}
+
 function adjacentToStandaloneDelimiter(lines: string[], row: number): boolean {
   const delimiter = /^(?:\\\[|\\\]|\$\$|\[|\])$/u;
   return delimiter.test((lines[row - 1] ?? "").trim())
@@ -1128,6 +1273,7 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
     if (!loneDefinition
       && inferredSegments.length === 0
       && !adjacentToStandaloneDelimiter(lines, row)
+      && !isStandaloneDisplayEnvironmentToken(trimmed)
       && isLikelyStandaloneMath(trimmed)) {
       const start = line.indexOf(trimmed);
       regions.push(trailingInlineRegion(

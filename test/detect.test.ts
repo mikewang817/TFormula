@@ -203,6 +203,68 @@ describe("detectFormulaRegions", () => {
     expect(region).toMatchObject({ latex: "E=mc^2", display: true, confidence: "inferred" });
   });
 
+  it("repairs aligned row separators stripped by terminal Markdown", () => {
+    const strippedRowBreak = "\\";
+    const [region] = detectFormulaRegions([
+      "[",
+      "\\begin{aligned}",
+      `a&=b${strippedRowBreak}`,
+      "c&=d",
+      "=e",
+      "\\end{aligned}",
+      "]"
+    ]);
+
+    expect(region).toMatchObject({ display: true, confidence: "inferred" });
+    expect(region?.latex).toBe([
+      "\\begin{aligned}",
+      "a&=b\\\\",
+      "c&=d\\\\",
+      "&=e",
+      "\\end{aligned}"
+    ].join("\n"));
+  });
+
+  it("does not force row breaks without stripped-Markdown evidence", () => {
+    const [region] = detectFormulaRegions([
+      "\\begin{aligned}",
+      "a&=b+",
+      "c",
+      "\\end{aligned}"
+    ]);
+    expect(region?.latex).toBe("\\begin{aligned}\na&=b+\nc\n\\end{aligned}");
+  });
+
+  it("keeps hard lines inside an open TeX group on the same aligned row", () => {
+    const strippedRowBreak = "\\";
+    const [region] = detectFormulaRegions([
+      "[",
+      "\\begin{aligned}",
+      "a&=\\frac{",
+      "1+x",
+      `}{y}${strippedRowBreak}`,
+      "b&=2",
+      "\\end{aligned}",
+      "]"
+    ]);
+    expect(region?.latex).toContain("a&=\\frac{\n1+x\n}{y}\\\\\nb&=2");
+  });
+
+  it("does not infer a failing formula from a standalone environment closer", () => {
+    const regions = detectFormulaRegions([
+      "[",
+      "\\begin{aligned}",
+      "a&=b",
+      "\\end{aligned}"
+    ]);
+    expect(regions).toEqual([
+      expect.objectContaining({
+        latex: "\\begin{aligned}\na&=b\n\\end{aligned}",
+        confidence: "explicit"
+      })
+    ]);
+  });
+
   it("does not mistake a normal bracketed list for math", () => {
     expect(detectFormulaRegions(["[", "alpha, beta, gamma", "]"])).toEqual([]);
   });
