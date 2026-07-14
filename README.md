@@ -19,13 +19,7 @@ the terminal buffer for copying.
 
 ## Quick start in Ghostty
 
-Open Ghostty and run an agent immediately without a global install:
-
-```sh
-npx --yes tformula@latest codex
-```
-
-Or install the short `tformula` command once. With npm 11, allow `node-pty`
+Install the short `tformula` command once. With npm 11, allow `node-pty`
 to run its native install script:
 
 ```sh
@@ -49,22 +43,6 @@ Then place `tformula` before whichever agent command you already use:
 
 The agent itself must already be installed and available on your `PATH`.
 TFormula simply wraps the command; it has no agent-specific integration.
-
-To use npx instead, replace `tformula` in any row with
-`npx --yes tformula@latest`. For example:
-
-```sh
-npx --yes tformula@latest codex
-npx --yes tformula@latest claude
-npx --yes tformula@latest agent
-npx --yes tformula@latest pi
-npx --yes tformula@latest gemini
-npx --yes tformula@latest opencode
-npx --yes tformula@latest aider
-npx --yes tformula@latest goose
-npx --yes tformula@latest -- claude --resume
-npx --yes tformula@latest --shell
-```
 
 `--shell` starts an enhanced login shell, so commands launched inside that shell
 can be wrapped without creating an alias for each agent:
