@@ -3,11 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  changeReaderPage,
   collectDocumentResources,
+  disposeReaderDocument,
   loadReaderDocument,
   mathResourceKey,
   parseMarkdown,
-  readerFileKind
+  readerFileKind,
+  toggleReaderPageView,
+  type ReaderDocument,
+  type ReaderDocumentContent
 } from "../src/reader-document.js";
 
 describe("reader document parsing", () => {
@@ -54,7 +59,131 @@ describe("reader document parsing", () => {
     expect(readerFileKind("README.md")).toBe("markdown");
     expect(readerFileKind("notes.txt")).toBe("text");
     expect(readerFileKind("photo.WEBP")).toBe("image");
+    expect(readerFileKind("data.csv")).toBe("csv");
+    expect(readerFileKind("notebook.ipynb")).toBe("notebook");
+    expect(readerFileKind("book.epub")).toBe("epub");
+    expect(readerFileKind("paper.PDF")).toBe("pdf");
+    expect(readerFileKind("bundle.tar.gz")).toBe("archive");
+    expect(readerFileKind("server.log")).toBe("text");
+    expect(readerFileKind("app.ts")).toBeUndefined();
     expect(readerFileKind("codex")).toBeUndefined();
+  });
+
+  it("loads HTML and delimited tables through their format adapters", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tformula-reader-formats-"));
+    const htmlPath = join(directory, "page.html");
+    const csvPath = join(directory, "data.csv");
+    await writeFile(htmlPath, "<!doctype html><title>Demo</title><h1>Hello</h1><p>World</p>");
+    await writeFile(csvPath, "name,value\nalpha,42\nbeta,7\n");
+    try {
+      const html = await loadReaderDocument(htmlPath);
+      const csv = await loadReaderDocument(csvPath);
+      expect(html).toMatchObject({ kind: "html", title: "Demo", label: "HTML" });
+      expect(html.root.children).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "heading", depth: 1 })
+      ]));
+      expect(csv).toMatchObject({ kind: "csv", label: "CSV" });
+      expect(csv.grid).toMatchObject({
+        headers: ["name", "value"],
+        rows: [["alpha", "42"], ["beta", "7"]]
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("sniffs unknown explicit files without treating binary bytes as UTF-8", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tformula-reader-sniff-"));
+    const jsonPath = join(directory, "structured-data");
+    const binaryPath = join(directory, "mystery-data");
+    await writeFile(jsonPath, '{"answer":42}');
+    await writeFile(binaryPath, Buffer.from([0xff, 0x00, 0x80, 0x41, 0x42, 0x43]));
+    try {
+      const json = await loadReaderDocument(jsonPath);
+      const binary = await loadReaderDocument(binaryPath);
+      expect(json.kind).toBe("json");
+      expect(binary.kind).toBe("binary");
+      expect(binary.source).toBe("");
+      expect(binary.root.children).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "code", lang: "hex" })
+      ]));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("hydrates embedded notebook image output for the existing graphics pipeline", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tformula-reader-notebook-"));
+    const path = join(directory, "analysis.ipynb");
+    const pixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+3MxZ5wAAAABJRU5ErkJggg==";
+    await writeFile(path, JSON.stringify({
+      metadata: { language_info: { name: "python" } },
+      cells: [{
+        cell_type: "code",
+        source: ["1 + 1"],
+        outputs: [{ output_type: "display_data", data: { "image/png": pixel }, metadata: {} }],
+        metadata: {}
+      }],
+      nbformat: 4,
+      nbformat_minor: 5
+    }));
+    let document: ReaderDocument | undefined;
+    try {
+      document = await loadReaderDocument(path);
+      expect(document.kind).toBe("notebook");
+      expect(document.images.size).toBe(1);
+      expect([...document.images.values()][0]).toEqual(expect.objectContaining({
+        width: 1,
+        height: 1,
+        path: expect.stringContaining("tformula-notebook-")
+      }));
+    } finally {
+      if (document) await disposeReaderDocument(document);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("switches PDF-style documents between reflow and lazily cached pages", async () => {
+    const content = (name: string): ReaderDocumentContent => ({
+      root: { type: "root", children: [{ type: "heading", depth: 1, children: [{ type: "text", value: name }] }] },
+      images: new Map(),
+      math: new Map()
+    });
+    const reflow = content("Reflow");
+    const loaded: number[] = [];
+    const document: ReaderDocument = {
+      path: "/tmp/paper.pdf",
+      title: "paper.pdf",
+      kind: "pdf",
+      label: "PDF reflow",
+      source: "page text",
+      ...reflow,
+      pages: {
+        mode: "reflow",
+        current: 1,
+        count: 3,
+        backend: "test",
+        reflow,
+        cache: new Map(),
+        load: async (page) => {
+          loaded.push(page);
+          return content(`Page ${page}`);
+        }
+      }
+    };
+
+    await expect(toggleReaderPageView(document)).resolves.toBe(true);
+    expect(document.pages?.mode).toBe("page");
+    expect(document.viewKey).toBe("page:1");
+    expect(document.label).toBe("PDF page 1/3");
+    await expect(changeReaderPage(document, 1)).resolves.toBe(true);
+    expect(document.viewKey).toBe("page:2");
+    await expect(changeReaderPage(document, -1)).resolves.toBe(true);
+    expect(document.viewKey).toBe("page:1");
+    expect(loaded).toEqual([1, 2]);
+    await expect(toggleReaderPageView(document)).resolves.toBe(true);
+    expect(document.root).toBe(reflow.root);
+    expect(document.pages?.mode).toBe("reflow");
   });
 
   it("defers MathJax measurement until formulas enter the viewport", async () => {

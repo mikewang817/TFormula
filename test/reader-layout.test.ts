@@ -202,4 +202,28 @@ describe("reader layout", () => {
     const layout = layoutReaderDocument(unsafe, { ...options, graphics: false });
     expect(layout.lines.map(({ plain }) => plain).join("\n")).not.toContain("\x1b");
   });
+
+  it("lays out table documents with a frozen header and horizontal column window", () => {
+    const table: ReaderDocument = {
+      ...document(),
+      kind: "csv",
+      grid: {
+        headers: ["first", "second", "third", "fourth"],
+        rows: [
+          ["alpha", "a long second value", "3", "tail"],
+          ["beta", "another long value", "4", "end"]
+        ],
+        columnOffset: 1
+      }
+    };
+    const layout = layoutReaderDocument(table, { ...options, columns: 28 });
+    const sticky = layout.stickyLines?.map(({ plain }) => plain).join("\n") ?? "";
+    const body = layout.lines.map(({ spans }) => spans.map(({ text }) => text).join("")).join("\n");
+
+    expect(layout.stickyLines).toHaveLength(3);
+    expect(sticky).toContain("second");
+    expect(sticky).not.toContain("first");
+    expect(body).toContain("a long second value");
+    expect(layout.placements).toEqual([]);
+  });
 });

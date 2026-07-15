@@ -1,5 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
+import { basename, dirname, relative, resolve, sep } from "node:path";
 import process from "node:process";
 import { StringDecoder } from "node:string_decoder";
 import { KittyImageTransmitter, selectImageTransmissionMode } from "./image-transmitter.js";
@@ -22,8 +22,11 @@ import {
   TerminalProbeResponseFilter
 } from "./probe.js";
 import {
+  changeReaderPage,
+  disposeReaderDocument,
   loadReaderDocument,
   readerFileKind,
+  toggleReaderPageView,
   type ReaderDocument
 } from "./reader-document.js";
 import {
@@ -219,7 +222,76 @@ function fitStatus(value: string, width: number): string {
 }
 
 function plainFallbackMessage(path: string): string {
-  return `tformula: ${path}: image viewing requires an interactive terminal\n`;
+  return `tformula: ${path}: this format requires an interactive terminal\n`;
+}
+
+interface ReaderDirectoryEntry {
+  name: string;
+  path: string;
+  type: "directory" | "file";
+  kind?: NonNullable<ReturnType<typeof readerFileKind>>;
+}
+
+export async function listReaderDirectory(directoryPath: string): Promise<ReaderDirectoryEntry[]> {
+  const directory = resolve(directoryPath);
+  const entries = await readdir(directory, { withFileTypes: true });
+  return entries.flatMap((entry): ReaderDirectoryEntry[] => {
+    if (entry.isDirectory()) {
+      return [{ name: entry.name, path: resolve(directory, entry.name), type: "directory" }];
+    }
+    if (!entry.isFile()) return [];
+    const kind = readerFileKind(entry.name);
+    return kind
+      ? [{ name: entry.name, path: resolve(directory, entry.name), type: "file", kind }]
+      : [];
+  }).sort((left, right) => {
+    if (left.type !== right.type) return left.type === "directory" ? -1 : 1;
+    return left.name.localeCompare(right.name, undefined, {
+      numeric: true,
+      sensitivity: "base"
+    });
+  });
+}
+
+export function filterReaderDirectoryEntries(
+  entries: ReaderDirectoryEntry[],
+  query: string
+): ReaderDirectoryEntry[] {
+  const needle = query.trim().toLocaleLowerCase();
+  return needle
+    ? entries.filter(({ name }) => name.toLocaleLowerCase().includes(needle))
+    : entries;
+}
+
+export function readerDirectoryBreadcrumb(
+  rootDirectory: string,
+  directory: string,
+  width: number
+): string {
+  const prefix = "  Files  ";
+  const root = resolve(rootDirectory);
+  const current = resolve(directory);
+  const relativePath = relative(root, current);
+  const segments = relativePath && relativePath !== "."
+    ? relativePath.split(sep).filter(Boolean)
+    : [];
+  const rootLabel = basename(root) || root;
+  for (let tailCount = segments.length; tailCount >= 0; tailCount -= 1) {
+    const omitted = segments.length - tailCount;
+    const tail = tailCount > 0 ? segments.slice(-tailCount) : [];
+    const labels = omitted > 0
+      ? [rootLabel, "…", ...tail]
+      : [rootLabel, ...segments];
+    const breadcrumb = `${prefix}${labels.join(" / ")}`;
+    if (stringWidth(breadcrumb) <= width) return breadcrumb;
+  }
+  return truncateStatus(`${prefix}${segments.at(-1) ?? rootLabel}`, Math.max(1, width));
+}
+
+function readerKindLabel(kind: NonNullable<ReaderDirectoryEntry["kind"]>): string {
+  if (kind === "markdown") return "Markdown";
+  if (kind === "notebook") return "Notebook";
+  return kind.toUpperCase();
 }
 
 function headingSlug(value: string): string {
@@ -255,6 +327,7 @@ class TerminalReader {
   #offset = 0;
   #renderVersion = 0;
   #renderTail = Promise.resolve();
+  #viewTail = Promise.resolve();
   #renderPending = false;
   #renderRunning = false;
   #closing = false;
@@ -265,10 +338,22 @@ class TerminalReader {
   #rawMode = false;
   #showToc = false;
   #tocIndex = 0;
+  #showFiles = false;
+  #fileEntries: ReaderDirectoryEntry[] = [];
+  #fileIndex = 0;
+  #loadingFiles = false;
+  #fileLoadVersion = 0;
+  #fileRootDirectory = "";
+  #fileDirectory = "";
+  #fileParents: Array<{ directory: string; selectedPath: string }> = [];
+  #fileQuery = "";
+  #fileSearching = false;
   #activeLinkIndex?: number;
-  #openingLink = false;
+  #openingDocument = false;
+  #switchingView = false;
   #imageScale = 1;
   readonly #history: Array<{ document: ReaderDocument; offset: number; rawMode: boolean }> = [];
+  readonly #ownedDocuments = new Set<ReaderDocument>();
   #resolveExit?: (code: number) => void;
   #previousRaw = false;
   #responseTailTimer?: NodeJS.Timeout;
@@ -283,6 +368,7 @@ class TerminalReader {
     startupProbePending: boolean
   ) {
     this.#document = document;
+    this.#ownedDocuments.add(document);
     this.#graphicsAvailable = capabilities.kittyGraphics;
     this.#startupProbePending = startupProbePending;
     this.#relayout();
@@ -300,6 +386,10 @@ class TerminalReader {
     return Math.max(1, this.rows - 1);
   }
 
+  get contentViewportRows(): number {
+    return Math.max(1, this.viewportRows - (this.#layout?.stickyLines?.length ?? 0));
+  }
+
   #layoutCacheKey(imageScale = this.#imageScale): string {
     return [
       this.#rawMode ? "source" : "rendered",
@@ -309,7 +399,8 @@ class TerminalReader {
       this.capabilities.cell.width,
       this.capabilities.cell.height,
       this.options.scale,
-      imageScale
+      imageScale,
+      this.#document.viewKey ?? "default"
     ].join(":");
   }
 
@@ -342,15 +433,23 @@ class TerminalReader {
       this.#activeLinkIndex = undefined;
       return;
     }
+    const sourceKind = readerFileKind(this.#document.path);
+    const sourceLanguage = sourceKind === "notebook" ? "json"
+      : sourceKind === "jsonl" ? "json"
+        : sourceKind && ["markdown", "json", "yaml", "toml", "xml", "csv", "tsv", "html"]
+          .includes(sourceKind)
+          ? sourceKind
+          : undefined;
     const displayedDocument: ReaderDocument = this.#rawMode && this.#document.source
       ? {
           ...this.#document,
+          grid: undefined,
           root: {
             type: "root",
             children: [{
               type: "code",
               value: this.#document.source.replace(/\n$/u, ""),
-              lang: readerFileKind(this.#document.path) === "markdown" ? "markdown" : undefined
+              lang: sourceLanguage
             }]
           }
         }
@@ -369,7 +468,7 @@ class TerminalReader {
   }
 
   #clampOffset(value: number): number {
-    const maximum = Math.max(0, this.#layout.lines.length - this.viewportRows);
+    const maximum = Math.max(0, this.#layout.lines.length - this.contentViewportRows);
     return Math.max(0, Math.min(maximum, Math.floor(value)));
   }
 
@@ -514,12 +613,13 @@ class TerminalReader {
   }
 
   #visiblePlacements(): VisibleReaderPlacement[] {
-    if (this.#showToc) return [];
+    if (this.#showToc || this.#showFiles) return [];
+    const stickyRows = this.#layout.stickyLines?.length ?? 0;
     return visibleReaderPlacements(
       this.#layout.placements,
       this.#offset,
-      this.viewportRows
-    );
+      this.contentViewportRows
+    ).map((visible) => ({ ...visible, screenRow: visible.screenRow + stickyRows }));
   }
 
   #tocScreenLines(): StyledSpan[][] {
@@ -549,30 +649,118 @@ class TerminalReader {
     return lines;
   }
 
+  #fileScreenLines(): StyledSpan[][] {
+    const entries = filterReaderDirectoryEntries(this.#fileEntries, this.#fileQuery);
+    const heading = readerDirectoryBreadcrumb(
+      this.#fileRootDirectory || this.#fileDirectory,
+      this.#fileDirectory,
+      Math.max(1, this.columns - 1)
+    );
+    const lines: StyledSpan[][] = [[
+      { text: heading, style: { bold: true, color: "accent" } }
+    ], []];
+    if (entries.length === 0) {
+      lines.push([{
+        text: this.#fileQuery
+          ? "  (no matching folders or supported files)"
+          : "  (no folders or supported files)",
+        style: { italic: true, color: "muted" }
+      }]);
+      return lines;
+    }
+
+    const available = Math.max(1, this.viewportRows - 2);
+    const maximumStart = Math.max(0, entries.length - available);
+    const start = Math.max(0, Math.min(
+      maximumStart,
+      this.#fileIndex - Math.floor(available / 2)
+    ));
+    const currentPath = resolve(this.#document.path);
+    for (let index = start; index < Math.min(entries.length, start + available); index += 1) {
+      const entry = entries[index]!;
+      const selected = index === this.#fileIndex;
+      const marker = entry.type === "directory"
+        ? "▸ "
+        : entry.path === currentPath ? "● " : "  ";
+      const labelCandidate = `  ${entry.type === "directory"
+        ? "Folder"
+        : readerKindLabel(entry.kind!)}`;
+      const contentWidth = Math.max(1, this.columns - stringWidth(marker) - 1);
+      const label = stringWidth(labelCandidate) < contentWidth ? labelCandidate : "";
+      const name = truncateStatus(
+        `${entry.name}${entry.type === "directory" ? "/" : ""}`,
+        Math.max(1, contentWidth - stringWidth(label))
+      );
+      lines.push([
+        { text: marker, style: { color: "accent" } },
+        {
+          text: name,
+          style: selected
+            ? { inverse: true, bold: true }
+            : entry.type === "directory" ? { bold: true, color: "accent" } : undefined
+        },
+        {
+          text: label,
+          style: selected
+            ? { inverse: true, dim: true }
+            : { color: "muted", dim: true }
+        }
+      ]);
+    }
+    return lines;
+  }
+
   #screenText(): string {
     const dark = isDarkColor(this.capabilities.background);
     const chunks: string[] = [];
     const tocLines = this.#showToc ? this.#tocScreenLines() : undefined;
+    const fileLines = this.#showFiles ? this.#fileScreenLines() : undefined;
+    const panelLines = fileLines ?? tocLines;
     const activeLink = this.#activeLinkIndex === undefined
       ? undefined
       : this.#layout.links[this.#activeLinkIndex];
+    const stickyLines = !panelLines ? this.#layout.stickyLines ?? [] : [];
     for (let screenRow = 0; screenRow < this.viewportRows; screenRow += 1) {
-      const line = tocLines?.[screenRow] ?? (!tocLines
-        ? this.#layout.lines[this.#offset + screenRow]?.spans
+      const line = panelLines?.[screenRow] ?? (!panelLines
+        ? screenRow < stickyLines.length
+          ? stickyLines[screenRow]?.spans
+          : this.#layout.lines[this.#offset + screenRow - stickyLines.length]?.spans
         : undefined);
       chunks.push(`${ESC}[${screenRow + 1};1H${ESC}[2K`);
       if (line) chunks.push(renderSpans(line, dark, activeLink?.href));
     }
-    const percent = this.#layout.lines.length <= this.viewportRows
+    const percent = this.#layout.lines.length <= this.contentViewportRows
       ? 100
-      : Math.round((this.#offset / Math.max(1, this.#layout.lines.length - this.viewportRows)) * 100);
-    const status = this.#showToc
+      : Math.round((this.#offset / Math.max(1, this.#layout.lines.length - this.contentViewportRows)) * 100);
+    const pageHint = this.#document.pages
+      ? this.#document.pages.mode === "page"
+        ? " · [/] page · v reflow"
+        : " · v page view"
+      : "";
+    const gridHint = this.#document.grid && !this.#rawMode ? " · ←/→ columns" : "";
+    const matchingFiles = this.#showFiles
+      ? filterReaderDirectoryEntries(this.#fileEntries, this.#fileQuery)
+      : [];
+    const folderCount = this.#fileEntries.filter(({ type }) => type === "directory").length;
+    const fileCount = this.#fileEntries.length - folderCount;
+    const fileBackHint = this.#fileParents.length > 0 ? "← up" : "← close";
+    const status = this.#showFiles
+      ? this.#loadingFiles
+        ? "Loading folder…  Esc/l cancel"
+        : this.#fileSearching
+          ? `Filter /${this.#fileQuery}  Enter apply · Esc clear`
+          : this.#statusMessage
+            ? this.#statusMessage
+            : this.#fileQuery
+              ? `${matchingFiles.length}/${this.#fileEntries.length} matches  ↑/↓ select · → open · ${fileBackHint} · / filter`
+              : `${folderCount} folders · ${fileCount} files  ↑/↓ select · → open · ${fileBackHint} · / filter`
+      : this.#showToc
       ? "Table of contents  j/k select · Enter jump · t/Esc close"
       : this.#searching
       ? `/${this.#searchQuery}`
       : this.#statusMessage
         ? this.#statusMessage
-        : `${this.#document.title}${this.#rawMode ? " [source]" : ""}  ${percent}%  ${this.#layout.lines.length} lines  j/k scroll · +/- image · t contents · Tab links · r source · q quit`;
+        : `${this.#document.title}${this.#document.label ? ` [${this.#document.label}]` : ""}${this.#rawMode ? " [source]" : ""}  ${percent}%  ${this.#layout.lines.length} lines  j/k scroll${gridHint}${pageHint} · l files · r source · q quit`;
     chunks.push(
       `${ESC}[${this.rows};1H${ESC}[2K${ESC}[7m${fitStatus(status, Math.max(1, this.columns - 1))}${ESC}[0m`
     );
@@ -762,7 +950,7 @@ class TerminalReader {
       return;
     }
 
-    const oldMaximum = Math.max(1, this.#layout.lines.length - this.viewportRows);
+    const oldMaximum = Math.max(1, this.#layout.lines.length - this.contentViewportRows);
     const progress = this.#offset / oldMaximum;
     const center = this.#offset + this.viewportRows / 2;
     const visibleImages = images.filter((placement) =>
@@ -814,7 +1002,7 @@ class TerminalReader {
         resizedAnchor.row + resizedAnchor.rows * anchorFraction - anchorScreenRow
       ));
     } else {
-      const newMaximum = Math.max(0, this.#layout.lines.length - this.viewportRows);
+      const newMaximum = Math.max(0, this.#layout.lines.length - this.contentViewportRows);
       this.#offset = this.#clampOffset(Math.round(progress * newMaximum));
     }
     this.#statusMessage = nextScale === 1
@@ -824,6 +1012,11 @@ class TerminalReader {
   }
 
   #toggleToc(): void {
+    if (!this.#showToc && this.#layout.headings.length === 0) {
+      this.#statusMessage = "this view has no headings";
+      this.#requestRender();
+      return;
+    }
     this.#showToc = !this.#showToc;
     this.#searching = false;
     if (this.#showToc) {
@@ -870,21 +1063,271 @@ class TerminalReader {
     }
   }
 
+  #closeFileList(): void {
+    this.#fileLoadVersion += 1;
+    this.#loadingFiles = false;
+    this.#showFiles = false;
+    this.#fileEntries = [];
+    this.#fileParents = [];
+    this.#fileQuery = "";
+    this.#fileSearching = false;
+    this.#statusMessage = "";
+    this.#requestRender();
+  }
+
+  async #loadFileDirectory(directoryPath: string, selectedPath?: string): Promise<boolean> {
+    const directory = resolve(directoryPath);
+    const version = ++this.#fileLoadVersion;
+    this.#loadingFiles = true;
+    this.#fileSearching = false;
+    this.#fileQuery = "";
+    this.#statusMessage = "";
+    this.#requestRender();
+    try {
+      const entries = await listReaderDirectory(directory);
+      if (this.#closing || version !== this.#fileLoadVersion) return false;
+      this.#fileDirectory = directory;
+      this.#fileEntries = entries;
+      const selected = selectedPath
+        ? entries.findIndex((entry) => entry.path === resolve(selectedPath))
+        : -1;
+      this.#fileIndex = selected >= 0 ? selected : 0;
+      return true;
+    } catch (error) {
+      if (version === this.#fileLoadVersion) {
+        this.#statusMessage = `cannot open folder: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      return false;
+    } finally {
+      if (version === this.#fileLoadVersion) {
+        this.#loadingFiles = false;
+        this.#requestRender();
+      }
+    }
+  }
+
+  async #toggleFileList(): Promise<void> {
+    if (this.#showFiles || this.#loadingFiles) {
+      this.#closeFileList();
+      return;
+    }
+    this.#searching = false;
+    this.#showToc = false;
+    this.#fileRootDirectory = dirname(resolve(this.#document.path));
+    this.#fileDirectory = this.#fileRootDirectory;
+    this.#fileParents = [];
+    this.#fileEntries = [];
+    this.#fileIndex = 0;
+    this.#fileQuery = "";
+    this.#fileSearching = false;
+    this.#showFiles = true;
+    await this.#loadFileDirectory(this.#fileRootDirectory, this.#document.path);
+  }
+
+  #handleFileFilterInput(data: string): void {
+    const sequences = data.match(/\x1b\[[0-9;?]*[~A-Za-z]|[\s\S]/gu) ?? [];
+    for (const sequence of sequences) {
+      if (sequence === "\x03") {
+        this.#resolveExit?.(0);
+        return;
+      }
+      if (sequence === "\r" || sequence === "\n") {
+        this.#fileSearching = false;
+        this.#requestRender();
+        return;
+      }
+      if (sequence === "\x1b") {
+        this.#fileSearching = false;
+        this.#fileQuery = "";
+        this.#fileIndex = 0;
+        this.#requestRender();
+        return;
+      }
+      if (sequence === "\x7f" || sequence === "\b") {
+        const characters = Array.from(this.#fileQuery);
+        if (characters.length > 0) this.#fileQuery = characters.slice(0, -1).join("");
+        else this.#fileSearching = false;
+        this.#fileIndex = 0;
+        this.#requestRender();
+      } else if (sequence.length === 1 && sequence >= " ") {
+        this.#fileQuery += sequence;
+        this.#fileIndex = 0;
+        this.#requestRender();
+      }
+    }
+  }
+
+  async #goToParentFileDirectory(): Promise<void> {
+    if (this.#loadingFiles) return;
+    const parent = this.#fileParents.pop();
+    if (!parent) {
+      this.#closeFileList();
+      return;
+    }
+    if (!await this.#loadFileDirectory(parent.directory, parent.selectedPath)) {
+      this.#fileParents.push(parent);
+      this.#requestRender();
+    }
+  }
+
+  #handleFileInput(data: string): void {
+    if (this.#fileSearching) {
+      this.#handleFileFilterInput(data);
+      return;
+    }
+    const sequences = data.match(/\x1b\[[0-9;?]*[~A-Za-z]|[\s\S]/gu) ?? [];
+    for (const sequence of sequences) {
+      if (sequence === "\x03") {
+        this.#resolveExit?.(0);
+        return;
+      }
+      if (sequence === "l" || sequence === "q" || sequence === "\x1b") {
+        this.#closeFileList();
+        return;
+      }
+      if (this.#loadingFiles) return;
+      const entries = filterReaderDirectoryEntries(this.#fileEntries, this.#fileQuery);
+      if (sequence === "j" || sequence === "\x1b[B") {
+        this.#fileIndex = Math.min(entries.length - 1, this.#fileIndex + 1);
+        this.#fileIndex = Math.max(0, this.#fileIndex);
+        this.#requestRender();
+      } else if (sequence === "k" || sequence === "\x1b[A") {
+        this.#fileIndex = Math.max(0, this.#fileIndex - 1);
+        this.#requestRender();
+      } else if (sequence === "g" || sequence === "\x1b[H" || sequence === "\x1b[1~") {
+        this.#fileIndex = 0;
+        this.#requestRender();
+      } else if (sequence === "G" || sequence === "\x1b[F" || sequence === "\x1b[4~") {
+        this.#fileIndex = Math.max(0, entries.length - 1);
+        this.#requestRender();
+      } else if (sequence === "\x1b[6~") {
+        this.#fileIndex = Math.min(
+          Math.max(0, entries.length - 1),
+          this.#fileIndex + Math.max(1, this.viewportRows - 3)
+        );
+        this.#requestRender();
+      } else if (sequence === "\x1b[5~") {
+        this.#fileIndex = Math.max(0, this.#fileIndex - Math.max(1, this.viewportRows - 3));
+        this.#requestRender();
+      } else if (sequence === "/") {
+        this.#fileSearching = true;
+        this.#requestRender();
+      } else if (sequence === "\x1b[D" || sequence === "\x7f" || sequence === "h") {
+        this.#trackViewTask(this.#goToParentFileDirectory());
+        return;
+      } else if (sequence === "\r" || sequence === "\n" || sequence === "\x1b[C") {
+        this.#trackViewTask(this.#openSelectedFile());
+        return;
+      }
+    }
+  }
+
   #toggleRaw(): void {
     if (!this.#document.source) {
       this.#statusMessage = "this document has no text source";
       this.#requestRender();
       return;
     }
-    const oldMaximum = Math.max(1, this.#layout.lines.length - this.viewportRows);
+    const oldMaximum = Math.max(1, this.#layout.lines.length - this.contentViewportRows);
     const progress = this.#offset / oldMaximum;
     this.#rawMode = !this.#rawMode;
     this.#showToc = false;
     this.#relayout();
-    const newMaximum = Math.max(0, this.#layout.lines.length - this.viewportRows);
+    const newMaximum = Math.max(0, this.#layout.lines.length - this.contentViewportRows);
     this.#offset = this.#clampOffset(Math.round(progress * newMaximum));
     this.#statusMessage = this.#rawMode ? "source view" : "rendered view";
     this.#requestRender();
+  }
+
+  #changeGridColumn(direction: -1 | 1): void {
+    const grid = !this.#rawMode ? this.#document.grid : undefined;
+    if (!grid) {
+      if (direction > 0) {
+        this.#statusMessage = "this document has no horizontal grid view";
+        this.#requestRender();
+      } else this.#goBack();
+      return;
+    }
+    const next = Math.max(0, Math.min(grid.headers.length - 1, grid.columnOffset + direction));
+    if (next === grid.columnOffset) {
+      this.#statusMessage = direction < 0 ? "first table column" : "last table column";
+      this.#requestRender();
+      return;
+    }
+    grid.columnOffset = next;
+    this.#document.viewKey = `grid:${next}`;
+    this.#layoutCache.delete(this.#document);
+    this.#relayout();
+    this.#statusMessage = `column window starts at ${next + 1}/${grid.headers.length} · ←/→ scroll`;
+    this.#requestRender();
+  }
+
+  async #togglePageView(): Promise<void> {
+    if (this.#switchingView) return;
+    if (!this.#document.pages) {
+      this.#statusMessage = "this document has no alternate page view";
+      this.#requestRender();
+      return;
+    }
+    if (this.#document.pages.mode === "reflow" && !this.#graphicsAvailable) {
+      this.#statusMessage = "PDF page view requires Kitty graphics; reflow text remains available";
+      this.#requestRender();
+      return;
+    }
+    this.#switchingView = true;
+    this.#statusMessage = this.#document.pages.mode === "page"
+      ? "switching to reflow view…"
+      : `rendering PDF page ${this.#document.pages.current}…`;
+    this.#requestRender();
+    try {
+      await toggleReaderPageView(this.#document);
+      if (this.#closing) return;
+      this.#rawMode = false;
+      this.#showToc = false;
+      this.#layoutCache.delete(this.#document);
+      this.#relayout();
+      this.#offset = 0;
+      const pages = this.#document.pages;
+      this.#statusMessage = pages.mode === "page"
+        ? `page ${pages.current}/${pages.count} · ${pages.backend} · [/] navigate · v reflow`
+        : "PDF reflow view · v page view";
+    } catch (error) {
+      this.#statusMessage = `cannot switch PDF view: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.#switchingView = false;
+      this.#requestRender();
+    }
+  }
+
+  async #changePage(direction: -1 | 1): Promise<void> {
+    const pages = this.#document.pages;
+    if (this.#switchingView || !pages || pages.mode !== "page") return;
+    const target = Math.max(1, Math.min(pages.count, pages.current + direction));
+    if (target === pages.current) {
+      this.#statusMessage = direction < 0 ? "first PDF page" : "last PDF page";
+      this.#requestRender();
+      return;
+    }
+    this.#switchingView = true;
+    this.#statusMessage = `rendering PDF page ${target}…`;
+    this.#requestRender();
+    try {
+      await changeReaderPage(this.#document, direction);
+      if (this.#closing) return;
+      this.#layoutCache.delete(this.#document);
+      this.#relayout();
+      this.#offset = 0;
+      this.#statusMessage = `page ${pages.current}/${pages.count} · ${pages.backend}`;
+    } catch (error) {
+      this.#statusMessage = `cannot render PDF page ${target}: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.#switchingView = false;
+      this.#requestRender();
+    }
+  }
+
+  #trackViewTask(task: Promise<void>): void {
+    this.#viewTail = Promise.all([this.#viewTail, task]).then(() => undefined);
   }
 
   #cycleLink(direction: 1 | -1): void {
@@ -897,7 +1340,7 @@ class TerminalReader {
     const current = this.#activeLinkIndex ?? (direction > 0 ? -1 : 0);
     this.#activeLinkIndex = (current + direction + count) % count;
     const link = this.#layout.links[this.#activeLinkIndex]!;
-    if (link.line < this.#offset || link.line >= this.#offset + this.viewportRows) {
+    if (link.line < this.#offset || link.line >= this.#offset + this.contentViewportRows) {
       this.#offset = this.#clampOffset(link.line - Math.floor(this.viewportRows / 3));
     }
     this.#statusMessage = `${link.label.trim() || "link"} → ${link.href}`;
@@ -922,8 +1365,72 @@ class TerminalReader {
     return true;
   }
 
+  async #openDocumentPath(
+    targetPath: string,
+    displayName: string,
+    fragment = "",
+    context = "document"
+  ): Promise<void> {
+    if (this.#openingDocument) return;
+    this.#openingDocument = true;
+    this.#fileLoadVersion += 1;
+    this.#loadingFiles = false;
+    this.#fileSearching = false;
+    this.#showFiles = false;
+    this.#statusMessage = `opening ${displayName}…`;
+    this.#requestRender();
+    try {
+      const next = await loadReaderDocument(targetPath);
+      if (this.#closing) {
+        await disposeReaderDocument(next);
+        return;
+      }
+      this.#ownedDocuments.add(next);
+      this.#history.push({
+        document: this.#document,
+        offset: this.#offset,
+        rawMode: this.#rawMode
+      });
+      this.#document = next;
+      this.#offset = 0;
+      this.#rawMode = false;
+      this.#showToc = false;
+      this.#showFiles = false;
+      this.#fileEntries = [];
+      this.#fileParents = [];
+      this.#fileQuery = "";
+      this.#relayout();
+      this.#statusMessage = "";
+      if (fragment && !this.#jumpToFragment(fragment)) {
+        this.#statusMessage = `heading not found: ${fragment}`;
+      }
+      this.#requestRender();
+    } catch (error) {
+      this.#statusMessage = `cannot open ${context}: ${error instanceof Error ? error.message : String(error)}`;
+      this.#requestRender();
+    } finally {
+      this.#openingDocument = false;
+    }
+  }
+
+  async #openSelectedFile(): Promise<void> {
+    const entries = filterReaderDirectoryEntries(this.#fileEntries, this.#fileQuery);
+    const entry = entries[this.#fileIndex];
+    if (!entry) return;
+    if (entry.type === "directory") {
+      const parent = { directory: this.#fileDirectory, selectedPath: entry.path };
+      this.#fileParents.push(parent);
+      if (!await this.#loadFileDirectory(entry.path)) {
+        this.#fileParents.pop();
+        this.#requestRender();
+      }
+      return;
+    }
+    await this.#openDocumentPath(entry.path, entry.name, "", "file");
+  }
+
   async #openActiveLink(): Promise<void> {
-    if (this.#openingLink) return;
+    if (this.#openingDocument) return;
     const link = this.#activeLinkIndex === undefined
       ? undefined
       : this.#layout.links[this.#activeLinkIndex];
@@ -956,32 +1463,7 @@ class TerminalReader {
       // Let the filesystem report malformed literal paths naturally.
     }
     const targetPath = resolve(dirname(this.#document.path), decodedTarget);
-    this.#openingLink = true;
-    this.#statusMessage = `opening ${decodedTarget}…`;
-    this.#requestRender();
-    try {
-      const next = await loadReaderDocument(targetPath);
-      this.#history.push({
-        document: this.#document,
-        offset: this.#offset,
-        rawMode: this.#rawMode
-      });
-      this.#document = next;
-      this.#offset = 0;
-      this.#rawMode = false;
-      this.#showToc = false;
-      this.#relayout();
-      this.#statusMessage = "";
-      if (fragment && !this.#jumpToFragment(fragment)) {
-        this.#statusMessage = `heading not found: ${fragment}`;
-      }
-      this.#requestRender();
-    } catch (error) {
-      this.#statusMessage = `cannot open link: ${error instanceof Error ? error.message : String(error)}`;
-      this.#requestRender();
-    } finally {
-      this.#openingLink = false;
-    }
+    await this.#openDocumentPath(targetPath, decodedTarget, fragment, "link");
   }
 
   #goBack(): void {
@@ -995,6 +1477,11 @@ class TerminalReader {
     this.#rawMode = previous.rawMode;
     this.#offset = previous.offset;
     this.#showToc = false;
+    this.#showFiles = false;
+    this.#fileEntries = [];
+    this.#fileParents = [];
+    this.#fileQuery = "";
+    this.#fileSearching = false;
     this.#relayout();
     this.#offset = this.#clampOffset(previous.offset);
     this.#statusMessage = "back";
@@ -1068,6 +1555,10 @@ class TerminalReader {
 
   #handleInput(data: string): void {
     if (!data || this.#closing) return;
+    if (this.#showFiles) {
+      this.#handleFileInput(data);
+      return;
+    }
     if (this.#showToc) {
       this.#handleTocInput(data);
       return;
@@ -1086,9 +1577,9 @@ class TerminalReader {
       if (sequence === "j" || sequence === "\x1b[B") this.#scroll(1);
       else if (sequence === "k" || sequence === "\x1b[A") this.#scroll(-1);
       else if (sequence === " " || sequence === "\x06" || sequence === "\x1b[6~") {
-        this.#scroll(Math.max(1, this.viewportRows - 2));
+        this.#scroll(Math.max(1, this.contentViewportRows - 2));
       } else if (sequence === "b" || sequence === "\x02" || sequence === "\x1b[5~") {
-        this.#scroll(-Math.max(1, this.viewportRows - 2));
+        this.#scroll(-Math.max(1, this.contentViewportRows - 2));
       } else if (sequence === "g" || sequence === "\x1b[H" || sequence === "\x1b[1~") {
         this.#jump(0);
       } else if (sequence === "G" || sequence === "\x1b[F" || sequence === "\x1b[4~") {
@@ -1108,16 +1599,30 @@ class TerminalReader {
         if (remaining && this.#showToc) this.#handleTocInput(remaining);
         return;
       }
+      else if (sequence === "l") {
+        this.#trackViewTask(this.#toggleFileList());
+        return;
+      }
       else if (sequence === "r") this.#toggleRaw();
+      else if (sequence === "v") this.#trackViewTask(this.#togglePageView());
       else if (sequence === "+" || sequence === "=") this.#changeImageScale(1);
       else if (sequence === "-") this.#changeImageScale(-1);
       else if (sequence === "0") this.#changeImageScale(0);
       else if (sequence === "\t") this.#cycleLink(1);
       else if (sequence === "\x1b[Z") this.#cycleLink(-1);
-      else if (sequence === "\r" || sequence === "\n") void this.#openActiveLink();
-      else if (sequence === "h" || sequence === "\x1b[D" || sequence === "\x7f") this.#goBack();
-      else if (sequence === "]") this.#jumpHeading(1);
-      else if (sequence === "[") this.#jumpHeading(-1);
+      else if (sequence === "\r" || sequence === "\n") {
+        this.#trackViewTask(this.#openActiveLink());
+      }
+      else if (sequence === "\x1b[C") this.#changeGridColumn(1);
+      else if (sequence === "\x1b[D") this.#changeGridColumn(-1);
+      else if (sequence === "h" || sequence === "\x7f") this.#goBack();
+      else if (sequence === "]") {
+        if (this.#document.pages?.mode === "page") this.#trackViewTask(this.#changePage(1));
+        else this.#jumpHeading(1);
+      } else if (sequence === "[") {
+        if (this.#document.pages?.mode === "page") this.#trackViewTask(this.#changePage(-1));
+        else this.#jumpHeading(-1);
+      }
     }
   }
 
@@ -1222,10 +1727,10 @@ class TerminalReader {
 
   readonly #onResize = (): void => {
     if (this.#closing) return;
-    const oldMaximum = Math.max(1, this.#layout.lines.length - this.viewportRows);
+    const oldMaximum = Math.max(1, this.#layout.lines.length - this.contentViewportRows);
     const progress = this.#offset / oldMaximum;
     this.#relayout();
-    const newMaximum = Math.max(0, this.#layout.lines.length - this.viewportRows);
+    const newMaximum = Math.max(0, this.#layout.lines.length - this.contentViewportRows);
     this.#offset = this.#clampOffset(Math.round(progress * newMaximum));
     this.#requestRender();
   };
@@ -1273,7 +1778,7 @@ class TerminalReader {
     this.#startupProbeCapture = "";
     this.#startupResponseFilter.flush(true);
     try {
-      await this.#renderTail;
+      await Promise.all([this.#renderTail, this.#viewTail]);
       const cleanup = this.capabilities.kittyGraphics || this.#uploaded.size > 0
         ? `${Array.from(this.#uploaded.values(), ({ imageId }) => kittyDeleteImage(imageId)).join("")}${kittyDeleteByZIndex()}`
         : "";
@@ -1292,6 +1797,9 @@ class TerminalReader {
         if (typeof process.stdin.setRawMode === "function" && !this.#previousRaw) {
           process.stdin.setRawMode(false);
         }
+        await Promise.all([...this.#ownedDocuments].map((document) =>
+          disposeReaderDocument(document)));
+        this.#ownedDocuments.clear();
       }
     }
   }
@@ -1306,12 +1814,25 @@ export async function runReader(
 ): Promise<number> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     const kind = readerFileKind(options.path);
-    if (kind === "image") {
+    const directlyReadable = new Set([
+      "markdown", "text", "json", "jsonl", "yaml", "toml", "xml",
+      "csv", "tsv", "html", "notebook"
+    ]);
+    if (kind && directlyReadable.has(kind)) {
+      process.stdout.write(await readFile(resolve(options.cwd, options.path), "utf8"));
+      return 0;
+    }
+    const document = await loadReaderDocument(options.path, options.cwd);
+    try {
+      if (document.source) {
+        process.stdout.write(document.source);
+        return 0;
+      }
       process.stderr.write(plainFallbackMessage(options.path));
       return 1;
+    } finally {
+      await disposeReaderDocument(document);
     }
-    process.stdout.write(await readFile(resolve(options.cwd, options.path), "utf8"));
-    return 0;
   }
   const document = preloadedDocument ?? await loadReaderDocument(options.path, options.cwd);
   const reader = new TerminalReader(options, capabilities, document, startupProbePending);
@@ -1332,8 +1853,11 @@ export async function preloadReaderDocument(
 
 export const readerInternals = {
   canonicalImageRequest,
+  filterReaderDirectoryEntries,
   fitStatus,
   isDarkColor,
+  listReaderDirectory,
+  readerDirectoryBreadcrumb,
   renderSpans,
   readerTerminalImageLimit,
   selectTerminalImageEvictions,

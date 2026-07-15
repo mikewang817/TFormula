@@ -2,8 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Render LaTeX from **any CLI agent**, or read Markdown and images directly
-inside your terminal.
+Render LaTeX from **any CLI agent**, or read rich documents directly inside
+your terminal.
 
 > **Ghostty is the recommended terminal.** TFormula is developed and tested
 > primarily with Ghostty and also works with terminals that implement the Kitty
@@ -26,19 +26,22 @@ in place without replacing the surrounding text.
 
 ![TFormula rendering Maxwell's equations in Ghostty](assets/tformula-maxwell.png)
 
-## Markdown reader
+## Document reader
 
-Pass a Markdown, text, or image path instead of a command to open TFormula's
-full-screen document reader:
+Pass a document path instead of a command to open TFormula's full-screen
+reader:
 
 ```sh
 tformula README.md
 tformula notes.txt
 tformula assets/tformula-maxwell.png
+tformula analysis.ipynb
+tformula data.csv
+tformula paper.pdf
 ```
 
-Known document extensions are detected automatically. Use `--read` to open
-another UTF-8 text file without making it ambiguous with a command:
+Known document extensions are detected automatically. Use `--read` to open an
+unknown text or binary file without making it ambiguous with a command:
 
 ```sh
 tformula --read package.json
@@ -57,22 +60,55 @@ recovers standalone `[ ... ]` blocks when their contents contain unambiguous
 TeX such as `\sum`, `\frac`, or structured subscripts, without treating normal
 Markdown brackets as formulas.
 
+The same reader now uses a format adapter appropriate to each document:
+
+| Format | Reader behavior |
+|---|---|
+| JSON, JSON Lines, YAML, TOML, XML | Validated and normalized structured-text view; `r` restores the exact source |
+| CSV, TSV | Frozen header and row numbers; Left / Right moves the visible column window |
+| Jupyter Notebook (`.ipynb`) | Markdown, TeX, code cells, streams, errors, HTML, and embedded image output in one document |
+| HTML | Safe static structure, tables, links, code, and local images; scripts and styles are never executed |
+| EPUB | Spine chapters, headings, links, TeX, and packaged images in one searchable document |
+| PDF | Reflowed searchable text plus an on-demand original-page image view |
+| ZIP, TAR, TAR.GZ, TGZ, GZIP | Bounded archive listing without extracting arbitrary files |
+| Unknown binary via `--read` | Metadata, a bounded hex dump, and printable strings |
+
+PDF support uses Poppler. Text extraction and metadata run in parallel; original
+page images are rendered only after pressing `v`, and only the selected page is
+materialized. Install the command-line tools with `brew install poppler` on
+macOS or `apt install poppler-utils` on Debian/Ubuntu. If they are unavailable,
+the reader reports the missing backend instead of interpreting PDF bytes as
+text.
+
+Source-code extensions are deliberately not claimed by implicit dispatch yet,
+so `tformula app.ts` continues to mean “run `app.ts`”. They can still be opened
+explicitly with `tformula --read app.ts` as plain UTF-8 text.
+
 Useful reader keys:
 
 | Key | Action |
 |---|---|
-| `j` / `k`, arrows | Scroll one line |
+| `j` / `k`, Up / Down | Scroll one line |
+| Left / Right | Move CSV/TSV/archive columns; Left returns to the previous document otherwise |
 | `Space` / `b`, Page Down / Up | Scroll one page |
 | `g` / `G` | Go to the start / end |
 | `/`, `n` / `N` | Search, then find next / previous |
 | `t` | Open the table of contents |
-| `[` / `]` | Go to the previous / next heading |
+| `l` | Browse folders and supported files beside the current document |
+| `[` / `]` | Go to the previous / next heading, or PDF page in page view |
 | `+` / `-` | Zoom document images in / out |
 | `0` | Reset images to automatic fit |
 | `Tab` / `Shift-Tab`, `Enter` | Select and open a link |
-| `h` / Left | Return to the previous local document |
-| `r` | Toggle rendered and Markdown source views |
+| `h` | Return to the previous local document |
+| `r` | Toggle rendered and original source views |
+| `v` | Toggle PDF reflow and original-page views |
 | `q` | Quit |
+
+The `l` browser loads only the current directory level instead of recursively
+expanding a potentially huge tree. A compact breadcrumb preserves the visible
+hierarchy; folders are listed first, Up / Down selects, Enter / Right opens,
+and Left returns to the parent level. Use `/` to filter a crowded directory by
+name. Only the visible terminal rows are rendered.
 
 Relative Markdown links and `#heading` fragments open inside the reader.
 HTTP links are identified but are not launched automatically. Remote and data
@@ -305,7 +341,7 @@ ordinary prices such as `$12.50` from being rendered.
 
 ```text
 --shell                 Start the login shell
---read <path>           Open a Markdown, text, or image file
+--read <path>           Open any supported document or binary file
 --no-math               Run only as a transparent PTY proxy
 --scale <number>        Formula-to-terminal text scale (0.5 to 2.0)
 --cell-size <WxH>       Override terminal cell pixels
@@ -330,8 +366,15 @@ tformula -- claude --resume
 - On terminals without Kitty graphics support, TFormula remains a transparent
   PTY proxy. The document reader retains its ANSI text layout and uses readable
   formula and image placeholders.
-- Reader HTML is treated as text; it is not executed. Reader images are loaded
-  only from local files in this release.
+- Reader HTML/EPUB is parsed as inert document structure; scripts and styles
+  are never executed. Reader images are loaded only from local or packaged
+  files in this release.
+- ZIP/EPUB expansion, embedded notebook images, document bytes, grid rows, and
+  hexadecimal previews all have explicit bounds. Archive paths are validated
+  before packaged assets are materialized.
+- PDF tools are invoked directly with argument arrays, never through a shell;
+  generated page images and extracted EPUB/Notebook assets are removed when
+  the reader closes.
 
 ## Development
 

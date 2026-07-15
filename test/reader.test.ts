@@ -1,8 +1,54 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readerInternals } from "../src/reader.js";
 import type { ReaderPlacement } from "../src/reader-layout.js";
 
 describe("reader viewport graphics", () => {
+  it("lists folders first and excludes unsupported regular files", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tformula-reader-files-"));
+    try {
+      await Promise.all([
+        writeFile(join(directory, "notes.md"), "# Notes\n"),
+        writeFile(join(directory, "data.csv"), "value\n1\n"),
+        writeFile(join(directory, "photo.png"), "not inspected while listing"),
+        writeFile(join(directory, "app.ts"), "export {};\n"),
+        writeFile(join(directory, "unknown.dat"), "unknown\n"),
+        mkdir(join(directory, "chapter.md"))
+      ]);
+
+      const entries = await readerInternals.listReaderDirectory(
+        directory
+      );
+
+      expect(entries.map(({ name, type, kind }) => [name, type, kind])).toEqual([
+        ["chapter.md", "directory", undefined],
+        ["data.csv", "file", "csv"],
+        ["notes.md", "file", "markdown"],
+        ["photo.png", "file", "image"]
+      ]);
+      expect(entries[2]?.path).toBe(resolve(directory, "notes.md"));
+      expect(readerInternals.filterReaderDirectoryEntries(entries, "PHO"))
+        .toEqual([entries[3]]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("compacts deep directory breadcrumbs while preserving the active levels", () => {
+    expect(readerInternals.readerDirectoryBreadcrumb(
+      "/workspace/project",
+      "/workspace/project/alpha/beta/gamma",
+      80
+    )).toBe("  Files  project / alpha / beta / gamma");
+    expect(readerInternals.readerDirectoryBreadcrumb(
+      "/workspace/project",
+      "/workspace/project/alpha/beta/gamma",
+      35
+    )).toBe("  Files  project / … / beta / gamma");
+  });
+
   it("crops zoomed images to visible rows while keeping formulas atomic", () => {
     const image: ReaderPlacement = {
       row: 10,

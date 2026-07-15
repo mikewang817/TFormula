@@ -11,11 +11,11 @@ const { version: VERSION } = createRequire(import.meta.url)("../package.json") a
 
 const HELP = `TFormula ${VERSION}
 
-Render LaTeX from terminal agents, or read Markdown, text, and image files.
+Render LaTeX from terminal agents, or read documents directly in the terminal.
 
 Usage:
   tformula [options] [--] [command ...]
-  tformula [options] <document.md|image>
+  tformula [options] <document>
   tformula --read <document>
   tformula --shell
 
@@ -26,10 +26,13 @@ Examples:
   tformula --shell
   tformula README.md
   tformula assets/diagram.png
+  tformula report.pdf
+  tformula notebook.ipynb
+  tformula data.csv
 
 Options:
   --shell                 Start the login shell (default when no command is given)
-  --read <path>           Open a Markdown, text, or image file in the reader
+  --read <path>           Open any supported document or binary file
   --no-math               Run only as a transparent PTY proxy
   --scale <number>         Formula-to-terminal text scale, default 1.0
   --cell-size <WxH>        Override terminal cell pixels, for example 9x18

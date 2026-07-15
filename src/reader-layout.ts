@@ -84,6 +84,8 @@ export interface ReaderLink {
 
 export interface ReaderLayout {
   lines: ReaderLine[];
+  /** Lines pinned above the vertically scrolling body (used by grid documents). */
+  stickyLines?: ReaderLine[];
   placements: ReaderPlacement[];
   headings: ReaderHeading[];
   links: ReaderLink[];
@@ -910,9 +912,99 @@ export function layoutReaderDocument(
   document: ReaderDocument,
   options: ReaderLayoutOptions
 ): ReaderLayout {
+  if (document.grid) return layoutReaderGrid(document, options);
   const builder = new LayoutBuilder(document, options);
   for (const node of document.root.children) builder.renderBlock(node, EMPTY_CONTEXT);
   return builder.finish();
+}
+
+function readerGridLine(spans: StyledSpan[], searchable?: string): ReaderLine {
+  return {
+    spans,
+    plain: searchable ?? spans.map(({ text }) => text).join("")
+  };
+}
+
+/** A non-wrapping, horizontally windowed table with a frozen header. */
+export function layoutReaderGrid(
+  document: ReaderDocument,
+  options: ReaderLayoutOptions
+): ReaderLayout {
+  const grid = document.grid!;
+  const terminalWidth = Math.max(2, Math.floor(options.columns));
+  const contentWidth = Math.max(1, terminalWidth - (terminalWidth >= 24 ? 2 : 1));
+  const left = Math.max(0, Math.floor((terminalWidth - contentWidth) / 2));
+  const prefix = " ".repeat(left);
+  const rowNumberWidth = Math.max(1, String(Math.max(1, grid.rows.length)).length);
+  const samples = grid.rows.slice(0, 1_000);
+  const widths = grid.headers.map((header, column) => Math.max(3, Math.min(30, Math.max(
+    stringWidth(sanitizeText(header)),
+    ...samples.map((row) => stringWidth(sanitizeText(row[column] ?? "").replace(/\s+/gu, " ")))
+  ))));
+  const start = Math.max(0, Math.min(grid.columnOffset, Math.max(0, grid.headers.length - 1)));
+  const fixedWidth = rowNumberWidth + 3;
+  let remaining = Math.max(3, contentWidth - fixedWidth - 1);
+  const visible: Array<{ index: number; width: number }> = [];
+  for (let column = start; column < grid.headers.length; column += 1) {
+    const width = Math.min(widths[column]!, Math.max(3, remaining - 1));
+    if (visible.length > 0 && width + 1 > remaining) break;
+    visible.push({ index: column, width });
+    remaining -= width + 1;
+    if (remaining < 4) break;
+  }
+  if (visible.length === 0 && grid.headers.length > 0) {
+    visible.push({ index: start, width: Math.max(1, contentWidth - fixedWidth - 2) });
+  }
+  const rightHidden = visible.length > 0 && visible.at(-1)!.index < grid.headers.length - 1;
+  const leftHidden = start > 0;
+  const cellWidths = [rowNumberWidth, ...visible.map(({ width }) => width)];
+  const border = (leftEdge: string, joint: string, rightEdge: string): ReaderLine => readerGridLine([{
+    text: `${prefix}${leftEdge}${cellWidths.map((width) => "─".repeat(width)).join(joint)}${rightEdge}`,
+    style: { color: "muted", dim: true }
+  }]);
+  const headerSpans: StyledSpan[] = [{ text: `${prefix}│`, style: { color: "muted", dim: true } }];
+  appendSpan(headerSpans, padColumns("#", rowNumberWidth, "right"), { bold: true, color: "accent" });
+  appendSpan(headerSpans, "│", { color: "muted", dim: true });
+  for (const [visibleIndex, column] of visible.entries()) {
+    let label = sanitizeText(grid.headers[column.index] ?? `Column ${column.index + 1}`).replace(/\s+/gu, " ");
+    if (visibleIndex === 0 && leftHidden) label = `← ${label}`;
+    if (visibleIndex === visible.length - 1 && rightHidden) label = `${label} →`;
+    appendSpan(headerSpans, padColumns(label, column.width), { bold: true, color: "accent" });
+    appendSpan(headerSpans, "│", { color: "muted", dim: true });
+  }
+  const stickyLines = [
+    border("┌", "┬", "┐"),
+    readerGridLine(headerSpans),
+    border("├", "┼", "┤")
+  ];
+  const lines = grid.rows.map((row, rowIndex): ReaderLine => {
+    const spans: StyledSpan[] = [{ text: `${prefix}│`, style: { color: "muted", dim: true } }];
+    appendSpan(spans, padColumns(String(rowIndex + 1), rowNumberWidth, "right"), { color: "muted", dim: true });
+    appendSpan(spans, "│", { color: "muted", dim: true });
+    for (const column of visible) {
+      const value = sanitizeText(row[column.index] ?? "").replace(/\s+/gu, " ").trim();
+      const numeric = /^[-+]?\d+(?:[.,]\d+)?(?:e[-+]?\d+)?$/iu.test(value);
+      appendSpan(spans, padColumns(value, column.width, numeric ? "right" : "left"));
+      appendSpan(spans, "│", { color: "muted", dim: true });
+    }
+    return readerGridLine(spans, row.join("\t"));
+  });
+  if (grid.truncatedRows) {
+    lines.push(readerGridLine([{
+      text: `${prefix}… ${grid.truncatedRows.toLocaleString()} additional rows were not loaded`,
+      style: { color: "warning", italic: true }
+    }]));
+  }
+  lines.push(border("└", "┴", "┘"));
+  return {
+    lines,
+    stickyLines,
+    placements: [],
+    headings: [],
+    links: [],
+    contentWidth,
+    left
+  };
 }
 
 /**
@@ -976,6 +1068,7 @@ export function rescaleReaderImages(
 
   return {
     lines,
+    stickyLines: layout.stickyLines,
     placements,
     headings,
     links,

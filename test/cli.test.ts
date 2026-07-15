@@ -25,6 +25,16 @@ describe("CLI arguments", () => {
       mode: "reader",
       path: "package.json"
     });
+    expect(parseArgs(["paper.pdf"])).toMatchObject({ mode: "reader", path: "paper.pdf" });
+    expect(parseArgs(["notebook.ipynb"])).toMatchObject({ mode: "reader", path: "notebook.ipynb" });
+    expect(parseArgs(["data.csv"])).toMatchObject({ mode: "reader", path: "data.csv" });
+  });
+
+  it("does not take over source-code paths implicitly", () => {
+    expect(parseArgs(["app.ts"])).toMatchObject({
+      mode: "proxy",
+      command: "app.ts"
+    });
   });
 
   it("keeps the command separator as an explicit proxy request", () => {
