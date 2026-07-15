@@ -169,6 +169,78 @@ describe("runProxy pseudo-terminal integration", () => {
     expect(transcript).not.toContain("TFORMULA_UNEXPECTED_CHILD_INPUT");
   }, 6_000);
 
+  it("places after resize leaves an otherwise idle Agent in pending-wrap", async () => {
+    const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
+    const fixture = join(process.cwd(), "test", "fixtures", "proxy-edge-agent.mjs");
+    const environment = {
+      ...process.env,
+      TERM: "xterm-ghostty",
+      TERM_PROGRAM: "ghostty",
+      TFORMULA_EDGE_MODE: "idle-pending-resize"
+    } as Record<string, string>;
+    delete environment.TFORMULA_ACTIVE;
+    let transcript = "";
+    let startupAnswered = false;
+    let narrowed = false;
+    let widened = false;
+    const terminal = pty.spawn(tsx, [
+      "src/cli.ts",
+      "--cell-size",
+      "9x18",
+      "--",
+      process.execPath,
+      fixture
+    ], {
+      name: "xterm-ghostty",
+      cols: 100,
+      rows: 32,
+      cwd: process.cwd(),
+      env: environment
+    });
+    const exited = new Promise<number>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        terminal.kill();
+        reject(new Error("idle pending-wrap fixture timed out"));
+      }, 5_000);
+      terminal.onData((data) => {
+        transcript += data;
+        if (!startupAnswered && transcript.includes(`${ESC}[16t`)) {
+          startupAnswered = true;
+          terminal.write(
+            `${ESC}[6;18;9t${ESC}[4;576;900t`
+            + `${ESC}]10;rgb:dddd/eeee/ffff${ST}`
+            + `${ESC}]11;rgb:1111/2222/3333${ST}`
+            + `${ESC}_Gi=2000000000;OK${ST}`
+          );
+        }
+        if (!narrowed && transcript.includes("TFORMULA_PENDING_PHASE_1")) {
+          narrowed = true;
+          terminal.resize(20, 32);
+        }
+        if (!widened && transcript.includes("TFORMULA_PENDING_PHASE_2")) {
+          widened = true;
+          terminal.resize(40, 32);
+        }
+      });
+      terminal.onExit(({ exitCode }) => {
+        clearTimeout(timeout);
+        resolve(exitCode);
+      });
+    });
+
+    await expect(exited).resolves.toBe(0);
+    expect(startupAnswered).toBe(true);
+    expect(narrowed).toBe(true);
+    expect(widened).toBe(true);
+    expect(transcript).not.toContain("TFORMULA_UNEXPECTED_CHILD_INPUT");
+    const postResize = transcript.slice(transcript.indexOf("TFORMULA_PENDING_PHASE_2"));
+    expect(postResize).toContain("a=p");
+    // The normal-buffer cursor row may shift as the ready/formula lines reflow;
+    // the significant invariant is the replay at the new right margin.
+    expect(postResize).toMatch(/\x1b\[\d+;40Hb/u);
+    expect(postResize).not.toMatch(/\x1b(?:7|8|\[(?:s|u))/u);
+  }, 6_000);
+
   it.each([
     { transport: "local Ghostty transport", remote: false, delayedRuntimeProbe: true },
     { transport: "direct PNG transport", remote: true, delayedRuntimeProbe: false }

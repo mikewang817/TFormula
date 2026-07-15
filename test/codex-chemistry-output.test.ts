@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { detectFormulaRegions } from "../src/detect.js";
 import { FormulaCache } from "../src/formula-cache.js";
 import { MathRenderer, renderMathJaxSvg } from "../src/math-renderer.js";
+import { FormulaScreen } from "../src/screen.js";
 import { detectScreenFormulaRegions } from "../src/screen-text.js";
 
 const strippedRowBreak = "\\";
@@ -204,4 +205,58 @@ describe("real Codex analytical-chemistry output regression", () => {
       expect(png.readUInt32BE(20)).toBe(lines.length * 18);
     }
   );
+
+  it("re-renders the two long trailing displays after a probed viewport resize", async () => {
+    const output: string[] = [];
+    const debug: string[] = [];
+    const capabilities = {
+      kittyGraphics: true,
+      foreground: "#eeeeee",
+      background: "#202030",
+      cell: { width: 9, height: 18, source: "cell-query" as const }
+    };
+    const screen = new FormulaScreen({
+      cols: 94,
+      rows: 18,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: (data) => output.push(String(data)),
+      debug: (message) => debug.push(message)
+    });
+    const lines = [
+      ...Array.from({ length: 10 }, (_, index) => `earlier response line ${index + 1}`),
+      "4. equivalence-point balances",
+      ...CODEX_CHEMISTRY_BLOCKS[5].lines,
+      "",
+      "5. exact quadratic result",
+      ...CODEX_CHEMISTRY_BLOCKS[1].lines,
+      "chemical interpretation"
+    ];
+
+    try {
+      // The 154-cell status suffix occupies two rows at the initial width and
+      // exactly one after widening. This is the same idle pending-wrap state
+      // that previously stopped the scan before the two trailing displays.
+      await screen.write(
+        `\x1b[2J\x1b[H${lines.join("\r\n")}\r\n${"s".repeat(154)}`
+      );
+      await screen.flushScan();
+
+      output.length = 0;
+      debug.length = 0;
+      const epoch = screen.invalidateLayout();
+      screen.resize(154, 38, epoch, true);
+      screen.updateCapabilities(capabilities, epoch);
+      expect(screen.pendingWrap).toBe(true);
+      await screen.flushScan();
+
+      const resizedOutput = output.join("");
+      expect(resizedOutput.match(/\x1b_Ga=p/gu)).toHaveLength(2);
+      expect(resizedOutput).toMatch(/\x1b\[\d+;154Hs/u);
+      expect(debug.filter((message) => message.startsWith("formula render skipped"))).toEqual([]);
+    } finally {
+      screen.dispose();
+    }
+  });
 });

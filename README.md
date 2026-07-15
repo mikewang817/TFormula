@@ -186,7 +186,18 @@ and scale them with its own scrollback. Replacement is transactional: the old
 placement is deleted only after the new cached variant is ready, and xterm
 markers track its source rows through terminal reflow. A rapid sequence of font
 size changes therefore keeps the previous rendered formula instead of exposing
-the underlying TeX. `CSI 2J` invalidates visible placements,
+the underlying TeX.
+
+Resize handling also preserves the terminal's pending-wrap state at the right
+margin. If a scan happens after reflow while the Agent is idle, TFormula
+restores the exact final grapheme and its ANSI rendition—including wide
+characters, colors, underline variants, and protected cells—without consuming
+the application's cursor-save slot. The next wrapped row therefore stays in
+sync with the real terminal, so display equations later in the viewport are not
+left behind as raw TeX. Regression coverage exercises narrow and wide grids,
+styled right-edge cells, CJK-width graphemes, and multi-block chemistry output.
+
+`CSI 2J` invalidates visible placements,
 while `CSI 3J` and `RIS` invalidate all placements and cached terminal images.
 TFormula reserves a private image-ID range and deletes that complete range on
 full reset and shutdown, including interrupted transmissions.
