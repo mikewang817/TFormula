@@ -47,7 +47,7 @@ const ALIGNMENT_ENVIRONMENTS = new Set([
   "flalign", "flalign*", "split"
 ]);
 
-const MAX_DISPLAY_BLOCK_ROWS = 256;
+export const MAX_DISPLAY_BLOCK_ROWS = 256;
 const FORMULA_TRIGGER_RE = /[\\$()[\]^_=<>+*/-]|[^\x00-\x7f]/u;
 
 export function containsFormulaTrigger(value: string): boolean {
@@ -720,6 +720,12 @@ function unescapedTokenPositions(
   return positions;
 }
 
+/** A Markdown renderer may reduce TeX's `\\[2pt]` row break to `\[2pt]`. */
+function isStrippedRowSpacingAt(line: string, index: number): boolean {
+  return /^\\\[\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*(?:pt|pc|in|bp|cm|mm|dd|cc|sp|em|ex|mu)\s*\]/u
+    .test(line.slice(index));
+}
+
 function slashDelimitedRegions(
   lines: string[],
   contexts: DetectionLineContext[],
@@ -738,6 +744,8 @@ function slashDelimitedRegions(
     }
     const events = [
       ...unescapedTokenPositions(lines[row] ?? "", opening, context)
+        .filter((index) => opening !== "\\["
+          || !isStrippedRowSpacingAt(lines[row] ?? "", index))
         .map((index) => ({ index, opening: true })),
       ...unescapedTokenPositions(lines[row] ?? "", closing, context)
         .map((index) => ({ index, opening: false }))
@@ -1094,6 +1102,147 @@ function adjacentToStandaloneDelimiter(lines: string[], row: number): boolean {
     || delimiter.test((lines[row + 1] ?? "").trim());
 }
 
+/**
+ * A terminal Markdown renderer can expose a display one physical line at a
+ * time. Until the closing bare `]` arrives, its interior must not fall through
+ * to the standalone/inline compatibility detectors: alignment tabs, half of a
+ * `\left...\right` pair, and incomplete brace groups are not formulas on their
+ * own. Rendering those prefixes both flashes MathJax errors and can consume the
+ * retry budget of the completed display.
+ */
+function pendingDisplayRows(
+  lines: string[],
+  contexts: DetectionLineContext[]
+): Uint8Array {
+  const pendingRows = new Uint8Array(lines.length);
+  const markPending = (startRow: number): void => {
+    pendingRows.fill(
+      1,
+      startRow,
+      Math.min(lines.length, startRow + MAX_DISPLAY_BLOCK_ROWS + 1)
+    );
+  };
+  const hasMathEvidence = (body: string[]): boolean => {
+    const probe = normalizeHardWrappedLatex(body);
+    return Boolean(probe && (isLikelyMath(probe)
+      || body.some((line) => isStandaloneDisplayEnvironmentToken(line.trim()))));
+  };
+
+  // Bare brackets are the form left by several terminal Markdown renderers
+  // after they consume the backslashes in `\[` and `\]`.
+  for (let row = 0; row < lines.length; row += 1) {
+    if (contexts[row]?.inCodeFence || (lines[row] ?? "").trim() !== "[") continue;
+    const body: string[] = [];
+    const limit = Math.min(lines.length, row + MAX_DISPLAY_BLOCK_ROWS + 1);
+    let endRow = -1;
+    for (let candidate = row + 1; candidate < limit; candidate += 1) {
+      if (contexts[candidate]?.inCodeFence) break;
+      const trimmed = (lines[candidate] ?? "").trim();
+      if (trimmed === "]" || trimmed === "\\]") {
+        endRow = candidate;
+        break;
+      }
+      body.push(lines[candidate] ?? "");
+    }
+    if (endRow >= 0) {
+      row = endRow;
+      continue;
+    }
+
+    // A lone literal `[` should not suppress unrelated output forever. Wait
+    // for positive TeX/math evidence before treating it as a streaming display.
+    if (!hasMathEvidence(body)) continue;
+    markPending(row);
+    row = limit - 1;
+  }
+
+  // Explicit display delimiters can stream in exactly the same shape. Their
+  // opening token may share a row with the first formula fragment.
+  let slashOpening: DelimiterPosition | undefined;
+  for (let row = 0; row < lines.length; row += 1) {
+    const context = contexts[row]!;
+    if (context.inCodeFence) {
+      slashOpening = undefined;
+      continue;
+    }
+    const events = [
+      ...unescapedTokenPositions(lines[row] ?? "", "\\[", context)
+        .filter((index) => !isStrippedRowSpacingAt(lines[row] ?? "", index))
+        .map((index) => ({ index, opening: true })),
+      ...unescapedTokenPositions(lines[row] ?? "", "\\]", context)
+        .map((index) => ({ index, opening: false }))
+    ].sort((left, right) => left.index - right.index);
+    for (const event of events) {
+      if (event.opening) slashOpening = { row, index: event.index };
+      else slashOpening = undefined;
+    }
+  }
+  if (slashOpening) {
+    const body = [
+      (lines[slashOpening.row] ?? "").slice(slashOpening.index + 2),
+      ...lines.slice(slashOpening.row + 1)
+    ];
+    if (hasMathEvidence(body)) markPending(slashOpening.row);
+  }
+
+  let dollarOpening: DelimiterPosition | undefined;
+  for (let row = 0; row < lines.length; row += 1) {
+    const context = contexts[row]!;
+    if (context.inCodeFence) {
+      dollarOpening = undefined;
+      continue;
+    }
+    for (const index of dollarDelimiterPositions(lines[row] ?? "", "$$")) {
+      if (positionInInlineCode(index, context)) continue;
+      dollarOpening = dollarOpening ? undefined : { row, index };
+    }
+  }
+  if (dollarOpening) {
+    const body = [
+      (lines[dollarOpening.row] ?? "").slice(dollarOpening.index + 2),
+      ...lines.slice(dollarOpening.row + 1)
+    ];
+    if (hasMathEvidence(body)) markPending(dollarOpening.row);
+  }
+
+  // An environment is unambiguously mathematical, so unlike a lone literal
+  // bracket it needs no heuristic evidence before its inner rows are hidden.
+  const environmentStack: EnvironmentToken[] = [];
+  const environmentPattern = /\\(begin|end)\{([A-Za-z]+\*?)\}/gu;
+  for (let row = 0; row < lines.length; row += 1) {
+    const line = lines[row] ?? "";
+    const context = contexts[row]!;
+    if (context.inCodeFence) {
+      environmentStack.length = 0;
+      continue;
+    }
+    for (const match of line.matchAll(environmentPattern)) {
+      if (match.index === undefined
+        || !DISPLAY_ENVIRONMENTS.has(match[2]!)
+        || isEscapedAt(line, match.index)
+        || overlapsInlineCode(match.index, match.index + match[0].length, context.codeRanges)) {
+        continue;
+      }
+      if (match[1] === "begin") {
+        environmentStack.push({
+          row,
+          index: match.index,
+          end: match.index + match[0].length,
+          action: "begin",
+          name: match[2]!
+        });
+      } else if (environmentStack.at(-1)?.name === match[2]) {
+        environmentStack.pop();
+      } else {
+        environmentStack.length = 0;
+      }
+    }
+  }
+  if (environmentStack[0]) markPending(environmentStack[0].row);
+
+  return pendingRows;
+}
+
 function expandStandaloneDisplayRegions(
   lines: string[],
   regions: FormulaRegion[]
@@ -1202,12 +1351,27 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
   // and running every detector when a formula is structurally impossible.
   if (!lines.some(containsFormulaTrigger)) return [];
   const contexts = detectionLineContexts(lines);
+  const pendingRows = pendingDisplayRows(lines, contexts);
+  const rangeIntersectsPendingDisplay = (startRow: number, endRow: number): boolean => {
+    for (let row = startRow; row <= endRow; row += 1) {
+      if (pendingRows[row]) return true;
+    }
+    return false;
+  };
+  const intersectsPendingDisplay = (region: FormulaRegion): boolean =>
+    rangeIntersectsPendingDisplay(region.startRow, region.endRow);
   const regions: FormulaRegion[] = [
+    // A complete environment is self-delimiting and remains safe even when a
+    // Markdown renderer has emitted a bare `[` but never emits its matching
+    // `]`. Preserve that recovery path while suppressing incomplete interior
+    // rows and all weaker delimiter/inference candidates.
     ...environmentRegions(lines, contexts),
-    ...slashDelimitedRegions(lines, contexts, "\\[", "\\]", true),
-    ...slashDelimitedRegions(lines, contexts, "\\(", "\\)", false),
-    ...dollarDelimitedRegions(lines, contexts, "$$", true),
-    ...dollarDelimitedRegions(lines, contexts, "$", false)
+    ...[
+      ...slashDelimitedRegions(lines, contexts, "\\[", "\\]", true),
+      ...slashDelimitedRegions(lines, contexts, "\\(", "\\)", false),
+      ...dollarDelimitedRegions(lines, contexts, "$$", true),
+      ...dollarDelimitedRegions(lines, contexts, "$", false)
+    ].filter((region) => !intersectsPendingDisplay(region))
   ];
 
   for (let row = 0; row < lines.length; row += 1) {
@@ -1215,6 +1379,7 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
     const trimmed = line.trim();
     const context = contexts[row]!;
     if (context.inCodeFence) continue;
+    if (pendingRows[row]) continue;
     if (!trimmed) continue;
     const codeRanges = context.codeRanges;
 
@@ -1247,7 +1412,10 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
       }
 
       const latex = normalizeHardWrappedLatex(body);
-      if (endRow > row && latex && isLikelyMath(latex)) {
+      if (endRow > row
+        && latex
+        && isLikelyMath(latex)
+        && !rangeIntersectsPendingDisplay(row, endRow)) {
         regions.push({
           startRow: row,
           endRow,
@@ -1257,6 +1425,10 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
           display: true,
           confidence: "inferred"
         });
+      }
+      // Whether or not the body was valid math, the complete structural block
+      // owns these rows. Do not infer its fragments independently.
+      if (endRow > row) {
         row = endRow;
         continue;
       }

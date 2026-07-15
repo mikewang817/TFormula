@@ -1585,6 +1585,72 @@ describe("FormulaScreen lifecycle", () => {
     }
   });
 
+  it("reasserts a visible placement after a same-geometry resize", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer: new FastMathRenderer(),
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[2J\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      const first = output.join("").match(/a=p,i=(\d+),p=(\d+)/u);
+      expect(first).toBeTruthy();
+
+      output.length = 0;
+      screen.resize(80, 8);
+      await screen.flushScan();
+
+      const reasserted = output.join("");
+      expect(reasserted).toContain(`a=d,d=i,i=${first![1]},p=${first![2]}`);
+      expect(reasserted.match(/\x1b_Ga=p/gu)).toHaveLength(1);
+      // Only the cell pin is rebuilt; the content-addressed image upload stays
+      // resident and is reused at the new placement generation.
+      expect(reasserted).not.toContain("\x1b_Ga=t");
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("lets resize recover a placement variant rejected at the previous geometry", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer: new FastMathRenderer(),
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[2J\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      const first = output.join("").match(/a=p,i=(\d+),p=(\d+)/u);
+      expect(first).toBeTruthy();
+
+      output.length = 0;
+      expect(screen.invalidateTerminalPlacement(
+        Number(first![1]),
+        Number(first![2]),
+        "intentional terminal rejection",
+        false
+      )).toBe(true);
+      await screen.flushScan();
+      expect(output.join("")).not.toContain("a=p");
+
+      output.length = 0;
+      screen.resize(80, 8);
+      await screen.flushScan();
+      expect(output.join("").match(/\x1b_Ga=p/gu)).toHaveLength(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it("reflows a final formula line that has no trailing newline", async () => {
     const output: string[] = [];
     const screen = new FormulaScreen({
