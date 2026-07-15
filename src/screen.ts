@@ -67,6 +67,167 @@ interface MutableXtermBufferCursor {
   ybase: number;
 }
 
+/**
+ * Runtime shape shared by xterm's CellData and current AttrData objects.
+ *
+ * The public buffer-cell API intentionally omits a few rendition fields. We
+ * feature-detect the pinned @xterm/headless 6.x shape before using it, and
+ * simply defer placement if a future xterm release changes that shape.
+ */
+interface XtermRendition {
+  fg: number;
+  bg: number;
+  extended: {
+    _ext: number;
+    _urlId: number;
+  };
+  isInverse(): number;
+  isBold(): number;
+  isUnderline(): number;
+  isBlink(): number;
+  isInvisible(): number;
+  isItalic(): number;
+  isDim(): number;
+  isStrikethrough(): number;
+  isProtected(): number;
+  isOverline(): number;
+  getFgColorMode(): number;
+  getBgColorMode(): number;
+  isFgRGB(): boolean;
+  isBgRGB(): boolean;
+  isFgPalette(): boolean;
+  isBgPalette(): boolean;
+  isFgDefault(): boolean;
+  isBgDefault(): boolean;
+  getFgColor(): number;
+  getBgColor(): number;
+  getUnderlineColor(): number;
+  getUnderlineColorMode(): number;
+  isUnderlineColorRGB(): boolean;
+  isUnderlineColorPalette(): boolean;
+  isUnderlineColorDefault(): boolean;
+  getUnderlineStyle(): number;
+  getUnderlineVariantOffset(): number;
+}
+
+interface XtermPrivateCore {
+  _inputHandler?: { _curAttrData?: Partial<XtermRendition> };
+  _charsetService?: { glevel?: number; _charsets?: unknown[] };
+}
+
+const XTERM_COLOR_P16 = 0x01_00_00_00;
+const XTERM_COLOR_P256 = 0x02_00_00_00;
+const XTERM_COLOR_RGB = 0x03_00_00_00;
+
+function xtermPrivateCore(terminal: XtermTerminal): XtermPrivateCore | undefined {
+  return (terminal as unknown as { _core?: XtermPrivateCore })._core;
+}
+
+function isXtermRendition(value: unknown): value is XtermRendition {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<XtermRendition>;
+  return typeof candidate.fg === "number"
+    && typeof candidate.bg === "number"
+    && Boolean(candidate.extended)
+    && typeof candidate.extended?._ext === "number"
+    && typeof candidate.extended?._urlId === "number"
+    && typeof candidate.isProtected === "function"
+    && typeof candidate.getUnderlineStyle === "function"
+    && typeof candidate.getUnderlineColorMode === "function"
+    && typeof candidate.getUnderlineVariantOffset === "function";
+}
+
+function xtermUsesDefaultCharset(terminal: XtermTerminal): boolean {
+  const charset = xtermPrivateCore(terminal)?._charsetService;
+  return charset?.glevel === 0
+    && Array.isArray(charset._charsets)
+    && charset._charsets.every((value) => value === undefined || value === null);
+}
+
+function sameXtermStyle(left: XtermRendition, right: XtermRendition): boolean {
+  // DECSCA protection is terminal state but not part of SGR. Mask its xterm
+  // storage bit so a protection-only change does not needlessly reset style.
+  const protectedBit = 0x20_00_00_00;
+  return left.fg === right.fg
+    && (left.bg & ~protectedBit) === (right.bg & ~protectedBit)
+    && left.extended._ext === right.extended._ext
+    && left.extended._urlId === right.extended._urlId;
+}
+
+function paletteSgr(
+  target: "foreground" | "background",
+  mode: number,
+  value: number
+): string | undefined {
+  const normalized = Math.max(0, Math.min(255, Math.floor(value)));
+  if (mode === XTERM_COLOR_P16) {
+    if (normalized > 15) return undefined;
+    if (target === "foreground") {
+      return String(normalized < 8 ? 30 + normalized : 90 + normalized - 8);
+    }
+    return String(normalized < 8 ? 40 + normalized : 100 + normalized - 8);
+  }
+  if (mode !== XTERM_COLOR_P256) return undefined;
+  return `${target === "foreground" ? 38 : 48};5;${normalized}`;
+}
+
+/** Encode a complete rendition from a known reset state. */
+function xtermRenditionSgr(rendition: XtermRendition): string | undefined {
+  // xterm tracks only one blink bit, so serializing it could silently turn a
+  // rapid blink into a slow one. This path is a correctness fallback, not a
+  // reason to alter unusual application styling.
+  if (rendition.isBlink()) return undefined;
+  const underlineVariantOffset = rendition.getUnderlineVariantOffset();
+  if (underlineVariantOffset !== 0) return undefined;
+
+  const parameters = ["0"];
+  if (rendition.isBold()) parameters.push("1");
+  if (rendition.isDim()) parameters.push("2");
+  if (rendition.isItalic()) parameters.push("3");
+  const underlineStyle = rendition.getUnderlineStyle();
+  if (underlineStyle < 0 || underlineStyle > 5) return undefined;
+  if (underlineStyle > 0) parameters.push(`4:${underlineStyle}`);
+  if (rendition.isInverse()) parameters.push("7");
+  if (rendition.isInvisible()) parameters.push("8");
+  if (rendition.isStrikethrough()) parameters.push("9");
+  if (rendition.isOverline()) parameters.push("53");
+
+  const foregroundMode = rendition.getFgColorMode();
+  if (rendition.isFgRGB()) {
+    const color = rendition.getFgColor();
+    parameters.push(`38;2;${color >>> 16 & 0xff};${color >>> 8 & 0xff};${color & 0xff}`);
+  } else if (rendition.isFgPalette()) {
+    const encoded = paletteSgr("foreground", foregroundMode, rendition.getFgColor());
+    if (!encoded) return undefined;
+    parameters.push(encoded);
+  } else if (!rendition.isFgDefault()) return undefined;
+
+  const backgroundMode = rendition.getBgColorMode();
+  if (rendition.isBgRGB()) {
+    const color = rendition.getBgColor();
+    parameters.push(`48;2;${color >>> 16 & 0xff};${color >>> 8 & 0xff};${color & 0xff}`);
+  } else if (rendition.isBgPalette()) {
+    const encoded = paletteSgr("background", backgroundMode, rendition.getBgColor());
+    if (!encoded) return undefined;
+    parameters.push(encoded);
+  } else if (!rendition.isBgDefault()) return undefined;
+
+  if (underlineStyle > 0 && !rendition.isUnderlineColorDefault()) {
+    const underlineColor = rendition.getUnderlineColor();
+    const underlineMode = rendition.getUnderlineColorMode();
+    if (rendition.isUnderlineColorRGB()) {
+      parameters.push(
+        `58;2;${underlineColor >>> 16 & 0xff};`
+        + `${underlineColor >>> 8 & 0xff};${underlineColor & 0xff}`
+      );
+    } else if (rendition.isUnderlineColorPalette()
+      && (underlineMode === XTERM_COLOR_P16 || underlineMode === XTERM_COLOR_P256)) {
+      parameters.push(`58;5;${Math.max(0, Math.min(255, Math.floor(underlineColor)))}`);
+    } else return undefined;
+  }
+  return `\x1b[${parameters.join(";")}m`;
+}
+
 interface CursorLineReflowSnapshot {
   bufferType: string;
   /** Normal-buffer marker at the start of the wrapped logical line. */
@@ -462,6 +623,85 @@ export class FormulaScreen {
       return cell.getChars() ? Math.max(1, cell.getWidth()) : fallback;
     }
     return fallback;
+  }
+
+  /**
+   * Restore an idle pending-wrap cursor without consuming the application's
+   * one-slot DECSC/DECRC save state.
+   *
+   * CUP can address only the final physical cell, not xterm/Ghostty's hidden
+   * "the next printable wraps" bit. Rewriting the exact right-edge grapheme
+   * recreates that bit while leaving the visible cell unchanged. The replay is
+   * allowed only when the mirror can reproduce every relevant print state.
+   */
+  #pendingWrapReplay(): string | undefined {
+    const buffer = this.terminal.buffer.active;
+    if (buffer.cursorX < this.terminal.cols) return undefined;
+    if (!this.terminal.modes.wraparoundMode
+      || this.terminal.modes.insertMode
+      || !xtermUsesDefaultCharset(this.terminal)) return undefined;
+
+    const line = buffer.getLine(buffer.baseY + buffer.cursorY);
+    if (!line) return undefined;
+    let startColumn = this.terminal.cols - 1;
+    let cell = line.getCell(startColumn);
+    while (startColumn > 0 && cell?.getWidth() === 0) {
+      startColumn -= 1;
+      cell = line.getCell(startColumn);
+    }
+    if (!cell || cell.getWidth() <= 0
+      || startColumn + cell.getWidth() !== this.terminal.cols) return undefined;
+    const grapheme = cell.getChars();
+    // A standalone combining/format character would attach to the preceding
+    // cell when replayed. Kitty's Unicode placeholder must also remain owned
+    // by the application that emitted it.
+    if (!grapheme
+      || /[\x00-\x1f\x7f-\x9f]/u.test(grapheme)
+      || /^[\p{Mark}\u200d\ufe00-\ufe0f]/u.test(grapheme)
+      || grapheme.includes("\u{10eeee}")) return undefined;
+
+    const current = xtermPrivateCore(this.terminal)?._inputHandler?._curAttrData;
+    const cellRendition = cell as unknown as XtermRendition;
+    if (!isXtermRendition(current) || !isXtermRendition(cellRendition)) return undefined;
+    // OSC 8 links have terminal-private identities. Replaying is exact when
+    // the current pen and final cell are in the same link; otherwise wait for
+    // ordinary child output instead of splitting or regrouping that link.
+    if (current.extended._urlId !== cellRendition.extended._urlId) return undefined;
+
+    let enter = "";
+    let leave = "";
+    if (!sameXtermStyle(current, cellRendition)) {
+      const cellSgr = xtermRenditionSgr(cellRendition);
+      const currentSgr = xtermRenditionSgr(current);
+      if (!cellSgr || !currentSgr) return undefined;
+      enter += cellSgr;
+      leave = currentSgr + leave;
+    }
+    const currentProtected = Boolean(current.isProtected());
+    const cellProtected = Boolean(cellRendition.isProtected());
+    if (currentProtected !== cellProtected) {
+      enter += `\x1b[${cellProtected ? 1 : 0}\"q`;
+      leave += `\x1b[${currentProtected ? 1 : 0}\"q`;
+    }
+    return cursorPosition(buffer.cursorY + 1, startColumn + 1)
+      + enter
+      + grapheme
+      + leave;
+  }
+
+  #cursorRestoreAfterGraphics(): string | undefined {
+    const buffer = this.terminal.buffer.active;
+    // A resize can widen the previewed mirror out of pending-wrap while the
+    // real terminal is still one held grapheme behind it. The held delta takes
+    // precedence regardless of the mirror's post-resize cursor state.
+    if (this.#pendingWrapHeldColumns !== undefined) {
+      return cursorPosition(
+        buffer.cursorY + 1,
+        Math.max(1, buffer.cursorX - this.#pendingWrapHeldColumns + 1)
+      );
+    }
+    if (buffer.cursorX >= this.terminal.cols) return this.#pendingWrapReplay();
+    return cursorPosition(buffer.cursorY + 1, buffer.cursorX + 1);
   }
 
   /**
@@ -1816,9 +2056,12 @@ export class FormulaScreen {
           }
 
           const buffer = this.terminal.buffer.active;
-          // CUP cannot reproduce xterm's pending-wrap state exactly.
+          // CUP cannot reproduce xterm's pending-wrap state exactly. An idle
+          // resize can leave both xterm and Ghostty in that state, so require
+          // a lossless right-edge replay before moving the real cursor.
           if (buffer.cursorX >= this.terminal.cols
-            && this.#pendingWrapHeldColumns === undefined) {
+            && this.#pendingWrapHeldColumns === undefined
+            && this.#pendingWrapReplay() === undefined) {
             this.#debug("formula placement deferred while cursor is in pending-wrap state");
             break;
           }
@@ -1878,19 +2121,13 @@ export class FormulaScreen {
                 || this.#layoutSuspended
                 || layoutVersion !== this.#layoutVersion
                 || this.terminal.buffer.active.type !== bufferType) return undefined;
-              const liveBuffer = this.terminal.buffer.active;
-              if (liveBuffer.cursorX >= this.terminal.cols
-                && this.#pendingWrapHeldColumns === undefined) return undefined;
+              const restoreCursor = this.#cursorRestoreAfterGraphics();
+              if (!restoreCursor) return undefined;
               return [
                 existing ? kittyDeletePlacement(existing.imageId, existing.placementId) : "",
                 cursorPosition(region.startRow + 1, region.startCol + 1),
                 kittyPlaceImage(image.imageId, placementId, columns, rows),
-                cursorPosition(
-                  liveBuffer.cursorY + 1,
-                  this.#pendingWrapHeldColumns !== undefined
-                    ? Math.max(1, liveBuffer.cursorX - this.#pendingWrapHeldColumns + 1)
-                    : liveBuffer.cursorX + 1
-                )
+                restoreCursor
               ].join("");
             });
           } catch (error) {
@@ -1912,12 +2149,8 @@ export class FormulaScreen {
             // releasing the output queue.
             await this.#writeGraphicsTransaction(() => {
               if (this.#disposed) return kittyDeletePlacement(image.imageId, placementId);
-              const liveBuffer = this.terminal.buffer.active;
-              const restoreColumn = this.#pendingWrapHeldColumns !== undefined
-                ? Math.max(1, liveBuffer.cursorX - this.#pendingWrapHeldColumns + 1)
-                : liveBuffer.cursorX + 1;
               return kittyDeletePlacement(image.imageId, placementId)
-                + cursorPosition(liveBuffer.cursorY + 1, restoreColumn);
+                + (this.#cursorRestoreAfterGraphics() ?? "");
             });
             if (existing) {
               this.#releasePlacement(existing);

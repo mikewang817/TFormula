@@ -423,6 +423,112 @@ describe("FormulaScreen lifecycle", () => {
     }
   });
 
+  it("replaces a formula when resize leaves an idle cursor in pending-wrap state", async () => {
+    const output: string[] = [];
+    const debug: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 100,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer: new FastMathRenderer(),
+      writeOuter: (data) => output.push(String(data)),
+      debug: (message) => debug.push(message)
+    });
+    try {
+      await screen.write("\\[\r\nx=1\r\n\\]");
+      await screen.flushScan();
+      expect(output.join("")).toContain("a=p");
+
+      output.length = 0;
+      debug.length = 0;
+      await screen.write(`\x1b[6;1H${"a".repeat(10)}`);
+      screen.resize(20, 8);
+      await screen.write("b".repeat(30));
+      screen.resize(40, 8);
+      expect(screen.pendingWrap).toBe(true);
+      await screen.flushScan();
+
+      const transaction = output.join("");
+      expect(transaction).toContain("a=p");
+      // CUP alone can only restore column 40, not the hidden pending-wrap
+      // bit. Replaying the same final cell recreates that bit without using
+      // (and overwriting) the Agent's one-slot saved cursor.
+      expect(transaction).toContain("\x1b[6;40Hb");
+      expect(transaction).not.toMatch(/\x1b(?:7|8|\[(?:s|u))/u);
+      expect(debug).not.toContain(
+        "formula placement deferred while cursor is in pending-wrap state"
+      );
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("replays an idle pending-wrap cell with its exact rendition and protection", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 20,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer: new FastMathRenderer(),
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write(
+        "\\[\r\nx=1\r\n\\]"
+        + "\x1b[6;1H"
+        + "\x1b[1;3;4:3;38;2;1;2;3;48;5;123;58;2;4;5;6m"
+        + "\x1b[1\"q"
+        + "x".repeat(20)
+        + "\x1b[0m\x1b[0\"q"
+      );
+      expect(screen.pendingWrap).toBe(true);
+      output.length = 0;
+
+      await screen.flushScan();
+
+      const transaction = output.join("");
+      expect(transaction).toContain("a=p");
+      expect(transaction).toContain(
+        "\x1b[6;20H"
+        + "\x1b[0;1;3;4:3;38;2;1;2;3;48;5;123;58;2;4;5;6m"
+        + "\x1b[1\"q"
+        + "x"
+        + "\x1b[0m\x1b[0\"q"
+      );
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("replays a double-width grapheme to restore idle pending-wrap", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 20,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer: new FastMathRenderer(),
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write(
+        "\\[\r\nx=1\r\n\\]\x1b[6;1H"
+        + "x".repeat(18)
+        + "你"
+      );
+      expect(screen.pendingWrap).toBe(true);
+      output.length = 0;
+
+      await screen.flushScan();
+
+      expect(output.join("")).toContain("\x1b[6;19H你");
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it("restores the cursor before a held double-width right-margin grapheme", async () => {
     const output: string[] = [];
     const screen = new FormulaScreen({
