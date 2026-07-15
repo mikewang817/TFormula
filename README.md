@@ -105,6 +105,12 @@ display math, and local images are displayed as document elements. Local
 PNG, JPEG, WebP, GIF, AVIF, TIFF, HEIF, and SVG files are converted to a
 terminal-ready PNG and keep their aspect ratio.
 
+The open document and its referenced local images are watched for changes.
+Saving from an editor refreshes the rendered view automatically without
+restarting TFormula. Directory-based watching supports atomic-save editors;
+bursts of filesystem events are debounced, while the current viewport anchor
+and image zoom level are preserved across reloads.
+
 The reader recognizes `$...$`, `$$...$$`, `\(...\)`, and `\[...\]` math
 delimiters, including a `$$...$$` display equation written on one line. It also
 recovers standalone `[ ... ]` blocks when their contents contain unambiguous

@@ -1,4 +1,4 @@
-import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as pty from "node-pty";
@@ -8,6 +8,69 @@ const ESC = "\x1b";
 const ST = `${ESC}\\`;
 
 describe("reader pseudo-terminal integration", () => {
+  it("reloads Markdown after an atomic save without restarting", async () => {
+    const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
+    const directory = await mkdtemp(join(tmpdir(), "tformula-reader-live-"));
+    const document = join(directory, "live.md");
+    const staged = join(directory, ".live.md.tmp");
+    await writeFile(document, "# Initial live document\n\nFirst body.\n");
+    const environment = {
+      ...process.env,
+      TERM: "xterm-256color"
+    } as Record<string, string>;
+    delete environment.TFORMULA_ACTIVE;
+
+    let transcript = "";
+    let replacementStarted = false;
+    let updated = false;
+    const terminal = pty.spawn(tsx, ["src/cli.ts", document], {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      cwd: process.cwd(),
+      env: environment
+    });
+    const exited = new Promise<number>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        terminal.kill();
+        reject(new Error("live reader fixture timed out"));
+      }, 7_000);
+      terminal.onData((data) => {
+        transcript += data;
+        if (!replacementStarted && transcript.includes("Initial live document")) {
+          replacementStarted = true;
+          void (async () => {
+            await writeFile(staged, "# Updated live document\n\nSecond body.\n");
+            await rename(staged, document);
+          })().catch((error) => {
+            clearTimeout(timeout);
+            terminal.kill();
+            reject(error);
+          });
+        }
+        if (!updated && transcript.includes("Updated live document")) {
+          updated = true;
+          terminal.write("q");
+        }
+      });
+      terminal.onExit(({ exitCode }) => {
+        clearTimeout(timeout);
+        resolve(exitCode);
+      });
+    });
+
+    try {
+      await expect(exited).resolves.toBe(0);
+      expect(replacementStarted).toBe(true);
+      expect(updated).toBe(true);
+      expect(transcript).toContain("Second body.");
+      expect(transcript).toContain("updated");
+    } finally {
+      terminal.kill();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 8_000);
+
   it("accepts a late Kitty handshake and zooms a scrolling image", async () => {
     const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
     const directory = await mkdtemp(join(tmpdir(), "tformula-reader-e2e-"));

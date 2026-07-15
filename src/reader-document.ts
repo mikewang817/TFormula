@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -293,14 +294,25 @@ function localImagePath(url: string, documentPath: string): string | undefined {
   }
 }
 
-async function inspectImage(url: string, documentPath: string): Promise<ImageResource> {
+async function inspectImage(
+  url: string,
+  documentPath: string,
+  previous?: ImageResource
+): Promise<ImageResource> {
   const path = localImagePath(url, documentPath);
   if (!path) {
     return { url, error: "remote and data images are not loaded in this release" };
   }
+  let info: Stats | undefined;
   try {
+    info = await stat(path);
+    if (previous?.path === path
+      && previous.size === info.size
+      && previous.mtimeMs === info.mtimeMs) {
+      return { ...previous, url, path };
+    }
     const sharp = await loadSharp();
-    const [metadata, info] = await Promise.all([sharp(path).metadata(), stat(path)]);
+    const metadata = await sharp(path).metadata();
     const width = metadata.autoOrient.width ?? metadata.width;
     const height = metadata.autoOrient.height ?? metadata.height;
     if (!width || !height) throw new Error("image dimensions are unavailable");
@@ -309,13 +321,19 @@ async function inspectImage(url: string, documentPath: string): Promise<ImageRes
     return {
       url,
       path,
+      ...(info ? { size: info.size, mtimeMs: info.mtimeMs } : {}),
       error: error instanceof Error ? error.message : String(error)
     };
   }
 }
 
-export async function loadReaderDocument(inputPath: string, cwd = process.cwd()): Promise<ReaderDocument> {
+export async function loadReaderDocument(
+  inputPath: string,
+  cwd = process.cwd(),
+  previous?: ReaderDocument
+): Promise<ReaderDocument> {
   const path = resolve(cwd, inputPath);
+  const reusable = previous?.path === path ? previous : undefined;
   const info = await stat(path);
   if (!info.isFile()) throw new Error(`${inputPath} is not a regular file`);
   // Implicit reader dispatch is limited to known extensions so executable
@@ -334,16 +352,22 @@ export async function loadReaderDocument(inputPath: string, cwd = process.cwd())
       : imageRoot(path);
   const resources = collectDocumentResources(root);
   const imageEntries = await Promise.all(
-    resources.imageUrls.map(async (url) => [url, await inspectImage(url, path)] as const)
+    resources.imageUrls.map(async (url) => [
+      url,
+      await inspectImage(url, path, reusable?.images.get(url))
+    ] as const)
   );
   // Natural formula dimensions are deliberately resolved only when a formula
   // enters the viewport. Eagerly invoking MathJax here makes startup scale
   // with every unique formula in a long document, including content the user
   // may never visit.
-  const mathEntries = resources.formulas.map(({ latex, display }) => [
-      mathResourceKey(latex, display),
-      { latex, display }
-    ] as const);
+  const mathEntries = resources.formulas.map(({ latex, display }) => {
+    const key = mathResourceKey(latex, display);
+    return [
+      key,
+      { ...reusable?.math.get(key), latex, display }
+    ] as const;
+  });
 
   return {
     path,

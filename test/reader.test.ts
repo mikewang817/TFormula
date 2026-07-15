@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { readerInternals } from "../src/reader.js";
-import type { ReaderPlacement } from "../src/reader-layout.js";
+import type { ReaderLayout, ReaderPlacement } from "../src/reader-layout.js";
+
+function testLayout(lines: string[], headings: ReaderLayout["headings"]): ReaderLayout {
+  return {
+    lines: lines.map((plain) => ({ plain, spans: [{ text: plain }] })),
+    placements: [],
+    headings,
+    links: [],
+    contentWidth: 80,
+    left: 0
+  };
+}
 
 describe("reader viewport graphics", () => {
   it("crops zoomed images to visible rows while keeping formulas atomic", () => {
@@ -140,5 +151,38 @@ describe("reader viewport graphics", () => {
     expect(readerInternals.readerTerminalImageLimit({
       TFORMULA_READER_MAX_IMAGES: "7"
     })).toBe(7);
+  });
+});
+
+describe("reader live reload position", () => {
+  it("keeps the same visible line when content is inserted above it", () => {
+    const previous = testLayout(
+      ["Title", "intro", "Section", "a", "b", "target line", "c", "d", "e", "f"],
+      [{ line: 0, depth: 1, text: "Title" }, { line: 2, depth: 2, text: "Section" }]
+    );
+    const next = testLayout(
+      [
+        "Title", "intro", "Section", "a", "inserted one", "inserted two",
+        "b", "target line", "c", "d", "e", "f"
+      ],
+      [{ line: 0, depth: 1, text: "Title" }, { line: 2, depth: 2, text: "Section" }]
+    );
+
+    const anchor = readerInternals.captureReaderScrollAnchor(previous, 5, 3);
+    expect(readerInternals.restoreReaderScrollOffset(next, 3, anchor)).toBe(7);
+  });
+
+  it("falls back to the enclosing heading when the visible line itself changes", () => {
+    const previous = testLayout(
+      ["Title", "intro", "Section", "a", "b", "old line", "c", "d", "e"],
+      [{ line: 0, depth: 1, text: "Title" }, { line: 2, depth: 2, text: "Section" }]
+    );
+    const next = testLayout(
+      ["Title", "new intro", "more intro", "intro end", "Section", "a", "b", "new line", "c", "d", "e"],
+      [{ line: 0, depth: 1, text: "Title" }, { line: 4, depth: 2, text: "Section" }]
+    );
+
+    const anchor = readerInternals.captureReaderScrollAnchor(previous, 5, 3);
+    expect(readerInternals.restoreReaderScrollOffset(next, 3, anchor)).toBe(7);
   });
 });

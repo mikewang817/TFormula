@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { StringDecoder } from "node:string_decoder";
+import { setTimeout as delay } from "node:timers/promises";
 import { KittyImageTransmitter, selectImageTransmissionMode } from "./image-transmitter.js";
 import {
   cursorPosition,
@@ -40,6 +41,7 @@ import {
   ReaderImageCache,
   type CanonicalImageRequest
 } from "./reader-image-cache.js";
+import { ReaderFileWatcher, readerWatchPaths } from "./reader-watch.js";
 import { TerminalResponseFilter } from "./terminal-responses.js";
 import { TerminalWriter } from "./terminal-writer.js";
 import type { FormulaRegion, ReaderCliOptions, TerminalCapabilities } from "./types.js";
@@ -69,6 +71,12 @@ export interface VisibleReaderPlacement {
   rows: number;
   /** First visible terminal-cell row within a vertically clipped image. */
   sourceRow?: number;
+}
+
+export interface ReaderScrollAnchor {
+  progress: number;
+  line?: { plain: string; screenRow: number };
+  heading?: { text: string; depth: number; occurrence: number; delta: number };
 }
 
 const IMAGE_SCALE_LEVELS = [0.25, 0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 2.5, 3] as const;
@@ -160,6 +168,107 @@ export function sourceRectangleForVisiblePlacement(
   return { x: 0, y, width, height: bottom - y };
 }
 
+function clampLayoutOffset(layout: ReaderLayout, viewportRows: number, value: number): number {
+  const maximum = Math.max(0, layout.lines.length - Math.max(1, Math.floor(viewportRows)));
+  return Math.max(0, Math.min(maximum, Math.floor(value)));
+}
+
+/** Capture a semantic viewport anchor before a live document reload. */
+export function captureReaderScrollAnchor(
+  layout: ReaderLayout,
+  offset: number,
+  viewportRows: number
+): ReaderScrollAnchor {
+  const top = clampLayoutOffset(layout, viewportRows, offset);
+  const maximum = Math.max(0, layout.lines.length - Math.max(1, Math.floor(viewportRows)));
+  const anchor: ReaderScrollAnchor = {
+    progress: maximum > 0 ? top / maximum : 0
+  };
+  const visibleEnd = Math.min(layout.lines.length, top + Math.max(1, viewportRows));
+  for (let index = top; index < visibleEnd; index += 1) {
+    const plain = layout.lines[index]?.plain;
+    if (!plain?.trim()) continue;
+    anchor.line = { plain, screenRow: index - top };
+    break;
+  }
+
+  let headingIndex = -1;
+  for (let index = 0; index < layout.headings.length; index += 1) {
+    if (layout.headings[index]!.line <= top) headingIndex = index;
+    else break;
+  }
+  const heading = layout.headings[headingIndex];
+  if (heading) {
+    let occurrence = 0;
+    for (let index = 0; index < headingIndex; index += 1) {
+      const candidate = layout.headings[index]!;
+      if (candidate.depth === heading.depth && candidate.text === heading.text) occurrence += 1;
+    }
+    anchor.heading = {
+      text: heading.text,
+      depth: heading.depth,
+      occurrence,
+      delta: top - heading.line
+    };
+  }
+  return anchor;
+}
+
+/** Restore the closest matching content after a live document reload. */
+export function restoreReaderScrollOffset(
+  layout: ReaderLayout,
+  viewportRows: number,
+  anchor: ReaderScrollAnchor
+): number {
+  const maximum = Math.max(0, layout.lines.length - Math.max(1, Math.floor(viewportRows)));
+  const expectedTop = Math.round(Math.max(0, Math.min(1, anchor.progress)) * maximum);
+  if (anchor.line) {
+    const expectedLine = expectedTop + anchor.line.screenRow;
+    let bestIndex = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < layout.lines.length; index += 1) {
+      if (layout.lines[index]!.plain !== anchor.line.plain) continue;
+      const distance = Math.abs(index - expectedLine);
+      if (distance < bestDistance) {
+        bestIndex = index;
+        bestDistance = distance;
+      }
+    }
+    if (bestIndex >= 0) {
+      return clampLayoutOffset(layout, viewportRows, bestIndex - anchor.line.screenRow);
+    }
+  }
+  if (anchor.heading) {
+    const matches = layout.headings.filter((heading) =>
+      heading.depth === anchor.heading!.depth && heading.text === anchor.heading!.text
+    );
+    const heading = matches[anchor.heading.occurrence];
+    if (heading) {
+      return clampLayoutOffset(layout, viewportRows, heading.line + anchor.heading.delta);
+    }
+  }
+  return clampLayoutOffset(layout, viewportRows, expectedTop);
+}
+
+function sameReaderDocumentContent(left: ReaderDocument, right: ReaderDocument): boolean {
+  if (left.path !== right.path || left.source !== right.source || left.images.size !== right.images.size) {
+    return false;
+  }
+  for (const [url, resource] of left.images) {
+    const next = right.images.get(url);
+    if (!next
+      || resource.path !== next.path
+      || resource.width !== next.width
+      || resource.height !== next.height
+      || resource.size !== next.size
+      || resource.mtimeMs !== next.mtimeMs
+      || resource.error !== next.error) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isDarkColor(color: string): boolean {
   const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/iu.exec(color);
   if (!match) return true;
@@ -243,6 +352,7 @@ class TerminalReader {
   readonly #decoder = new StringDecoder("utf8");
   readonly #uploaded = new Map<string, UploadedAsset>();
   readonly #imageCache = new ReaderImageCache();
+  readonly #fileWatcher: ReaderFileWatcher;
   readonly #blockedAssets = new Set<string>();
   readonly #layoutCache = new WeakMap<ReaderDocument, Map<string, ReaderLayout>>();
   readonly #placementAssetKeys = new WeakMap<ReaderPlacement, string>();
@@ -257,6 +367,9 @@ class TerminalReader {
   #renderTail = Promise.resolve();
   #renderPending = false;
   #renderRunning = false;
+  #reloadTail = Promise.resolve();
+  #reloadPending = false;
+  #reloadRunning = false;
   #closing = false;
   #searching = false;
   #searchQuery = "";
@@ -285,6 +398,16 @@ class TerminalReader {
     this.#document = document;
     this.#graphicsAvailable = capabilities.kittyGraphics;
     this.#startupProbePending = startupProbePending;
+    this.#fileWatcher = new ReaderFileWatcher(
+      () => this.#requestReload(),
+      {
+        onError: (error) => {
+          if (this.#closing) return;
+          this.#statusMessage = `watch failed: ${error.message}`;
+          this.#requestRender();
+        }
+      }
+    );
     this.#relayout();
   }
 
@@ -577,6 +700,73 @@ class TerminalReader {
       `${ESC}[${this.rows};1H${ESC}[2K${ESC}[7m${fitStatus(status, Math.max(1, this.columns - 1))}${ESC}[0m`
     );
     return chunks.join("");
+  }
+
+  #watchCurrentDocument(): void {
+    this.#fileWatcher.update(readerWatchPaths(this.#document));
+  }
+
+  #requestReload(): void {
+    if (this.#closing) return;
+    this.#reloadPending = true;
+    this.#startReloadLoop();
+  }
+
+  #startReloadLoop(): void {
+    if (this.#reloadRunning || this.#closing) return;
+    this.#reloadRunning = true;
+    const task = (async () => {
+      while (!this.#closing && this.#reloadPending) {
+        this.#reloadPending = false;
+        await this.#reloadDocument();
+      }
+    })().catch((error: unknown) => {
+      if (this.#closing) return;
+      this.#statusMessage = `update failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.#requestRender();
+    }).finally(() => {
+      this.#reloadRunning = false;
+      if (this.#reloadPending && !this.#closing) this.#startReloadLoop();
+    });
+    this.#reloadTail = task;
+  }
+
+  async #loadUpdatedDocument(previous: ReaderDocument): Promise<ReaderDocument> {
+    let lastError: unknown;
+    for (const waitMs of [0, 40, 120, 240]) {
+      if (waitMs > 0) await delay(waitMs);
+      if (this.#closing) throw new Error("reader is closing");
+      try {
+        return await loadReaderDocument(previous.path, process.cwd(), previous);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  }
+
+  async #reloadDocument(): Promise<void> {
+    const previous = this.#document;
+    let next: ReaderDocument;
+    try {
+      next = await this.#loadUpdatedDocument(previous);
+    } catch (error) {
+      if (this.#closing || this.#document !== previous) return;
+      this.#statusMessage = `update failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.#requestRender();
+      return;
+    }
+    if (this.#closing || this.#document !== previous) return;
+    if (sameReaderDocumentContent(previous, next)) return;
+
+    const anchor = captureReaderScrollAnchor(this.#layout, this.#offset, this.viewportRows);
+    this.#document = next;
+    this.#relayout();
+    this.#offset = restoreReaderScrollOffset(this.#layout, this.viewportRows, anchor);
+    this.#tocIndex = Math.max(0, Math.min(this.#tocIndex, this.#layout.headings.length - 1));
+    this.#watchCurrentDocument();
+    this.#statusMessage = "updated";
+    this.#requestRender();
   }
 
   #requestRender(): void {
@@ -971,6 +1161,7 @@ class TerminalReader {
       this.#rawMode = false;
       this.#showToc = false;
       this.#relayout();
+      this.#watchCurrentDocument();
       this.#statusMessage = "";
       if (fragment && !this.#jumpToFragment(fragment)) {
         this.#statusMessage = `heading not found: ${fragment}`;
@@ -997,6 +1188,7 @@ class TerminalReader {
     this.#showToc = false;
     this.#relayout();
     this.#offset = this.#clampOffset(previous.offset);
+    this.#watchCurrentDocument();
     this.#statusMessage = "back";
     this.#requestRender();
   }
@@ -1251,6 +1443,7 @@ class TerminalReader {
     }
     const cleanup = this.#graphicsAvailable ? kittyDeleteByZIndex() : "";
     await this.#writer.write(synchronizedOutput(`${cleanup}${ENTER_ALTERNATE_SCREEN}`));
+    this.#watchCurrentDocument();
     if (pendingInput) this.#handleInput(pendingInput);
     this.#requestRender();
 
@@ -1262,6 +1455,7 @@ class TerminalReader {
   async close(): Promise<void> {
     if (this.#closing) return;
     this.#closing = true;
+    this.#fileWatcher.close();
     this.#renderVersion += 1;
     process.off("SIGWINCH", this.#onResize);
     process.off("SIGINT", this.#onSignal);
@@ -1273,6 +1467,7 @@ class TerminalReader {
     this.#startupProbeCapture = "";
     this.#startupResponseFilter.flush(true);
     try {
+      await this.#reloadTail;
       await this.#renderTail;
       const cleanup = this.capabilities.kittyGraphics || this.#uploaded.size > 0
         ? `${Array.from(this.#uploaded.values(), ({ imageId }) => kittyDeleteImage(imageId)).join("")}${kittyDeleteByZIndex()}`
@@ -1332,10 +1527,12 @@ export async function preloadReaderDocument(
 
 export const readerInternals = {
   canonicalImageRequest,
+  captureReaderScrollAnchor,
   fitStatus,
   isDarkColor,
   renderSpans,
   readerTerminalImageLimit,
+  restoreReaderScrollOffset,
   selectTerminalImageEvictions,
   sourceRectangleForVisiblePlacement,
   styleSequence,
