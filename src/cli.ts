@@ -139,14 +139,29 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { capabilities, pendingInput, startupProbePending } = await probeTerminal(
-    parsed.cellOverride
-  );
-  const exitCode = parsed.mode === "reader"
-    ? await import("./reader.js").then(({ runReader }) =>
-        runReader(parsed, capabilities, pendingInput, startupProbePending))
-    : await import("./proxy.js").then(({ runProxy }) =>
-        runProxy(parsed, capabilities, pendingInput, startupProbePending));
+  const probe = probeTerminal(parsed.cellOverride, parsed.mode === "reader" ? 80 : 180);
+  let exitCode: number;
+  if (parsed.mode === "reader") {
+    const readerModule = import("./reader.js");
+    const document = readerModule.then(({ preloadReaderDocument }) =>
+      preloadReaderDocument(parsed));
+    const [probeResult, reader, preloaded] = await Promise.all([probe, readerModule, document]);
+    exitCode = await reader.runReader(
+      parsed,
+      probeResult.capabilities,
+      probeResult.pendingInput,
+      probeResult.startupProbePending,
+      preloaded
+    );
+  } else {
+    const [probeResult, { runProxy }] = await Promise.all([probe, import("./proxy.js")]);
+    exitCode = await runProxy(
+      parsed,
+      probeResult.capabilities,
+      probeResult.pendingInput,
+      probeResult.startupProbePending
+    );
+  }
   process.exitCode = exitCode;
 }
 

@@ -1,3 +1,5 @@
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as pty from "node-pty";
 import { describe, expect, it } from "vitest";
@@ -8,7 +10,9 @@ const ST = `${ESC}\\`;
 describe("reader pseudo-terminal integration", () => {
   it("accepts a late Kitty handshake and zooms a scrolling image", async () => {
     const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
-    const image = join(process.cwd(), "assets", "tformula-maxwell.png");
+    const directory = await mkdtemp(join(tmpdir(), "tformula-reader-e2e-"));
+    const image = join(directory, "image.png");
+    await copyFile(join(process.cwd(), "assets", "tformula-maxwell.png"), image);
     const environment = {
       ...process.env,
       TERM: "xterm-ghostty",
@@ -50,13 +54,17 @@ describe("reader pseudo-terminal integration", () => {
         }
         if (!zoomSent && transcript.includes(`${ESC}_Ga=p`)) {
           zoomSent = true;
-          terminal.write("+");
+          // Once the terminal owns the canonical image, scrolling and zooming
+          // must not decode the source file again. Removing this private test
+          // copy turns that performance invariant into an observable failure.
+          void rm(image).then(() => terminal.write("+"));
         }
         if (zoomSent && !scrollSent && transcript.includes("image zoom: 125%")) {
           scrollSent = true;
           terminal.write("j");
         }
-        if (scrollSent && !resetSent && transcript.includes(",x=0,y=18,")) {
+        if (scrollSent && !resetSent
+          && /a=p,[^\x1b]*,x=0,y=[1-9]\d*,w=\d+,h=\d+/u.test(transcript)) {
           resetSent = true;
           terminal.write("0");
         }
@@ -75,11 +83,26 @@ describe("reader pseudo-terminal integration", () => {
       });
     });
 
-    await expect(exited).resolves.toBe(0);
-    expect(handshakeSent).toBe(true);
-    expect(transcript).toContain("image zoom: 125%");
-    expect(transcript).toContain("image size: fit (100%)");
-    expect(transcript).toContain("image zoom: 80%");
-    expect(transcript).toMatch(/a=p,[^\x1b]*,x=0,y=18,w=\d+,h=\d+/u);
+    try {
+      await expect(exited).resolves.toBe(0);
+      expect(handshakeSent).toBe(true);
+      expect(transcript).toContain("image zoom: 125%");
+      expect(transcript).toContain("image size: fit (100%)");
+      expect(transcript).toContain("image zoom: 80%");
+      expect(transcript).not.toContain("asset failed:");
+      expect(transcript).toMatch(/a=p,[^\x1b]*,x=0,y=[1-9]\d*,w=\d+,h=\d+/u);
+      const uploads = [...transcript.matchAll(/\x1b_Ga=t,[^\x1b]*,i=(\d+)/gu)];
+      const placements = [...transcript.matchAll(/\x1b_Ga=p,i=(\d+)/gu)];
+      expect(uploads).toHaveLength(1);
+      expect(placements.length).toBeGreaterThan(3);
+      expect(new Set(placements.map((match) => match[1]))).toEqual(
+        new Set([uploads[0]![1]])
+      );
+      expect(transcript.indexOf("image.png")).toBeLessThan(
+        transcript.indexOf(`${ESC}_Ga=t`)
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }, 8_000);
 });

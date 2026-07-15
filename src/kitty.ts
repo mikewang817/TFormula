@@ -54,18 +54,34 @@ export function kittyTransmitAndPlace(
 }
 
 /** Upload PNG data without creating a placement. */
-export function kittyTransmitImage(png: Uint8Array, imageId: number): string {
-  const base64 = Buffer.from(png).toString("base64");
-  const chunks = base64.match(/.{1,4096}/gu) ?? [""];
-  return chunks.map((chunk, index) => {
+export function* kittyTransmitImageChunks(
+  png: Uint8Array,
+  imageId: number
+): Generator<string> {
+  // 3072 raw bytes become exactly 4096 Base64 characters. Encoding each raw
+  // chunk independently avoids allocating a second full-size Base64 string,
+  // which matters most when direct packets cross SSH.
+  const rawChunkBytes = 3072;
+  const chunkCount = Math.max(1, Math.ceil(png.byteLength / rawChunkBytes));
+  for (let index = 0; index < chunkCount; index += 1) {
     const first = index === 0;
-    const more = index < chunks.length - 1 ? 1 : 0;
+    const more = index < chunkCount - 1 ? 1 : 0;
     const quiet = more ? 1 : 0;
     const controls = first
       ? `a=t,f=100,t=d,i=${imageId},q=${quiet},m=${more}`
       : `m=${more},q=${quiet}`;
-    return `${APC_START}${controls};${chunk}${ST}`;
-  }).join("");
+    const start = index * rawChunkBytes;
+    const payload = Buffer.from(
+      png.buffer,
+      png.byteOffset + start,
+      Math.max(0, Math.min(rawChunkBytes, png.byteLength - start))
+    ).toString("base64");
+    yield `${APC_START}${controls};${payload}${ST}`;
+  }
+}
+
+export function kittyTransmitImage(png: Uint8Array, imageId: number): string {
+  return [...kittyTransmitImageChunks(png, imageId)].join("");
 }
 
 /** Upload a PNG through a terminal-owned temporary file. */

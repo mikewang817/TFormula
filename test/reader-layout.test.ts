@@ -4,7 +4,10 @@ import {
   mathResourceKey,
   parseMarkdown
 } from "../src/reader-document.js";
-import { layoutReaderDocument } from "../src/reader-layout.js";
+import {
+  layoutReaderDocument,
+  rescaleReaderImages
+} from "../src/reader-layout.js";
 
 const source = [
   "# Reader Title",
@@ -102,6 +105,32 @@ describe("reader layout", () => {
     expect(text).toContain("[Image: demo image (800×400)]");
   });
 
+  it("falls back to source labels after a lazy formula or image render fails", () => {
+    const failed = document();
+    failed.math.get(mathResourceKey("x^2", false))!.error = "bad formula";
+    failed.images.get("demo.png")!.error = "bad image";
+    const layout = layoutReaderDocument(failed, options);
+    const text = layout.lines.map(({ plain }) => plain).join("\n");
+
+    expect(text).toContain("$x^2$");
+    expect(text).toContain("[Image: demo image (800×400) — bad image]");
+    expect(layout.placements.some(({ asset }) => asset.kind === "image")).toBe(false);
+  });
+
+  it("lays out unmeasured formulas without invoking eager MathJax", () => {
+    const lazy = document();
+    for (const resource of lazy.math.values()) {
+      resource.aspectRatio = undefined;
+      resource.heightEx = undefined;
+    }
+    const layout = layoutReaderDocument(lazy, options);
+    const text = layout.lines.map(({ plain }) => plain).join("\n");
+
+    expect(layout.placements.filter(({ asset }) => asset.kind === "math")).toHaveLength(2);
+    expect(text).not.toContain("$x^2$");
+    expect(text).not.toContain("$$ \\frac{1}{2} $$");
+  });
+
   it("fits images to the terminal and scales them relative to that fitted size", () => {
     const square = document();
     square.images.set("demo.png", {
@@ -123,6 +152,47 @@ describe("reader layout", () => {
     expect(zoomedImage.columns).toBeLessThanOrEqual(zoomed.contentWidth);
     expect(zoomedImage.columns * options.cell.width
       / (zoomedImage.rows * options.cell.height)).toBeCloseTo(1, 1);
+    expect(fittedImage.asset).toEqual(expect.objectContaining({
+      kind: "image",
+      width: 800,
+      height: 800
+    }));
+  });
+
+  it("rescales image rows and downstream anchors without reflowing document text", () => {
+    const sourceWithTail = [
+      "# Before",
+      "",
+      "![demo image](demo.png)",
+      "",
+      "## After",
+      "",
+      "A [tail link](tail.md)."
+    ].join("\n");
+    const value: ReaderDocument = {
+      ...document(),
+      source: sourceWithTail,
+      root: parseMarkdown(sourceWithTail),
+      math: new Map()
+    };
+    const fitted = layoutReaderDocument(value, options);
+    const partial = rescaleReaderImages(fitted, {
+      viewportRows: options.viewportRows,
+      cell: options.cell,
+      imageScale: 2
+    });
+    const complete = layoutReaderDocument(value, { ...options, imageScale: 2 });
+
+    expect(partial.lines.map(({ plain }) => plain)).toEqual(
+      complete.lines.map(({ plain }) => plain)
+    );
+    expect(partial.placements.map(({ row, col, rows, columns, asset }) => ({
+      row, col, rows, columns, kind: asset.kind
+    }))).toEqual(complete.placements.map(({ row, col, rows, columns, asset }) => ({
+      row, col, rows, columns, kind: asset.kind
+    })));
+    expect(partial.headings).toEqual(complete.headings);
+    expect(partial.links).toEqual(complete.links);
   });
 
   it("sanitizes terminal control bytes from document text", () => {

@@ -76,6 +76,10 @@ WebP、GIF、AVIF、TIFF、HEIF 和 SVG 图片会转换为终端 PNG，并保持
 倍率以这个自动适配尺寸为基准。放大后的图片可以纵向跨越多屏；滚动时阅读器会
 显示图片当前位于视口内的切片，不会因为整张图片放不进一屏而将其隐藏。
 
+阅读器会并行执行终端探测与文档加载，先提交 Markdown 文字，再补充尚未缓存的
+图形。公式只在进入视口时测量和栅格化，快速连续按键只绘制最新一帧。每张图片
+只规范化并上传一次；缩放和跨屏滚动通过源矩形复用同一份终端图片数据。
+
 ## 在 Ghostty 中快速开始
 
 推荐使用以下命令全局安装。使用 npm 11 时，需要允许 `node-pty` 和阅读器的
@@ -183,7 +187,7 @@ tformula --scale 1.1 codex
 TFORMULA_SCALE=0.9 tformula --shell
 ```
 
-## 公式缓存
+## 公式与阅读器图片缓存
 
 公式缓存采用内容寻址方式，并由当前用户启动的所有 TFormula Agent 进程共享：
 
@@ -193,6 +197,11 @@ TFORMULA_SCALE=0.9 tformula --shell
 - 同一终端会话中的相同 PNG 只上传一次，不同位置共用图片数据并创建各自的
   placement。
 - 缩放回之前使用过的字号时，直接复用已有 PNG。
+
+本地文档图片也使用同一套有容量限制的持久缓存。缓存键包含源文件路径、大小、
+修改时间、自动旋转后的尺寸以及量化后的终端分辨率。再次打开文档时会直接复用
+终端就绪的 PNG；源文件变化后则会自动生成新条目。阅读器还通过 LRU 限制终端内
+保留的图片数量，避免连续浏览大量文档时无限占用终端图片存储。
 
 macOS 默认缓存目录：
 
@@ -217,6 +226,7 @@ $XDG_CACHE_HOME/tformula
 ```sh
 TFORMULA_CACHE_DIR=/path/to/cache tformula codex
 TFORMULA_CACHE_MAX_MB=512 tformula claude
+TFORMULA_READER_MAX_IMAGES=128 tformula README.md
 ```
 
 ## 可识别的公式

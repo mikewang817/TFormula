@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { StringDecoder } from "node:string_decoder";
-import sharp from "sharp";
 import { KittyImageTransmitter, selectImageTransmissionMode } from "./image-transmitter.js";
 import {
   cursorPosition,
@@ -11,13 +10,15 @@ import {
   kittyDeletePlacementsByZIndex,
   kittyPlaceImage,
   synchronizedOutput,
+  type KittySourceRectangle,
   TFORMULA_IMAGE_ID_MAX,
   TFORMULA_IMAGE_ID_MIN
 } from "./kitty.js";
-import { MathRenderer } from "./math-renderer.js";
+import type { MathRenderer } from "./math-renderer.js";
 import {
   KITTY_QUERY_IMAGE_ID,
   parseTerminalResponses,
+  STARTUP_PROBE_QUARANTINE_MS,
   TerminalProbeResponseFilter
 } from "./probe.js";
 import {
@@ -27,11 +28,18 @@ import {
 } from "./reader-document.js";
 import {
   layoutReaderDocument,
+  rescaleReaderImages,
+  type ReaderImageAsset,
   type ReaderLayout,
   type ReaderPlacement,
   type ReaderStyle,
   type StyledSpan
 } from "./reader-layout.js";
+import {
+  canonicalImageRequest,
+  ReaderImageCache,
+  type CanonicalImageRequest
+} from "./reader-image-cache.js";
 import { TerminalResponseFilter } from "./terminal-responses.js";
 import { TerminalWriter } from "./terminal-writer.js";
 import type { FormulaRegion, ReaderCliOptions, TerminalCapabilities } from "./types.js";
@@ -44,18 +52,51 @@ const LEAVE_ALTERNATE_SCREEN = `${ESC}[0m${ESC}[?25h${ESC}[?1049l`;
 interface PreparedAsset {
   key: string;
   png: Uint8Array;
+  width: number;
+  height: number;
 }
 
 interface UploadedAsset {
   imageId: number;
   key: string;
+  width: number;
+  height: number;
 }
 
 export interface VisibleReaderPlacement {
   placement: ReaderPlacement;
   screenRow: number;
   rows: number;
-  source?: { x: number; y: number; width: number; height: number };
+  /** First visible terminal-cell row within a vertically clipped image. */
+  sourceRow?: number;
+}
+
+const IMAGE_SCALE_LEVELS = [0.25, 0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 2.5, 3] as const;
+const DEFAULT_MAX_TERMINAL_IMAGES = 64;
+
+export function readerTerminalImageLimit(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env.TFORMULA_READER_MAX_IMAGES);
+  return Number.isFinite(configured) && configured > 0
+    ? Math.max(1, Math.floor(configured))
+    : DEFAULT_MAX_TERMINAL_IMAGES;
+}
+
+/** Keys are ordered least- to most-recently used. */
+export function selectTerminalImageEvictions(
+  keys: Iterable<string>,
+  protectedKeys: ReadonlySet<string>,
+  maximum: number
+): string[] {
+  const ordered = [...keys];
+  let remaining = ordered.length;
+  const evictions: string[] = [];
+  for (const key of ordered) {
+    if (remaining <= Math.max(1, Math.floor(maximum))) break;
+    if (protectedKeys.has(key)) continue;
+    evictions.push(key);
+    remaining -= 1;
+  }
+  return evictions;
 }
 
 /**
@@ -66,8 +107,7 @@ export interface VisibleReaderPlacement {
 export function visibleReaderPlacements(
   placements: ReaderPlacement[],
   offset: number,
-  viewportRows: number,
-  cell: TerminalCapabilities["cell"]
+  viewportRows: number
 ): VisibleReaderPlacement[] {
   const top = Math.max(0, Math.floor(offset));
   const bottom = top + Math.max(1, Math.floor(viewportRows));
@@ -88,31 +128,37 @@ export function visibleReaderPlacements(
     const rows = visibleBottom - visibleTop;
     const clipped = visibleTop !== placement.row
       || visibleBottom !== placement.row + placement.rows;
-    const fullWidthPx = Math.max(1, Math.round(placement.columns * cell.width));
-    const fullHeightPx = Math.max(1, Math.round(placement.rows * cell.height));
-    const sourceRow = visibleTop - placement.row;
-    // Derive both crop boundaries from the exact uploaded PNG dimensions.
-    // Window-based cell metrics may be fractional; rounding y and height
-    // independently could otherwise put the crop one pixel outside the PNG.
-    const sourceTopPx = Math.round(sourceRow / placement.rows * fullHeightPx);
-    const sourceBottomPx = Math.round((sourceRow + rows) / placement.rows * fullHeightPx);
     return [{
       placement,
       screenRow: visibleTop - top,
       rows,
-      source: clipped
-        ? {
-            x: 0,
-            y: sourceTopPx,
-            width: fullWidthPx,
-            height: Math.max(1, sourceBottomPx - sourceTopPx)
-          }
-        : undefined
+      ...(clipped ? { sourceRow: visibleTop - placement.row } : {})
     }];
   });
 }
 
-const IMAGE_SCALE_LEVELS = [0.25, 0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 2.5, 3] as const;
+/** Map a visible terminal-row slice onto the reusable uploaded PNG. */
+export function sourceRectangleForVisiblePlacement(
+  visible: VisibleReaderPlacement,
+  imageWidth: number,
+  imageHeight: number
+): KittySourceRectangle | undefined {
+  if (visible.sourceRow === undefined) return undefined;
+  const width = Math.max(1, Math.round(imageWidth));
+  const height = Math.max(1, Math.round(imageHeight));
+  const totalRows = Math.max(1, visible.placement.rows);
+  const firstRow = Math.max(0, Math.min(totalRows, visible.sourceRow));
+  const lastRow = Math.max(firstRow, Math.min(totalRows, firstRow + visible.rows));
+  // Calculate both boundaries against the actual canonical PNG dimensions.
+  // This keeps fractional cell metrics and the final source rectangle inside
+  // the image while scrolling across it.
+  const y = Math.min(height - 1, Math.round(firstRow / totalRows * height));
+  const bottom = Math.max(y + 1, Math.min(
+    height,
+    Math.round(lastRow / totalRows * height)
+  ));
+  return { x: 0, y, width, height: bottom - y };
+}
 
 function isDarkColor(color: string): boolean {
   const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/iu.exec(color);
@@ -187,7 +233,7 @@ function headingSlug(value: string): string {
 
 class TerminalReader {
   readonly #writer = new TerminalWriter(process.stdout);
-  readonly #mathRenderer = new MathRenderer();
+  #mathRenderer?: Promise<MathRenderer>;
   readonly #transmitter = new KittyImageTransmitter(selectImageTransmissionMode());
   readonly #responseFilter = new TerminalResponseFilter((imageId) =>
     imageId === KITTY_QUERY_IMAGE_ID
@@ -196,7 +242,11 @@ class TerminalReader {
   readonly #startupResponseFilter = new TerminalProbeResponseFilter();
   readonly #decoder = new StringDecoder("utf8");
   readonly #uploaded = new Map<string, UploadedAsset>();
+  readonly #imageCache = new ReaderImageCache();
   readonly #blockedAssets = new Set<string>();
+  readonly #layoutCache = new WeakMap<ReaderDocument, Map<string, ReaderLayout>>();
+  readonly #placementAssetKeys = new WeakMap<ReaderPlacement, string>();
+  readonly #maxTerminalImages = readerTerminalImageLimit();
   #nextImageId = TFORMULA_IMAGE_ID_MIN;
   #nextPlacementId = 1;
   #graphicsAvailable: boolean;
@@ -205,6 +255,8 @@ class TerminalReader {
   #offset = 0;
   #renderVersion = 0;
   #renderTail = Promise.resolve();
+  #renderPending = false;
+  #renderRunning = false;
   #closing = false;
   #searching = false;
   #searchQuery = "";
@@ -248,7 +300,48 @@ class TerminalReader {
     return Math.max(1, this.rows - 1);
   }
 
+  #layoutCacheKey(imageScale = this.#imageScale): string {
+    return [
+      this.#rawMode ? "source" : "rendered",
+      this.#graphicsAvailable ? "graphics" : "text",
+      this.columns,
+      this.viewportRows,
+      this.capabilities.cell.width,
+      this.capabilities.cell.height,
+      this.options.scale,
+      imageScale
+    ].join(":");
+  }
+
+  #cachedLayout(key: string): ReaderLayout | undefined {
+    const cache = this.#layoutCache.get(this.#document);
+    const layout = cache?.get(key);
+    if (!layout || !cache) return undefined;
+    cache.delete(key);
+    cache.set(key, layout);
+    return layout;
+  }
+
+  #rememberLayout(key: string, layout: ReaderLayout): void {
+    let cache = this.#layoutCache.get(this.#document);
+    if (!cache) {
+      cache = new Map();
+      this.#layoutCache.set(this.#document, cache);
+    }
+    cache.delete(key);
+    cache.set(key, layout);
+    while (cache.size > 12) cache.delete(cache.keys().next().value!);
+  }
+
   #relayout(): void {
+    const cacheKey = this.#layoutCacheKey();
+    const cached = this.#cachedLayout(cacheKey);
+    if (cached) {
+      this.#layout = cached;
+      this.#offset = this.#clampOffset(this.#offset);
+      this.#activeLinkIndex = undefined;
+      return;
+    }
     const displayedDocument: ReaderDocument = this.#rawMode && this.#document.source
       ? {
           ...this.#document,
@@ -270,6 +363,7 @@ class TerminalReader {
       imageScale: this.#imageScale,
       graphics: this.#graphicsAvailable
     });
+    this.#rememberLayout(cacheKey, this.#layout);
     this.#offset = this.#clampOffset(this.#offset);
     this.#activeLinkIndex = undefined;
   }
@@ -292,22 +386,95 @@ class TerminalReader {
     return placementId;
   }
 
-  async #prepareAsset(placement: ReaderPlacement): Promise<PreparedAsset> {
+  #touchUploaded(key: string): UploadedAsset | undefined {
+    const uploaded = this.#uploaded.get(key);
+    if (!uploaded) return undefined;
+    this.#uploaded.delete(key);
+    this.#uploaded.set(key, uploaded);
+    return uploaded;
+  }
+
+  #pruneUploaded(protectedKeys: ReadonlySet<string>): string {
+    const evictions = selectTerminalImageEvictions(
+      this.#uploaded.keys(),
+      protectedKeys,
+      this.#maxTerminalImages
+    );
+    return evictions.map((key) => {
+      const uploaded = this.#uploaded.get(key);
+      this.#uploaded.delete(key);
+      return uploaded ? kittyDeleteImage(uploaded.imageId) : "";
+    }).join("");
+  }
+
+  #imageRequest(asset: ReaderImageAsset): CanonicalImageRequest {
+    return canonicalImageRequest(
+      asset,
+      this.#layout.contentWidth,
+      this.viewportRows,
+      this.capabilities.cell
+    );
+  }
+
+  #knownAssetKey(placement: ReaderPlacement): string | undefined {
+    if (placement.asset.kind === "image") return this.#imageRequest(placement.asset).key;
+    return this.#placementAssetKeys.get(placement);
+  }
+
+  #appendPlacements(
+    graphics: string[],
+    assets: Array<{ visible: VisibleReaderPlacement; key: string }>
+  ): void {
+    for (const { visible, key } of assets) {
+      const uploaded = this.#touchUploaded(key);
+      if (!uploaded) continue;
+      const { placement } = visible;
+      graphics.push(
+        cursorPosition(visible.screenRow + 1, placement.col + 1),
+        kittyPlaceImage(
+          uploaded.imageId,
+          this.#allocatePlacementId(),
+          placement.columns,
+          visible.rows,
+          sourceRectangleForVisiblePlacement(visible, uploaded.width, uploaded.height)
+        )
+      );
+    }
+  }
+
+  #prepareImageAsset(
+    asset: ReaderImageAsset,
+    request: CanonicalImageRequest
+  ): Promise<PreparedAsset> {
+    return this.#imageCache.prepare(asset, request);
+  }
+
+  #loadMathRenderer(): Promise<MathRenderer> {
+    this.#mathRenderer ??= import("./math-renderer.js").then(({ MathRenderer }) =>
+      new MathRenderer());
+    return this.#mathRenderer;
+  }
+
+  async #prepareAsset(placement: ReaderPlacement): Promise<{
+    key: string;
+    prepared?: PreparedAsset;
+  }> {
+    const knownKey = this.#placementAssetKeys.get(placement);
+    if (knownKey && (this.#touchUploaded(knownKey) || this.#blockedAssets.has(knownKey))) {
+      return { key: knownKey };
+    }
     const widthPx = Math.max(1, Math.round(placement.columns * this.capabilities.cell.width));
     const heightPx = Math.max(1, Math.round(placement.rows * this.capabilities.cell.height));
     if (placement.asset.kind === "image") {
-      const key = `${placement.asset.key}\0${widthPx}x${heightPx}`;
-      const png = await sharp(placement.asset.path, { animated: false })
-        .rotate()
-        .resize({
-          width: widthPx,
-          height: heightPx,
-          fit: "contain",
-          background: { r: 0, g: 0, b: 0, alpha: 0 }
-        })
-        .png()
-        .toBuffer();
-      return { key, png };
+      const request = this.#imageRequest(placement.asset);
+      this.#placementAssetKeys.set(placement, request.key);
+      if (this.#touchUploaded(request.key) || this.#blockedAssets.has(request.key)) {
+        return { key: request.key };
+      }
+      return {
+        key: request.key,
+        prepared: await this.#prepareImageAsset(placement.asset, request)
+      };
     }
 
     const region: FormulaRegion = {
@@ -320,14 +487,30 @@ class TerminalReader {
       confidence: "explicit",
       compact: !placement.asset.display
     };
-    const rendered = await this.#mathRenderer.render(
+    const renderer = await this.#loadMathRenderer();
+    const rendered = await renderer.render(
       region,
       placement.columns,
       placement.rows,
       this.capabilities,
       this.options.scale
     );
-    return { key: `math\0${rendered.cacheKey}`, png: rendered.png };
+    const resource = this.#document.math.get(placement.asset.key);
+    if (resource && (!resource.aspectRatio || !resource.heightEx)) {
+      resource.aspectRatio = rendered.naturalAspectRatio;
+      resource.heightEx = rendered.naturalHeightEx;
+      // Keep the already-visible estimate stable, but ensure the next resize,
+      // raw-view toggle, or return navigation uses measured geometry.
+      this.#layoutCache.delete(this.#document);
+    }
+    const prepared = {
+      key: `math\0${rendered.cacheKey}`,
+      png: rendered.png,
+      width: rendered.widthPx,
+      height: rendered.heightPx
+    };
+    this.#placementAssetKeys.set(placement, prepared.key);
+    return { key: prepared.key, prepared };
   }
 
   #visiblePlacements(): VisibleReaderPlacement[] {
@@ -335,8 +518,7 @@ class TerminalReader {
     return visibleReaderPlacements(
       this.#layout.placements,
       this.#offset,
-      this.viewportRows,
-      this.capabilities.cell
+      this.viewportRows
     );
   }
 
@@ -398,57 +580,139 @@ class TerminalReader {
   }
 
   #requestRender(): void {
-    const version = ++this.#renderVersion;
-    this.#renderTail = this.#renderTail.then(() => this.#render(version)).catch((error) => {
+    if (this.#closing) return;
+    this.#renderVersion += 1;
+    this.#renderPending = true;
+    this.#startRenderLoop();
+  }
+
+  #startRenderLoop(): void {
+    if (this.#renderRunning || this.#closing) return;
+    this.#renderRunning = true;
+    const task = (async () => {
+      while (!this.#closing && this.#renderPending) {
+        this.#renderPending = false;
+        await this.#render(this.#renderVersion);
+      }
+    })().catch((error: unknown) => {
       this.#statusMessage = `render failed: ${error instanceof Error ? error.message : String(error)}`;
+    }).finally(() => {
+      this.#renderRunning = false;
+      if (this.#renderPending && !this.#closing) this.#startRenderLoop();
     });
+    this.#renderTail = task;
   }
 
   async #render(version: number): Promise<void> {
     if (this.#closing || version !== this.#renderVersion) return;
     const placements = this.#graphicsAvailable ? this.#visiblePlacements() : [];
-    const results = await Promise.allSettled(placements.map(async (visible) => ({
+    const known = placements.map((visible) => ({
       visible,
-      prepared: await this.#prepareAsset(visible.placement)
-    })));
-    const prepared = results.flatMap((result) => {
-      if (result.status === "fulfilled") return [result.value];
-      this.#statusMessage = `asset failed: ${result.reason instanceof Error
-        ? result.reason.message
-        : String(result.reason)}`;
-      return [];
-    });
+      key: this.#knownAssetKey(visible.placement)
+    }));
+    if (known.length > 0 && known.every(({ key }) =>
+      key !== undefined && !this.#blockedAssets.has(key) && this.#uploaded.has(key))) {
+      const assets = known.map(({ visible, key }) => ({ visible, key: key! }));
+      const protectedKeys = new Set(assets.map(({ key }) => key));
+      const graphics = [
+        kittyDeletePlacementsByZIndex(),
+        this.#pruneUploaded(protectedKeys),
+        this.#screenText()
+      ];
+      this.#appendPlacements(graphics, assets);
+      graphics.push(cursorPosition(this.rows, 1));
+      await this.#writer.writeIf(
+        synchronizedOutput(graphics.join("")),
+        () => !this.#closing && version === this.#renderVersion
+      );
+      return;
+    }
+    const initialStatus = this.#statusMessage;
+    const text = synchronizedOutput(
+      `${this.#graphicsAvailable ? kittyDeletePlacementsByZIndex() : ""}`
+      + `${this.#screenText()}${cursorPosition(this.rows, 1)}`
+    );
+    const displayed = await this.#writer.writeIf(
+      text,
+      () => !this.#closing && version === this.#renderVersion
+    );
+    if (!displayed || this.#closing || version !== this.#renderVersion || placements.length === 0) {
+      return;
+    }
+    const results = await Promise.all(placements.map(async (visible) => {
+      try {
+        return {
+          ok: true as const,
+          visible,
+          asset: await this.#prepareAsset(visible.placement)
+        };
+      } catch (error) {
+        return { ok: false as const, visible, error };
+      }
+    }));
     if (this.#closing || version !== this.#renderVersion) return;
-    const usable = prepared.filter(({ prepared: asset }) => !this.#blockedAssets.has(asset.key));
+    const resolved: Array<{
+      visible: VisibleReaderPlacement;
+      asset: { key: string; prepared?: PreparedAsset };
+    }> = [];
+    let resourceFailed = false;
+    for (const result of results) {
+      if (result.ok) {
+        resolved.push(result);
+        continue;
+      }
+      const message = result.error instanceof Error
+        ? result.error.message
+        : String(result.error);
+      this.#statusMessage = `asset failed: ${message}`;
+      const failedAsset = result.visible.placement.asset;
+      if (failedAsset.kind === "math") {
+        const resource = this.#document.math.get(failedAsset.key);
+        if (resource) resource.error = message;
+        resourceFailed = true;
+      } else {
+        const resource = [...this.#document.images.values()]
+          .find(({ path }) => path === failedAsset.path);
+        if (resource) resource.error = message;
+        resourceFailed = true;
+      }
+    }
+    if (resourceFailed) {
+      this.#layoutCache.delete(this.#document);
+      this.#relayout();
+      this.#requestRender();
+      return;
+    }
+    const usable = resolved.filter(({ asset }) => !this.#blockedAssets.has(asset.key));
 
-    for (const { prepared: asset } of usable) {
-      if (this.#uploaded.has(asset.key)) continue;
-      const uploaded = { key: asset.key, imageId: this.#allocateImageId() };
-      await this.#writer.write(this.#transmitter.transmit(asset.png, uploaded.imageId));
+    for (const { asset } of usable) {
+      if (this.#touchUploaded(asset.key) || !asset.prepared) continue;
+      const uploaded = {
+        key: asset.key,
+        imageId: this.#allocateImageId(),
+        width: asset.prepared.width,
+        height: asset.prepared.height
+      };
+      await this.#writer.write(
+        this.#transmitter.transmitPayload(asset.prepared.png, uploaded.imageId)
+      );
       this.#uploaded.set(asset.key, uploaded);
+      this.#imageCache.release(asset.key);
       if (this.#closing || version !== this.#renderVersion) return;
     }
 
-    const graphics: string[] = [this.#graphicsAvailable
-      ? kittyDeletePlacementsByZIndex()
-      : ""];
-    for (const { visible, prepared: asset } of usable) {
-      const uploaded = this.#uploaded.get(asset.key);
-      if (!uploaded) continue;
-      const { placement } = visible;
-      graphics.push(
-        cursorPosition(visible.screenRow + 1, placement.col + 1),
-        kittyPlaceImage(
-          uploaded.imageId,
-          this.#allocatePlacementId(),
-          placement.columns,
-          visible.rows,
-          visible.source
-        )
-      );
-    }
+    const protectedKeys = new Set(usable.map(({ asset }) => asset.key));
+    const graphics: string[] = [
+      kittyDeletePlacementsByZIndex(),
+      this.#pruneUploaded(protectedKeys)
+    ];
+    if (this.#statusMessage !== initialStatus) graphics.push(this.#screenText());
+    this.#appendPlacements(
+      graphics,
+      usable.map(({ visible, asset }) => ({ visible, key: asset.key }))
+    );
     graphics.push(cursorPosition(this.rows, 1));
-    const transaction = synchronizedOutput(`${graphics[0]}${this.#screenText()}${graphics.slice(1).join("")}`);
+    const transaction = synchronizedOutput(graphics.join(""));
     await this.#writer.writeIf(transaction, () => !this.#closing && version === this.#renderVersion);
   }
 
@@ -530,7 +794,19 @@ class TerminalReader {
     const anchorScreenRow = anchor ? anchorPoint - this.#offset : 0;
 
     this.#imageScale = nextScale;
-    this.#relayout();
+    const cacheKey = this.#layoutCacheKey(nextScale);
+    const cached = this.#cachedLayout(cacheKey);
+    if (cached) this.#layout = cached;
+    else {
+      this.#layout = rescaleReaderImages(this.#layout, {
+        viewportRows: this.viewportRows,
+        cell: this.capabilities.cell,
+        imageScale: nextScale
+      });
+      this.#rememberLayout(cacheKey, this.#layout);
+    }
+    this.#offset = this.#clampOffset(this.#offset);
+    this.#activeLinkIndex = undefined;
     const resizedImages = this.#layout.placements.filter(({ asset }) => asset.kind === "image");
     const resizedAnchor = anchorIndex >= 0 ? resizedImages[anchorIndex] : undefined;
     if (resizedAnchor) {
@@ -968,7 +1244,10 @@ class TerminalReader {
     process.on("SIGTERM", this.#onSignal);
     process.on("SIGHUP", this.#onSignal);
     if (this.#startupProbePending) {
-      this.#startupProbeTimer = setTimeout(() => this.#finishStartupProbeQuarantine(), 320);
+      this.#startupProbeTimer = setTimeout(
+        () => this.#finishStartupProbeQuarantine(),
+        STARTUP_PROBE_QUARANTINE_MS
+      );
     }
     const cleanup = this.#graphicsAvailable ? kittyDeleteByZIndex() : "";
     await this.#writer.write(synchronizedOutput(`${cleanup}${ENTER_ALTERNATE_SCREEN}`));
@@ -1022,7 +1301,8 @@ export async function runReader(
   options: ReaderCliOptions,
   capabilities: TerminalCapabilities,
   pendingInput = "",
-  startupProbePending = false
+  startupProbePending = false,
+  preloadedDocument?: ReaderDocument
 ): Promise<number> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     const kind = readerFileKind(options.path);
@@ -1033,7 +1313,7 @@ export async function runReader(
     process.stdout.write(await readFile(resolve(options.cwd, options.path), "utf8"));
     return 0;
   }
-  const document = await loadReaderDocument(options.path, options.cwd);
+  const document = preloadedDocument ?? await loadReaderDocument(options.path, options.cwd);
   const reader = new TerminalReader(options, capabilities, document, startupProbePending);
   try {
     return await reader.run(pendingInput);
@@ -1042,10 +1322,22 @@ export async function runReader(
   }
 }
 
+/** Load reader resources while the independent terminal probe is in flight. */
+export async function preloadReaderDocument(
+  options: ReaderCliOptions
+): Promise<ReaderDocument | undefined> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
+  return loadReaderDocument(options.path, options.cwd);
+}
+
 export const readerInternals = {
+  canonicalImageRequest,
   fitStatus,
   isDarkColor,
   renderSpans,
+  readerTerminalImageLimit,
+  selectTerminalImageEvictions,
+  sourceRectangleForVisiblePlacement,
   styleSequence,
   truncateStatus,
   visibleReaderPlacements

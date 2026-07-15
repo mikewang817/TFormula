@@ -114,6 +114,39 @@ describe("TerminalWriter", () => {
     expect(Buffer.concat(chunks).toString("utf8")).toBe(transactions.join(""));
   });
 
+  it("streams iterable packets lazily while retaining transaction ordering", async () => {
+    const events: string[] = [];
+    const output = {
+      write(chunk: Uint8Array, callback: (error?: Error | null) => void): boolean {
+        events.push(Buffer.from(chunk).toString("utf8"));
+        callback();
+        return true;
+      }
+    };
+    const writer = new TerminalWriter(output, 256);
+    function* packets(): Generator<string> {
+      events.push("generate-1");
+      yield "packet-1";
+      events.push("generate-2");
+      yield "packet-2";
+    }
+
+    const first = writer.write("first");
+    const streamed = writer.write(packets());
+    const last = writer.write("last");
+    expect(events).toEqual([]);
+    await Promise.all([first, streamed, last]);
+
+    expect(events).toEqual([
+      "first",
+      "generate-1",
+      "packet-1",
+      "generate-2",
+      "packet-2",
+      "last"
+    ]);
+  });
+
   it("copies queued bytes and surfaces a poisoned output queue on flush", async () => {
     const received: Buffer[] = [];
     let writes = 0;

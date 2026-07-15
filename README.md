@@ -86,6 +86,12 @@ that fitted size. A magnified image may span several screens; scrolling shows
 the corresponding image slice instead of hiding the image until it fits
 entirely in the viewport.
 
+Reader startup probes the terminal while loading the document in parallel.
+Markdown text is committed before uncached graphics, formulas are measured and
+rasterized only when they enter the viewport, and rapid key input is coalesced
+to the newest frame. An image is normalized and uploaded once; zooming and
+cross-screen scrolling reuse that terminal image with source rectangles.
+
 ## Quick start in Ghostty
 
 Recommended global installation. With npm 11, allow the native setup scripts
@@ -225,7 +231,7 @@ tformula --scale 1.1 codex
 TFORMULA_SCALE=0.9 tformula --shell
 ```
 
-## Formula cache
+## Formula and reader image cache
 
 Math rendering is content-addressed and shared by every TFormula-wrapped Agent
 run for the current user. A normalized formula is typeset to SVG once. Each
@@ -233,6 +239,13 @@ terminal-ready PNG variant is then rasterized once for its exact display mode,
 cell dimensions, scale, foreground, background, and source rectangle. Returning
 to an earlier terminal font size reuses the existing PNG instead of invoking
 MathJax or the rasterizer again.
+
+Local reader images use the same bounded persistent cache. The cache key
+includes the source path, size, modification time, orientation-aware
+dimensions, and quantized terminal resolution. Reopening a document therefore
+reuses its terminal-ready PNG, while changing the source automatically selects
+a new entry. Reader-side terminal images also use an LRU budget so navigating
+through many documents does not grow terminal image storage without bound.
 
 Cache writes use per-item cross-process locks and atomic renames, so concurrent
 Agents can safely request the same formula. In a live terminal session, one PNG
@@ -246,6 +259,7 @@ the default 256 MB limit with:
 ```sh
 TFORMULA_CACHE_DIR=/path/to/cache tformula codex
 TFORMULA_CACHE_MAX_MB=512 tformula claude
+TFORMULA_READER_MAX_IMAGES=128 tformula README.md
 ```
 
 ## Detection

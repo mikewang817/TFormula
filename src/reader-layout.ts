@@ -10,7 +10,7 @@ import stringWidth from "string-width";
 import type { CellMetrics } from "./types.js";
 import {
   mathResourceKey,
-  type ImageResource,
+  type MathResource,
   type ReaderDocument
 } from "./reader-document.js";
 
@@ -37,6 +37,13 @@ export interface ReaderImageAsset {
   kind: "image";
   key: string;
   path: string;
+  width: number;
+  height: number;
+  size?: number;
+  mtimeMs?: number;
+  /** Geometry required to resize image placeholders without reflowing Markdown. */
+  availableColumns?: number;
+  prefixColumns?: number;
 }
 
 export interface ReaderMathAsset {
@@ -125,6 +132,86 @@ interface BlockContext {
 
 const EMPTY_CONTEXT: BlockContext = { indent: 0, quoteDepth: 0 };
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+interface MathDimensions {
+  aspectRatio: number;
+  heightEx: number;
+}
+
+/** Fast, conservative geometry used until a formula first enters the viewport. */
+export function estimateMathDimensions(latex: string, display: boolean): MathDimensions {
+  const structuralHeight = /\\(?:d?frac|binom|cases|matrix|substack)\b|\\begin\s*\{/u.test(latex)
+    ? 3.4
+    : /\\(?:sum|prod|int|lim)\b|[_^]\s*\{/u.test(latex)
+      ? 2.7
+      : 2;
+  const heightEx = display ? Math.max(2.4, structuralHeight) : Math.min(2.8, structuralHeight);
+  const visible = latex
+    .replace(/\\(?:left|right|displaystyle|textstyle|limits|nolimits)\b/gu, "")
+    .replace(/\\(?:quad|qquad)\b/gu, "  ")
+    .replace(/\\(?:,|;|!| )/gu, " ")
+    .replace(/\\[A-Za-z]+/gu, "x")
+    .replace(/[{}_^&]/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const widthEx = Math.max(1.25, Math.min(120, stringWidth(visible || "x") * 1.05));
+  return { aspectRatio: widthEx / heightEx, heightEx };
+}
+
+function resolvedMathDimensions(
+  resource: MathResource | undefined,
+  latex: string,
+  display: boolean
+): MathDimensions {
+  return resource?.aspectRatio && resource.heightEx
+    ? { aspectRatio: resource.aspectRatio, heightEx: resource.heightEx }
+    : estimateMathDimensions(latex, display);
+}
+
+interface ReaderImageGeometry {
+  columns: number;
+  rows: number;
+  col: number;
+}
+
+export function readerImageGeometry(options: {
+  width: number;
+  height: number;
+  availableColumns: number;
+  prefixColumns: number;
+  viewportRows: number;
+  cell: CellMetrics;
+  imageScale?: number;
+}): ReaderImageGeometry {
+  const availableColumns = Math.max(1, Math.floor(options.availableColumns));
+  const maximumRows = Math.max(2, Math.floor(options.viewportRows) - 3);
+  const availableWidthPx = availableColumns * options.cell.width;
+  const availableHeightPx = maximumRows * options.cell.height;
+  const fitScale = Math.min(
+    1,
+    availableWidthPx / options.width,
+    availableHeightPx / options.height
+  );
+  const imageScale = Number.isFinite(options.imageScale)
+    ? Math.max(0.25, Math.min(3, options.imageScale!))
+    : 1;
+  const renderedScale = Math.min(
+    fitScale * imageScale,
+    availableWidthPx / options.width
+  );
+  const columns = Math.max(1, Math.min(
+    availableColumns,
+    Math.ceil(options.width * renderedScale / options.cell.width)
+  ));
+  const rows = Math.max(1, Math.ceil(
+    options.height * renderedScale / options.cell.height
+  ));
+  return {
+    columns,
+    rows,
+    col: options.prefixColumns + Math.max(0, Math.floor((availableColumns - columns) / 2))
+  };
+}
 
 function sanitizeText(value: string): string {
   return value
@@ -451,7 +538,7 @@ class LayoutBuilder {
           case "inlineMath": {
             const key = mathResourceKey(node.value, false);
             const resource = this.document.math.get(key);
-            if (!this.options.graphics || !resource?.aspectRatio || !resource.heightEx) {
+            if (!this.options.graphics || resource?.error) {
               atoms.push({
                 kind: "text",
                 text: `$${node.value}$`,
@@ -459,8 +546,10 @@ class LayoutBuilder {
               });
               break;
             }
-            const heightPx = resource.heightEx * this.options.cell.height * 0.45 * this.options.scale;
-            const widthPx = heightPx * resource.aspectRatio;
+            const dimensions = resolvedMathDimensions(resource, node.value, false);
+            const heightPx = dimensions.heightEx * this.options.cell.height
+              * 0.45 * this.options.scale;
+            const widthPx = heightPx * dimensions.aspectRatio;
             atoms.push({
               kind: "math",
               latex: node.value,
@@ -519,7 +608,8 @@ class LayoutBuilder {
 
   renderImage(image: Extract<PhrasingContent, { type: "image" }>, context: BlockContext): void {
     const resource = this.document.images.get(image.url);
-    if (!this.options.graphics || !resource?.path || !resource.width || !resource.height) {
+    if (!this.options.graphics || !resource?.path || !resource.width || !resource.height
+      || resource.error) {
       const detail = resource?.error ? ` — ${resource.error}` : "";
       const dimensions = resource?.width && resource.height
         ? ` (${resource.width}×${resource.height})`
@@ -532,47 +622,34 @@ class LayoutBuilder {
       return;
     }
     const availableColumns = this.available(context);
-    const maximumRows = Math.max(2, this.options.viewportRows - 3);
-    const availableWidthPx = availableColumns * this.options.cell.width;
-    const availableHeightPx = maximumRows * this.options.cell.height;
-    // 100% means "fit the complete image in the reader viewport". Avoid
-    // upscaling by default, but allow the interactive image zoom to do so.
-    const fitScale = Math.min(
-      1,
-      availableWidthPx / resource.width,
-      availableHeightPx / resource.height
-    );
-    const imageScale = Number.isFinite(this.options.imageScale)
-      ? Math.max(0.25, Math.min(3, this.options.imageScale!))
-      : 1;
-    // Keep the image inside the document width. A zoomed portrait or square
-    // image may extend vertically across several viewports and is clipped by
-    // the terminal reader while scrolling.
-    const renderedScale = Math.min(
-      fitScale * imageScale,
-      availableWidthPx / resource.width
-    );
-    const columns = Math.max(1, Math.min(
-      availableColumns,
-      Math.ceil(resource.width * renderedScale / this.options.cell.width)
-    ));
-    const rows = Math.max(1, Math.ceil(
-      resource.height * renderedScale / this.options.cell.height
-    ));
     const common = this.commonPrefix(context);
     const commonColumns = stringWidth(common.map(({ text }) => text).join(""));
-    const offset = Math.max(0, Math.floor((availableColumns - columns) / 2));
+    const geometry = readerImageGeometry({
+      width: resource.width,
+      height: resource.height,
+      availableColumns,
+      prefixColumns: commonColumns,
+      viewportRows: this.options.viewportRows,
+      cell: this.options.cell,
+      imageScale: this.options.imageScale
+    });
     const startRow = this.lines.length;
-    for (let row = 0; row < rows; row += 1) this.append([...common]);
+    for (let row = 0; row < geometry.rows; row += 1) this.append([...common]);
     this.placements.push({
       row: startRow,
-      col: commonColumns + offset,
-      columns,
-      rows,
+      col: geometry.col,
+      columns: geometry.columns,
+      rows: geometry.rows,
       asset: {
         kind: "image",
         key: `image\0${resource.path}`,
-        path: resource.path
+        path: resource.path,
+        width: resource.width,
+        height: resource.height,
+        size: resource.size,
+        mtimeMs: resource.mtimeMs,
+        availableColumns,
+        prefixColumns: commonColumns
       }
     });
     if (image.alt) {
@@ -589,7 +666,7 @@ class LayoutBuilder {
   renderMath(node: Extract<RootContent, { type: "math" }>, context: BlockContext): void {
     const key = mathResourceKey(node.value, true);
     const resource = this.document.math.get(key);
-    if (!this.options.graphics || !resource?.aspectRatio || !resource.heightEx) {
+    if (!this.options.graphics || resource?.error) {
       this.appendWrapped([{
         kind: "text",
         text: `$$ ${node.value} $$`,
@@ -597,9 +674,11 @@ class LayoutBuilder {
       }], context);
       return;
     }
+    const dimensions = resolvedMathDimensions(resource, node.value, true);
     const availableColumns = this.available(context);
-    const naturalHeight = resource.heightEx * this.options.cell.height * 0.45 * this.options.scale;
-    const naturalWidth = naturalHeight * resource.aspectRatio;
+    const naturalHeight = dimensions.heightEx * this.options.cell.height
+      * 0.45 * this.options.scale;
+    const naturalWidth = naturalHeight * dimensions.aspectRatio;
     const columns = Math.max(2, Math.min(availableColumns,
       Math.ceil(naturalWidth / this.options.cell.width) + 2));
     const rows = Math.max(2, Math.min(6, Math.ceil(naturalHeight / this.options.cell.height) + 1));
@@ -836,7 +915,77 @@ export function layoutReaderDocument(
   return builder.finish();
 }
 
+/**
+ * Resize existing image placeholders without reparsing or rewrapping the
+ * document. Text spans, tables, links, and formula geometry remain intact;
+ * only image rows and downstream absolute row numbers are adjusted.
+ */
+export function rescaleReaderImages(
+  layout: ReaderLayout,
+  options: Pick<ReaderLayoutOptions, "viewportRows" | "cell" | "imageScale">
+): ReaderLayout {
+  const imageCount = layout.placements.filter(({ asset }) => asset.kind === "image").length;
+  if (imageCount === 0) return layout;
+  const lines = [...layout.lines];
+  const placements = layout.placements.map((placement) => ({ ...placement }));
+  const headings = layout.headings.map((heading) => ({ ...heading }));
+  const links = layout.links.map((link) => ({ ...link }));
+  const images = placements
+    .filter((placement) => placement.asset.kind === "image")
+    .sort((left, right) => left.row - right.row);
+
+  for (const placement of images) {
+    if (placement.asset.kind !== "image") continue;
+    const geometry = readerImageGeometry({
+      width: placement.asset.width,
+      height: placement.asset.height,
+      availableColumns: placement.asset.availableColumns ?? layout.contentWidth,
+      prefixColumns: placement.asset.prefixColumns ?? layout.left,
+      viewportRows: options.viewportRows,
+      cell: options.cell,
+      imageScale: options.imageScale
+    });
+    const oldRows = placement.rows;
+    const oldEnd = placement.row + oldRows;
+    const delta = geometry.rows - oldRows;
+    placement.col = geometry.col;
+    placement.columns = geometry.columns;
+    placement.rows = geometry.rows;
+    if (delta === 0) continue;
+
+    if (delta > 0) {
+      const template = lines[placement.row] ?? { spans: [], plain: "" };
+      const inserted = Array.from({ length: delta }, () => ({
+        spans: [...template.spans],
+        plain: template.plain
+      }));
+      lines.splice(oldEnd, 0, ...inserted);
+    } else {
+      lines.splice(placement.row + geometry.rows, -delta);
+    }
+    for (const candidate of placements) {
+      if (candidate !== placement && candidate.row >= oldEnd) candidate.row += delta;
+    }
+    for (const heading of headings) {
+      if (heading.line >= oldEnd) heading.line += delta;
+    }
+    for (const link of links) {
+      if (link.line >= oldEnd) link.line += delta;
+    }
+  }
+
+  return {
+    lines,
+    placements,
+    headings,
+    links,
+    contentWidth: layout.contentWidth,
+    left: layout.left
+  };
+}
+
 export const readerLayoutInternals = {
+  estimateMathDimensions,
   padColumns,
   plainInline,
   sanitizeText,

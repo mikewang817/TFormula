@@ -20,6 +20,7 @@ import {
   parseTerminalResponses,
   runtimeProbeBarrier,
   runtimeProbeQueryId,
+  STARTUP_PROBE_QUARANTINE_MS,
   TerminalProbeResponseFilter
 } from "./probe.js";
 import { TerminalResponseFilter } from "./terminal-responses.js";
@@ -334,7 +335,7 @@ export async function runProxy(
   });
 
   if (startupProbeQuarantine) {
-    startupProbeTimer = setTimeout(finishStartupProbeQuarantine, 320);
+    startupProbeTimer = setTimeout(finishStartupProbeQuarantine, STARTUP_PROBE_QUARANTINE_MS);
   }
 
   const previousRaw = process.stdin.isRaw;

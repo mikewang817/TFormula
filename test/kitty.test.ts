@@ -4,6 +4,7 @@ import {
   kittyDeletePlacementsByZIndex,
   kittyPlaceImage,
   kittyTransmitImage,
+  kittyTransmitImageChunks,
   kittyTransmitImageFile,
   kittyTransmitAndPlace
 } from "../src/kitty.js";
@@ -55,6 +56,7 @@ describe("Kitty graphics encoding", () => {
     expect(packets.at(-1)?.controls).toContain("q=0");
     expect(Buffer.from(packets.map(({ payload }) => payload).join(""), "base64"))
       .toEqual(Buffer.from(png));
+    expect([...kittyTransmitImageChunks(png, 42)].join("")).toBe(encoded);
   });
 
   it("encodes a terminal-owned temporary-file path instead of PNG bytes", () => {

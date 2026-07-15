@@ -14,9 +14,8 @@ import { gfmFromMarkdown } from "mdast-util-gfm";
 import { mathFromMarkdown } from "mdast-util-math";
 import { gfm } from "micromark-extension-gfm";
 import { math } from "micromark-extension-math";
-import sharp from "sharp";
-import { readSvgDimensions, renderMathJaxSvg } from "./math-renderer.js";
 import { readerFileKind } from "./reader-path.js";
+import { loadSharp } from "./sharp-loader.js";
 
 export { looksLikeReaderPath, readerFileKind, type ReaderFileKind } from "./reader-path.js";
 
@@ -28,6 +27,8 @@ export interface ImageResource {
   path?: string;
   width?: number;
   height?: number;
+  size?: number;
+  mtimeMs?: number;
   error?: string;
 }
 
@@ -298,34 +299,16 @@ async function inspectImage(url: string, documentPath: string): Promise<ImageRes
     return { url, error: "remote and data images are not loaded in this release" };
   }
   try {
-    const metadata = await sharp(path).metadata();
+    const sharp = await loadSharp();
+    const [metadata, info] = await Promise.all([sharp(path).metadata(), stat(path)]);
     const width = metadata.autoOrient.width ?? metadata.width;
     const height = metadata.autoOrient.height ?? metadata.height;
     if (!width || !height) throw new Error("image dimensions are unavailable");
-    return { url, path, width, height };
+    return { url, path, width, height, size: info.size, mtimeMs: info.mtimeMs };
   } catch (error) {
     return {
       url,
       path,
-      error: error instanceof Error ? error.message : String(error)
-    };
-  }
-}
-
-async function inspectMath(latex: string, display: boolean): Promise<MathResource> {
-  try {
-    const svg = await renderMathJaxSvg(latex, display, 100_000);
-    const dimensions = readSvgDimensions(svg);
-    return {
-      latex,
-      display,
-      aspectRatio: dimensions.aspectRatio,
-      heightEx: dimensions.heightEx
-    };
-  } catch (error) {
-    return {
-      latex,
-      display,
       error: error instanceof Error ? error.message : String(error)
     };
   }
@@ -353,12 +336,14 @@ export async function loadReaderDocument(inputPath: string, cwd = process.cwd())
   const imageEntries = await Promise.all(
     resources.imageUrls.map(async (url) => [url, await inspectImage(url, path)] as const)
   );
-  const mathEntries = await Promise.all(
-    resources.formulas.map(async ({ latex, display }) => [
+  // Natural formula dimensions are deliberately resolved only when a formula
+  // enters the viewport. Eagerly invoking MathJax here makes startup scale
+  // with every unique formula in a long document, including content the user
+  // may never visit.
+  const mathEntries = resources.formulas.map(({ latex, display }) => [
       mathResourceKey(latex, display),
-      await inspectMath(latex, display)
-    ] as const)
-  );
+      { latex, display }
+    ] as const);
 
   return {
     path,

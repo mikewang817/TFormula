@@ -1,7 +1,12 @@
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { kittyTransmitImage, kittyTransmitImageFile } from "./kitty.js";
+import {
+  kittyTransmitImage,
+  kittyTransmitImageChunks,
+  kittyTransmitImageFile
+} from "./kitty.js";
+import type { TerminalPayload } from "./terminal-writer.js";
 
 export type ImageTransmissionMode = "direct" | "temp-file";
 
@@ -84,6 +89,13 @@ export class KittyImageTransmitter {
       this.#temporaryFileImages.delete(imageId);
       throw error;
     }
+  };
+
+  /** Direct mode is generated packet-by-packet to bound Base64 peak memory. */
+  transmitPayload = (png: Uint8Array, imageId: number): TerminalPayload => {
+    return this.#mode === "direct"
+      ? kittyTransmitImageChunks(png, imageId)
+      : this.transmit(png, imageId);
   };
 
   async dispose(waitMs = 250): Promise<void> {

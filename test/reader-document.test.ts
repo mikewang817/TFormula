@@ -1,6 +1,10 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   collectDocumentResources,
+  loadReaderDocument,
   mathResourceKey,
   parseMarkdown,
   readerFileKind
@@ -51,6 +55,25 @@ describe("reader document parsing", () => {
     expect(readerFileKind("notes.txt")).toBe("text");
     expect(readerFileKind("photo.WEBP")).toBe("image");
     expect(readerFileKind("codex")).toBeUndefined();
+  });
+
+  it("defers MathJax measurement until formulas enter the viewport", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tformula-lazy-math-"));
+    const path = join(directory, "lazy.md");
+    await writeFile(path, "Before $x^2$.\n\n$$\\frac{a}{b}$$\n");
+    try {
+      const document = await loadReaderDocument(path);
+      expect(document.math.size).toBe(2);
+      expect([...document.math.values()]).toEqual(expect.arrayContaining([
+        expect.objectContaining({ latex: "x^2", display: false }),
+        expect.objectContaining({ latex: "\\frac{a}{b}", display: true })
+      ]));
+      expect([...document.math.values()].every((resource) =>
+        resource.aspectRatio === undefined && resource.heightEx === undefined
+      )).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("preserves explicit LaTeX delimiters before CommonMark can consume them", () => {

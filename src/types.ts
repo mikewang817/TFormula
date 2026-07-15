@@ -52,6 +52,9 @@ export interface RenderedFormula {
   rows: number;
   widthPx: number;
   heightPx: number;
+  /** MathJax source geometry, cached lazily by the document reader. */
+  naturalAspectRatio: number;
+  naturalHeightEx: number;
 }
 
 export interface CliOptions {

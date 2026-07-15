@@ -18,6 +18,8 @@ interface ParsedResponses {
 // positive image id. Keep it adjacent to (but outside) TFormula's allocatable
 // range so it can never collide with a real cached formula image.
 export const KITTY_QUERY_IMAGE_ID = 2_000_000_000;
+/** Safety fallback; the tagged Kitty reply normally ends quarantine earlier. */
+export const STARTUP_PROBE_QUARANTINE_MS = 1_000;
 // Keep the tagged Kitty response last. It is the only startup response that
 // carries our generation id, so putting DA before it makes the Kitty ACK an
 // actual ordering barrier for every untagged CSI/OSC response.
@@ -287,6 +289,12 @@ export interface ProbeResult {
   startupProbePending: boolean;
 }
 
+function startupProbeBarrierReceived(parsed: ParsedResponses, requestedKitty: boolean): boolean {
+  return requestedKitty
+    ? parsed.kittyGraphics !== undefined
+    : parsed.primaryDeviceAttributes;
+}
+
 export async function probeTerminal(
   cellOverride?: { width: number; height: number },
   timeoutMs = 180
@@ -309,8 +317,14 @@ export async function probeTerminal(
 
   const wasRaw = process.stdin.isRaw;
   const chunks: Buffer[] = [];
+  let finishProbe: (() => void) | undefined;
+  const barrier = new Promise<void>((resolve) => {
+    finishProbe = resolve;
+  });
   const onData = (chunk: Buffer | string): void => {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const parsed = parseTerminalResponses(Buffer.concat(chunks).toString("utf8"));
+    if (startupProbeBarrierReceived(parsed, fallback.kittyGraphics)) finishProbe?.();
   };
 
   process.stdin.setRawMode(true);
@@ -322,9 +336,11 @@ export async function probeTerminal(
   // graphics response is a definitive negative and prevents raw PNG payloads
   // from being sent on a false-positive TERM hint.
   process.stdout.write(
-    `\x1b[16t\x1b[14t\x1b]10;?\x1b\\\x1b]11;?\x1b\\${fallback.kittyGraphics ? KITTY_GRAPHICS_QUERY : ""}`
+    `\x1b[16t\x1b[14t\x1b]10;?\x1b\\\x1b]11;?\x1b\\${fallback.kittyGraphics ? KITTY_GRAPHICS_QUERY : "\x1b[c"}`
   );
-  await new Promise((resolve) => setTimeout(resolve, timeoutMs));
+  const timer = setTimeout(() => finishProbe?.(), Math.max(0, timeoutMs));
+  await barrier;
+  clearTimeout(timer);
   process.stdin.off("data", onData);
   if (!wasRaw) process.stdin.setRawMode(false);
   process.stdin.pause();
@@ -366,5 +382,6 @@ export const probeInternals = {
   KITTY_QUERY_IMAGE_ID,
   confirmedKittyGraphics,
   parseRgb,
+  startupProbeBarrierReceived,
   supportsKittyGraphics
 };

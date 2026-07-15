@@ -422,7 +422,9 @@ export class MathRenderer {
       columns,
       rows,
       widthPx: canvasWidth,
-      heightPx: canvasHeight
+      heightPx: canvasHeight,
+      naturalAspectRatio: dimensions.aspectRatio,
+      naturalHeightEx: dimensions.heightEx
     };
     this.#cache.set(cacheKey, rendered);
     if (this.#cache.size > 256) this.#cache.delete(this.#cache.keys().next().value!);

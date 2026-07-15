@@ -103,6 +103,19 @@ describe("terminal probing", () => {
     expect(probeInternals.confirmedKittyGraphics(false, true)).toBe(false);
   });
 
+  it("finishes an adaptive startup probe only at its ordered barrier", () => {
+    const partial = parseTerminalResponses("\x1b[6;20;10t");
+    const deviceBarrier = parseTerminalResponses("\x1b[?62;4c");
+    const kittyBarrier = parseTerminalResponses(
+      `\x1b_Gi=${probeInternals.KITTY_QUERY_IMAGE_ID};OK\x1b\\`
+    );
+
+    expect(probeInternals.startupProbeBarrierReceived(partial, false)).toBe(false);
+    expect(probeInternals.startupProbeBarrierReceived(deviceBarrier, false)).toBe(true);
+    expect(probeInternals.startupProbeBarrierReceived(deviceBarrier, true)).toBe(false);
+    expect(probeInternals.startupProbeBarrierReceived(kittyBarrier, true)).toBe(true);
+  });
+
   it("assigns tagged runtime barriers outside formula image ids and wraps safely", () => {
     expect(runtimeProbeQueryId(1)).toBe(RUNTIME_PROBE_QUERY_ID_MIN);
     const range = RUNTIME_PROBE_QUERY_ID_MAX - RUNTIME_PROBE_QUERY_ID_MIN + 1;
