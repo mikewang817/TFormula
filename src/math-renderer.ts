@@ -27,10 +27,86 @@ interface SvgDimensions {
 }
 
 let mathJaxPromise: Promise<MathJaxApi> | undefined;
-const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-svg-v4";
+const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-scientific-svg-v5";
 const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v3";
 const CANONICAL_CONTAINER_WIDTH = 100_000;
 const MATHJAX_EX_PX = 8;
+
+/**
+ * A deterministic, local-only package profile for formulas emitted by
+ * scientific agents. Keep external-resource and HTML packages out of this
+ * list; safeLatex() independently rejects their commands before MathJax sees
+ * them.
+ */
+export const SCIENTIFIC_TEX_PACKAGES = [
+  "mhchem",
+  "physics",
+  "mathtools",
+  "cancel",
+  "centernot",
+  "upgreek",
+  "units",
+  "gensymb",
+  "cases",
+  "extpfeil",
+  "boldsymbol",
+  "enclose"
+] as const;
+
+/** A conservative subset of ubiquitous siunitx syntax used by CLI agents. */
+const SCIENTIFIC_TEX_MACROS: Record<string, string | [string, number]> = {
+  SI: ["#1\\,\\mathrm{#2}", 2],
+  si: ["\\mathrm{#1}", 1],
+  unit: ["\\mathrm{#1}", 1],
+  metre: "\\mathrm{m}",
+  meter: "\\mathrm{m}",
+  second: "\\mathrm{s}",
+  minute: "\\mathrm{min}",
+  hour: "\\mathrm{h}",
+  day: "\\mathrm{d}",
+  gram: "\\mathrm{g}",
+  kilogram: "\\mathrm{kg}",
+  mole: "\\mathrm{mol}",
+  kelvin: "\\mathrm{K}",
+  ampere: "\\mathrm{A}",
+  candela: "\\mathrm{cd}",
+  litre: "\\mathrm{L}",
+  liter: "\\mathrm{L}",
+  hertz: "\\mathrm{Hz}",
+  newton: "\\mathrm{N}",
+  pascal: "\\mathrm{Pa}",
+  joule: "\\mathrm{J}",
+  watt: "\\mathrm{W}",
+  coulomb: "\\mathrm{C}",
+  volt: "\\mathrm{V}",
+  farad: "\\mathrm{F}",
+  tesla: "\\mathrm{T}",
+  weber: "\\mathrm{Wb}",
+  henry: "\\mathrm{H}",
+  siemens: "\\mathrm{S}",
+  lumen: "\\mathrm{lm}",
+  lux: "\\mathrm{lx}",
+  becquerel: "\\mathrm{Bq}",
+  gray: "\\mathrm{Gy}",
+  sievert: "\\mathrm{Sv}",
+  katal: "\\mathrm{kat}",
+  electronvolt: "\\mathrm{eV}",
+  radian: "\\mathrm{rad}",
+  steradian: "\\mathrm{sr}",
+  milli: "\\mathrm{m}",
+  nano: "\\mathrm{n}",
+  pico: "\\mathrm{p}",
+  kilo: "\\mathrm{k}",
+  mega: "\\mathrm{M}",
+  giga: "\\mathrm{G}",
+  tera: "\\mathrm{T}",
+  percent: "\\%",
+  degreeCelsius: "{}^{\\circ}\\mathrm{C}",
+  ohm: "\\Omega",
+  per: "/",
+  squared: "^{2}",
+  cubed: "^{3}"
+};
 
 function normalizedContainerWidth(display: boolean, containerWidth: number): number {
   if (!display) return CANONICAL_CONTAINER_WIDTH;
@@ -71,11 +147,16 @@ async function getMathJax(): Promise<MathJaxApi> {
       const mathJax = module.default as unknown as MathJaxApi;
       await mathJax.init({
         loader: {
-          load: ["input/tex", "[tex]/mhchem", "[tex]/physics", "output/svg"]
+          load: [
+            "input/tex",
+            ...SCIENTIFIC_TEX_PACKAGES.map((name) => `[tex]/${name}`),
+            "output/svg"
+          ]
         },
         tex: {
           maxBuffer: 8192,
-          packages: { "[+]": ["mhchem", "physics"] }
+          packages: { "[+]": [...SCIENTIFIC_TEX_PACKAGES] },
+          macros: SCIENTIFIC_TEX_MACROS
         },
         svg: {
           fontCache: "local",
@@ -133,7 +214,7 @@ export function readSvgDimensions(svg: string): SvgDimensions {
 
 function safeLatex(latex: string): string {
   if (latex.length > 8192) throw new Error("formula exceeds the 8192 character limit");
-  if (/\\(?:require|href|url|html|class|cssId|style)\b/iu.test(latex)) {
+  if (/\\(?:require|href|url|html|class|cssId|style|includegraphics|input|include|usepackage|documentclass)\b/iu.test(latex)) {
     throw new Error("formula contains a disabled command");
   }
   return latex;
@@ -141,8 +222,26 @@ function safeLatex(latex: string): string {
 
 function assertValidMathJaxSvg(svg: string): void {
   const redErrorText = /<g\b(?=[^>]*\bdata-mml-node=["']mtext["'])(?=[^>]*\bfill=["']red["'])(?=[^>]*\bstroke=["']red["'])[^>]*>/iu;
-  if (/\bdata-mjx-error\s*=|\bdata-mml-node=["']merror["']|<merror\b/iu.test(svg)
-    || redErrorText.test(svg)) {
+  const decodeAttribute = (value: string | undefined): string | undefined => value
+    ?.replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
+  const parseError = decodeAttribute(
+    svg.match(/\bdata-mjx-error\s*=\s*(["'])(.*?)\1/iu)?.[2]
+  );
+  if (parseError) {
+    throw new Error(`MathJax could not parse the formula: ${parseError}`);
+  }
+  const redErrorTag = svg.match(redErrorText)?.[0];
+  if (redErrorTag) {
+    const command = decodeAttribute(
+      redErrorTag.match(/\bdata-latex\s*=\s*(["'])(.*?)\1/iu)?.[2]
+    );
+    throw new Error(`MathJax could not parse the formula${command ? `: unsupported ${command}` : ""}`);
+  }
+  if (/\bdata-mml-node=["']merror["']|<merror\b/iu.test(svg)) {
     throw new Error("MathJax could not parse the formula");
   }
   const dimensions = readSvgDimensions(svg);
@@ -159,13 +258,61 @@ function assertValidMathJaxSvg(svg: string): void {
   }
 }
 
+interface BracedGroup {
+  end: number;
+  source: string;
+}
+
+function bracedGroupAt(source: string, start: number): BracedGroup | undefined {
+  if (source[start] !== "{") return undefined;
+  let depth = 0;
+  for (let index = start; index < source.length; index += 1) {
+    if (source[index] === "\\") {
+      index += 1;
+      continue;
+    }
+    if (source[index] === "{") depth += 1;
+    else if (source[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return { end: index + 1, source: source.slice(start, index + 1) };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * siunitx v3 reuses `\qty`, which is also defined by the physics package.
+ * Only its unambiguous two-braced-argument form is rewritten; physics forms
+ * such as `\qty(x)` and `\qty{\frac{a}{b}}` remain byte-for-byte unchanged.
+ */
+function normalizeSiunitxQuantities(latex: string): string {
+  let output = "";
+  let cursor = 0;
+  const commands = latex.matchAll(/\\qty(?![A-Za-z])/gu);
+  for (const match of commands) {
+    const start = match.index!;
+    if (start < cursor) continue;
+    let argumentStart = start + match[0].length;
+    while (/\s/u.test(latex[argumentStart] ?? "")) argumentStart += 1;
+    const value = bracedGroupAt(latex, argumentStart);
+    if (!value) continue;
+    let unitStart = value.end;
+    while (/\s/u.test(latex[unitStart] ?? "")) unitStart += 1;
+    const unit = bracedGroupAt(latex, unitStart);
+    if (!unit) continue;
+    output += `${latex.slice(cursor, start)}\\SI${value.source}${unit.source}`;
+    cursor = unit.end;
+  }
+  return cursor === 0 ? latex : output + latex.slice(cursor);
+}
+
 export function normalizeLatexForRendering(latex: string): string {
   // Rendering must not algebraically rewrite valid TeX. In particular,
   // changing x^1/\sqrt{y} into x^\frac{1}{\sqrt{y}} changes its meaning.
   // `\textcircled` is a presentational LaTeX command which MathJax 4 does not
   // implement. Map its simple form to MathJax's equivalent enclosure while
   // preserving the enclosed expression exactly.
-  return latex
+  return normalizeSiunitxQuantities(latex)
     .replace(
       /\\text\s*\{\s*\\textcircled\s*\{([^{}]*)\}\s*\}/gu,
       (_match, contents: string) => `\\enclose{circle}{${contents}}`

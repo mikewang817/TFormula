@@ -4,6 +4,16 @@ import type { FormulaRegion } from "./types.js";
 const COMMAND_RE = /\\(?:frac|dfrac|tfrac|binom|sum|prod|coprod|int|iint|iiint|oint|log|ln|exp|sqrt|lim|liminf|limsup|sin|cos|tan|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh|det|dim|gcd|hom|ker|max|min|sup|inf|Pr|mod|pmod|bmod|ce|pu|qty|dv|pdv|bra|ket|braket|begin|end|left|right|text|mathrm|mathbf|mathit|mathsf|mathtt|mathbb|mathcal|mathfrak|operatorname|overline|underline|widehat|widetilde|hat|bar|vec|dot|ddot|partial|nabla|ell|infty|forall|exists|neg|pm|mp|times|div|cdot|ast|star|circ|bullet|oplus|otimes|cap|cup|subset|supset|subseteq|supseteq|in|notin|ni|le|leq|ge|geq|neq|ne|approx|sim|simeq|cong|equiv|propto|to|mapsto|rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|Leftrightarrow|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|omicron|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega)(?![A-Za-z])/gu;
 
 const ANY_TEX_COMMAND_RE = /\\[A-Za-z]+/gu;
+const UPRIGHT_GREEK_COMMAND_RE = /^(?:up(?:alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|omicron|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega)|Up(?:gamma|delta|theta|lambda|xi|pi|sigma|upsilon|phi|psi|omega))$/u;
+const SCIENTIFIC_COMMANDS = new Set([
+  "SI", "si", "unit", "units", "unitfrac", "nicefrac",
+  "prescript", "centernot", "implies", "coloneqq", "xleftrightarrow", "xlongequal",
+  "cancel", "bcancel", "xcancel", "cancelto", "boldsymbol",
+  "degree", "celsius", "ohm", "micro",
+  "comm", "commutator", "acomm", "anticommutator",
+  "expval", "expectationvalue", "mel", "matrixelement",
+  "dd", "fdv", "functionalderivative"
+]);
 const UNICODE_MATH_RE = /[\p{Sm}\u00b2\u00b3\u00b9\u0370-\u03ff\u1f00-\u1fff\u2070-\u209f\u2100-\u214f\u{1d400}-\u{1d7ff}]/u;
 const PROSE_MATH_WORDS = new Set([
   "and", "bar", "baz", "config", "else", "false", "foo", "for", "from", "if", "in",
@@ -47,6 +57,11 @@ export function containsFormulaTrigger(value: string): boolean {
 function mathScore(value: string): number {
   let score = 0;
   score += (value.match(COMMAND_RE)?.length ?? 0) * 3;
+  score += [...value.matchAll(ANY_TEX_COMMAND_RE)]
+    .filter((match) => {
+      const command = match[0]!.slice(1);
+      return SCIENTIFIC_COMMANDS.has(command) || UPRIGHT_GREEK_COMMAND_RE.test(command);
+    }).length * 3;
   score += Math.min(3, value.match(/[\^_][{A-Za-z0-9(]/gu)?.length ?? 0);
   score += Math.min(2, value.match(/\\[A-Za-z]+/gu)?.length ?? 0);
   if (/\{[^{}]+\}/u.test(value)) score += 1;
@@ -501,6 +516,13 @@ function trailingSingleBackslash(value: string): boolean {
   return count === 1;
 }
 
+const STRIPPED_SPACED_ROW_BREAK_RE = /(\\+)(\s*\[\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*(?:pt|pc|in|bp|cm|mm|dd|cc|sp|ex|em|mu)\s*\])\s*$/u;
+
+function strippedSpacedRowBreak(value: string): boolean {
+  const match = value.match(STRIPPED_SPACED_ROW_BREAK_RE);
+  return match?.[1]?.length === 1;
+}
+
 function topLevelAlignmentMarker(value: string): boolean {
   let braceDepth = 0;
   for (let index = 0; index < value.length; index += 1) {
@@ -521,6 +543,12 @@ function appendMissingRowSlash(value: string): string {
   const trailingWhitespace = value.match(/\s*$/u)?.[0] ?? "";
   const body = value.slice(0, value.length - trailingWhitespace.length);
   return `${body}\\${trailingWhitespace}`;
+}
+
+function restoreSpacedRowBreak(value: string): string {
+  const match = value.match(STRIPPED_SPACED_ROW_BREAK_RE);
+  if (!match || match.index === undefined) return value;
+  return `${value.slice(0, match.index)}\\\\${value.slice(match.index + 1)}`;
 }
 
 function appendRowBreak(value: string): string {
@@ -550,7 +578,10 @@ function hasExplicitRowBreak(value: string): boolean {
  */
 function repairStrippedEnvironmentRowBreaks(value: string): string {
   const lines = value.split("\n");
-  if (lines.length < 2 || !lines.some(trailingSingleBackslash)) return value;
+  if (lines.length < 2
+    || !lines.some((line) => trailingSingleBackslash(line) || strippedSpacedRowBreak(line))) {
+    return value;
+  }
 
   const stack: RowEnvironmentState[] = [];
   let braceDepth = 0;
@@ -589,8 +620,14 @@ function repairStrippedEnvironmentRowBreaks(value: string): string {
       .trim();
     if (!contentProbe) continue;
     const next = lines[row + 1]!;
-    if (next.trimStart().startsWith(`\\end{${active.name}}`)) continue;
     if (hasExplicitRowBreak(line)) continue;
+
+    if (strippedSpacedRowBreak(line)) {
+      lines[row] = restoreSpacedRowBreak(line);
+      continue;
+    }
+
+    if (next.trimStart().startsWith(`\\end{${active.name}}`)) continue;
 
     if (trailingSingleBackslash(line)) {
       lines[row] = appendMissingRowSlash(line);
@@ -600,6 +637,10 @@ function repairStrippedEnvironmentRowBreaks(value: string): string {
     const nextHasAlignment = topLevelAlignmentMarker(next);
     const nextStartsRelation = startsWithRelation(next);
     if (!nextHasAlignment && !nextStartsRelation) continue;
+    // Markdown can wrap the left-hand side immediately before the alignment
+    // tab. In that shape `lhs` followed by `&=rhs` is still one TeX row, not
+    // two rows with an invented separator.
+    if (next.trimStart().startsWith("&") && !topLevelAlignmentMarker(line)) continue;
     lines[row] = appendRowBreak(line);
     if (nextStartsRelation && ALIGNMENT_ENVIRONMENTS.has(active.name)) {
       const indentation = next.match(/^\s*/u)?.[0] ?? "";

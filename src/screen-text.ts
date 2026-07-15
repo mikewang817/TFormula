@@ -485,7 +485,7 @@ export function detectScreenFormulaRegions(
       && /^(?:\\\[|\$\$|\[)$/u.test(startLine.text.trim())
       && /^(?:\\\]|\$\$|\])$/u.test(endLine.text.trim());
 
-    if (standaloneDisplay) {
+    if (standaloneDisplay || standaloneBlock) {
       regions.push({
         ...region,
         startRow: involved[0]!.spans[0]!.row,
