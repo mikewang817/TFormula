@@ -1,6 +1,6 @@
 {
   "name": "tformula",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Render LaTeX from any CLI agent in Kitty-compatible terminals.",
   "keywords": [
     "terminal",
