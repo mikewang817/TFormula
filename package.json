@@ -1,6 +1,6 @@
 {
   "name": "tformula",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Render CLI LaTeX and read Markdown with images directly in the terminal.",
   "keywords": [
     "terminal",

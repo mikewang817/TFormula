@@ -187,6 +187,21 @@ tformula --scale 1.1 codex
 TFORMULA_SCALE=0.9 tformula --shell
 ```
 
+## 科学 LaTeX 兼容性
+
+TFormula 使用一套固定、完全本地的 MathJax 科学公式配置，面向 CLI Agent
+经常生成的公式。除核心 TeX 与 AMS 记号外，还启用了 `mhchem`、`physics`、
+`mathtools`、`cancel`、`centernot`、`upgreek`、`units`、`gensymb`、`cases`、
+`extpfeil`、`boldsymbol` 和 `enclose`。它可以覆盖常见数学公式、力学、电磁学、
+量子力学记号、化学方程式与同位素、反应动力学、群体遗传学、生物统计、带注释
+箭头、左侧上下标和公式编号等内容。
+
+同时兼容常见的本地 SI 单位写法，包括 `\SI{...}{...}`、`\si{...}` 以及无歧义的
+siunitx v3 形式 `\qty{数值}{单位}`；`physics` 中的 `\qty(...)` 等写法不会被改写。
+TFormula 不模拟完整的 LaTeX 发行版：TikZ、`chemfig` 和外部图片等文档级绘图系统
+属于明确的能力边界。遇到不支持的命令时，渲染器会指出该命令并保留原始 TeX，
+不会通过近似改写悄悄改变公式含义。
+
 ## 公式与阅读器图片缓存
 
 公式缓存采用内容寻址方式，并由当前用户启动的所有 TFormula Agent 进程共享：
@@ -246,7 +261,10 @@ $ ... $
 符号分隔符，均可识别。
 
 某些 Agent TUI 在渲染 Markdown 时会吃掉 `\[`、`\]` 或 `\(`、`\)` 外层的
-反斜杠。为兼容这种情况，TFormula 也会谨慎识别：
+反斜杠，还可能把 `aligned`、`gathered`、`cases` 等环境中的 TeX 换行符从
+`\\` 减少为 `\`。TFormula 只在环境上下文和直接损坏证据都明确时恢复这些
+换行，包括 `\\[2pt]` 等带行距的形式。恢复出的独立公式会使用完整终端宽度，
+不会再被结束符 `]` 所在的一列压缩。为兼容这些情况，TFormula 也会谨慎识别：
 
 - 包含 `\frac`、`\sum`、上下标或花括号参数的裸 `[` / `]` 公式块；
 - 包含明确 TeX 命令或数学结构的 `(\rho)` 等括号表达式；
@@ -279,8 +297,9 @@ tformula -- opencode --continue
 
 - MathJax 和字体全部在本地运行，不使用 CDN。
 - 单个公式最长 8192 个字符。
-- 禁止 `\require`、`\href`、`\url` 以及 MathJax HTML/样式命令等可能加载
-  外部内容的命令。
+- 禁止 `\require`、`\href`、`\url`、`\includegraphics`、`\input`、
+  `\include`、`\usepackage`、`\documentclass` 以及 MathJax HTML/样式命令等
+  可能加载外部内容的命令。
 - 解析或渲染失败时保留原始 LaTeX，不阻断 Agent。
 - 终端不支持 Kitty 图形协议时，TFormula 会退化为透明 PTY 代理。
 - 阅读器中的 HTML 只作为文字处理，不会执行；首个版本只从本地文件加载图片。

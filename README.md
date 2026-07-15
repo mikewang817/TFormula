@@ -231,6 +231,24 @@ tformula --scale 1.1 codex
 TFORMULA_SCALE=0.9 tformula --shell
 ```
 
+## Scientific LaTeX compatibility
+
+TFormula uses a fixed, local MathJax profile aimed at formulas emitted by
+scientific CLI agents. In addition to core TeX and AMS notation, it enables
+`mhchem`, `physics`, `mathtools`, `cancel`, `centernot`, `upgreek`, `units`,
+`gensymb`, `cases`, `extpfeil`, `boldsymbol`, and `enclose`. This covers common
+mathematics, mechanics, electromagnetism, quantum notation, chemical equations
+and isotopes, kinetics, population genetics, biostatistics, annotated arrows,
+left scripts, and equation tags.
+
+Common local SI notation is also accepted, including `\SI{...}{...}`,
+`\si{...}`, and the unambiguous siunitx-v3 form `\qty{value}{unit}`. Physics
+forms such as `\qty(...)` are left untouched. TFormula does not attempt to
+emulate a full LaTeX installation: document-level or drawing systems such as
+TikZ, `chemfig`, and external images are an explicit boundary. If a command is
+unsupported, the renderer reports that command and leaves the original TeX
+visible instead of silently changing its meaning.
+
 ## Formula and reader image cache
 
 Math rendering is content-addressed and shared by every TFormula-wrapped Agent
@@ -283,6 +301,13 @@ Markdown. For that case TFormula conservatively recognizes a bare `[`/`]`
 block only when its body contains strong TeX features such as `\frac`, `\sum`,
 subscripts, superscripts, or braced arguments.
 
+Those TUIs can also reduce TeX row separators from `\\` to `\` inside
+`aligned`, `gathered`, `cases`, and related environments. TFormula restores
+them only when the surrounding environment and direct loss evidence make the
+repair unambiguous, including row-spacing forms such as `\\[2pt]`. A recovered
+standalone display reserves the complete terminal width, so long scientific
+derivations are not compressed into the one-column closing `]` line.
+
 The same compatibility rule applies when a TUI turns inline delimiters such as
 `\(\rho\)` into `(\rho)`. TFormula renders the parenthesized span only when its
 contents contain a recognized TeX command or similarly strong math structure;
@@ -325,7 +350,8 @@ tformula -- claude --resume
 - MathJax and fonts are installed locally; rendering does not use a CDN.
 - Formula length is limited to 8192 characters.
 - Commands that can load or embed external content, including `\require`,
-  `\href`, `\url`, and MathJax HTML/style commands, are rejected.
+  `\href`, `\url`, `\includegraphics`, `\input`, `\include`, `\usepackage`,
+  `\documentclass`, and MathJax HTML/style commands, are rejected.
 - A parse or render failure leaves the original LaTeX visible.
 - On terminals without Kitty graphics support, TFormula remains a transparent
   PTY proxy. The document reader retains its ANSI text layout and uses readable

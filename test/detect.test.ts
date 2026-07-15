@@ -225,6 +225,26 @@ describe("detectFormulaRegions", () => {
     ].join("\n"));
   });
 
+  it("restores stripped aligned row spacing without treating intervals as row breaks", () => {
+    const [spaced] = detectFormulaRegions([
+      "[",
+      "\\begin{aligned}",
+      "a&=b,\\[2pt]",
+      "\\end{aligned}",
+      "]"
+    ]);
+    expect(spaced?.latex).toContain("a&=b,\\\\[2pt]");
+
+    const [interval] = detectFormulaRegions([
+      "\\begin{aligned}",
+      "A&=\\text{domain}\\ [0,1]",
+      "B&=2",
+      "\\end{aligned}"
+    ]);
+    expect(interval?.latex).toContain("A&=\\text{domain}\\ [0,1]\nB&=2");
+    expect(interval?.latex).not.toContain("\\\\ [0,1]");
+  });
+
   it("does not force row breaks without stripped-Markdown evidence", () => {
     const [region] = detectFormulaRegions([
       "\\begin{aligned}",
