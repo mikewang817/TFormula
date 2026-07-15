@@ -1,7 +1,7 @@
 {
   "name": "tformula",
   "version": "0.1.3",
-  "description": "Render LaTeX from any CLI agent in Kitty-compatible terminals.",
+  "description": "Render CLI LaTeX and read Markdown with images directly in the terminal.",
   "keywords": [
     "terminal",
     "latex",
@@ -9,7 +9,10 @@
     "kitty",
     "ghostty",
     "cli",
-    "ai-agent"
+    "ai-agent",
+    "markdown",
+    "reader",
+    "image"
   ],
   "homepage": "https://github.com/mikewang817/TFormula#readme",
   "bugs": {
@@ -53,7 +56,13 @@
     "@resvg/resvg-js": "^2.6.2",
     "@xterm/addon-unicode-graphemes": "^0.4.0",
     "@xterm/headless": "^6.0.0",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.1.0",
+    "mdast-util-math": "^3.0.0",
+    "micromark-extension-gfm": "^3.0.0",
+    "micromark-extension-math": "^3.1.0",
     "node-pty": "^1.1.0",
+    "sharp": "^0.34.5",
     "string-width": "^8.1.0"
   },
   "devDependencies": {
@@ -64,6 +73,7 @@
     "vitest": "^4.1.10"
   },
   "allowScripts": {
-    "node-pty": true
+    "node-pty": true,
+    "sharp": true
   }
 }

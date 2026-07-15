@@ -105,23 +105,28 @@ export function readSvgDimensions(svg: string): SvgDimensions {
   const viewBoxRatio = viewBox ? Number(viewBox[1]) / Number(viewBox[2]) : 1;
   const fallbackRatio = Number.isFinite(viewBoxRatio) && viewBoxRatio > 0 ? viewBoxRatio : 1;
 
-  if (!width || !height) return { aspectRatio: fallbackRatio, heightEx: 1.8, depthEx: 0 };
   const unitToEx = (length: { value: number; unit: string }): number => {
     if (length.unit === "ex") return length.value;
     if (length.unit === "em") return length.value * 2;
     return length.value / 8;
   };
-  const widthEx = unitToEx(width);
-  const heightEx = unitToEx(height);
+  const parsedHeightEx = height
+    ? unitToEx(height)
+    : width
+      ? unitToEx(width) / fallbackRatio
+      : 1.8;
+  const parsedWidthEx = width
+    ? unitToEx(width)
+    : parsedHeightEx * fallbackRatio;
   const verticalAlign = svg.match(/vertical-align:\s*(-?[\d.]+)(ex|em|px)?/u);
   const parsedVerticalAlignEx = verticalAlign
     ? unitToEx({ value: Number(verticalAlign[1]), unit: verticalAlign[2] ?? "px" })
     : 0;
   const verticalAlignEx = Number.isFinite(parsedVerticalAlignEx) ? parsedVerticalAlignEx : 0;
-  const aspectRatio = widthEx / heightEx;
+  const aspectRatio = parsedWidthEx / parsedHeightEx;
   return {
     aspectRatio: Number.isFinite(aspectRatio) && aspectRatio > 0 ? aspectRatio : fallbackRatio,
-    heightEx: Number.isFinite(heightEx) && heightEx > 0 ? heightEx : 1.8,
+    heightEx: Number.isFinite(parsedHeightEx) && parsedHeightEx > 0 ? parsedHeightEx : 1.8,
     depthEx: Math.max(0, -verticalAlignEx)
   };
 }
@@ -155,9 +160,20 @@ function assertValidMathJaxSvg(svg: string): void {
 }
 
 export function normalizeLatexForRendering(latex: string): string {
-  // Rendering must not rewrite valid TeX. In particular, changing
-  // x^1/\sqrt{y} into x^\frac{1}{\sqrt{y}} changes the exponent's meaning.
-  return latex;
+  // Rendering must not algebraically rewrite valid TeX. In particular,
+  // changing x^1/\sqrt{y} into x^\frac{1}{\sqrt{y}} changes its meaning.
+  // `\textcircled` is a presentational LaTeX command which MathJax 4 does not
+  // implement. Map its simple form to MathJax's equivalent enclosure while
+  // preserving the enclosed expression exactly.
+  return latex
+    .replace(
+      /\\text\s*\{\s*\\textcircled\s*\{([^{}]*)\}\s*\}/gu,
+      (_match, contents: string) => `\\enclose{circle}{${contents}}`
+    )
+    .replace(
+      /\\textcircled\s*\{([^{}]*)\}/gu,
+      (_match, contents: string) => `\\enclose{circle}{${contents}}`
+    );
 }
 
 function escapeAttribute(value: string): string {

@@ -16,6 +16,24 @@ describe("CLI arguments", () => {
     if (typeof options === "object") expect(options.args).toEqual(["-l"]);
   });
 
+  it("opens known document paths in reader mode", () => {
+    expect(parseArgs(["README.md"])).toMatchObject({
+      mode: "reader",
+      path: "README.md"
+    });
+    expect(parseArgs(["--read", "package.json"])).toMatchObject({
+      mode: "reader",
+      path: "package.json"
+    });
+  });
+
+  it("keeps the command separator as an explicit proxy request", () => {
+    expect(parseArgs(["--", "README.md"])).toMatchObject({
+      mode: "proxy",
+      command: "README.md"
+    });
+  });
+
   it("detects an existing TFormula proxy", () => {
     expect(isTFormulaActive({ TFORMULA_ACTIVE: "1" })).toBe(true);
     expect(isTFormulaActive({ TFORMULA_ACTIVE: "0" })).toBe(false);

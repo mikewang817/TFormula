@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   kittyDeletePlacement,
+  kittyDeletePlacementsByZIndex,
   kittyPlaceImage,
   kittyTransmitImage,
   kittyTransmitImageFile,
@@ -27,7 +28,15 @@ describe("Kitty graphics encoding", () => {
     expect(placement).toContain("c=30,r=3,C=1");
     expect(transmission).toContain("q=0");
     expect(placement).toContain("q=0");
+    const cropped = kittyPlaceImage(42, 8, 30, 5, {
+      x: 0,
+      y: 36,
+      width: 270,
+      height: 90
+    });
+    expect(cropped).toContain("c=30,r=5,x=0,y=36,w=270,h=90");
     expect(kittyDeletePlacement(42, 7)).toContain("a=d,d=i,i=42,p=7");
+    expect(kittyDeletePlacementsByZIndex()).toContain("a=d,d=z");
   });
 
   it("keeps every direct-transmission payload within the Kitty chunk limit", () => {

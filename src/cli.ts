@@ -4,17 +4,19 @@ import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { probeTerminal } from "./probe.js";
-import { runProxy } from "./proxy.js";
-import type { CliOptions } from "./types.js";
+import { looksLikeReaderPath } from "./reader-path.js";
+import type { CliOptions, ReaderCliOptions, TFormulaOptions } from "./types.js";
 
 const { version: VERSION } = createRequire(import.meta.url)("../package.json") as { version: string };
 
 const HELP = `TFormula ${VERSION}
 
-Render LaTeX produced by any terminal agent while preserving the original TUI.
+Render LaTeX from terminal agents, or read Markdown, text, and image files.
 
 Usage:
   tformula [options] [--] [command ...]
+  tformula [options] <document.md|image>
+  tformula --read <document>
   tformula --shell
 
 Examples:
@@ -22,13 +24,16 @@ Examples:
   tformula claude
   tformula -- gemini --model gemini-2.5-pro
   tformula --shell
+  tformula README.md
+  tformula assets/diagram.png
 
 Options:
   --shell                 Start the login shell (default when no command is given)
+  --read <path>           Open a Markdown, text, or image file in the reader
   --no-math               Run only as a transparent PTY proxy
   --scale <number>         Formula-to-terminal text scale, default 1.0
   --cell-size <WxH>        Override terminal cell pixels, for example 9x18
-  -C, --cwd <directory>    Child working directory
+  -C, --cwd <directory>    Child or reader working directory
   --debug                  Print diagnostics
   -h, --help               Show help
   -V, --version            Show version
@@ -46,18 +51,21 @@ export function isTFormulaActive(env: NodeJS.ProcessEnv = process.env): boolean 
   return env.TFORMULA_ACTIVE === "1";
 }
 
-export function parseArgs(argv: string[]): CliOptions | "help" | "version" {
+export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" {
   let cwd = process.cwd();
   let renderMath = true;
   let debug = false;
   let scale = Number(process.env.TFORMULA_SCALE ?? "1");
   let cellOverride: CliOptions["cellOverride"];
   let forceShell = false;
+  let readerPath: string | undefined;
+  let commandSeparator = false;
   const commandParts: string[] = [];
 
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index]!;
     if (value === "--") {
+      commandSeparator = true;
       commandParts.push(...argv.slice(index + 1));
       break;
     }
@@ -68,6 +76,7 @@ export function parseArgs(argv: string[]): CliOptions | "help" | "version" {
     if (value === "-h" || value === "--help") return "help";
     if (value === "-V" || value === "--version") return "version";
     if (value === "--shell") forceShell = true;
+    else if (value === "--read") readerPath = argv[++index] ?? fail("--read requires a file path");
     else if (value === "--no-math") renderMath = false;
     else if (value === "--debug") debug = true;
     else if (value === "--scale") scale = Number(argv[++index]);
@@ -82,10 +91,28 @@ export function parseArgs(argv: string[]): CliOptions | "help" | "version" {
 
   if (!Number.isFinite(scale) || scale < 0.5 || scale > 2) fail("--scale must be between 0.5 and 2");
   if (forceShell && commandParts.length > 0) fail("--shell cannot be combined with a command");
+  if (readerPath && (forceShell || commandParts.length > 0)) {
+    fail("--read cannot be combined with --shell or a command");
+  }
+  const implicitReaderPath = !commandSeparator && !forceShell && commandParts.length === 1
+    && looksLikeReaderPath(commandParts[0]!)
+    ? commandParts[0]
+    : undefined;
+  if (readerPath || implicitReaderPath) {
+    const reader: ReaderCliOptions = {
+      mode: "reader",
+      path: readerPath ?? implicitReaderPath!,
+      cwd,
+      debug,
+      scale,
+      cellOverride
+    };
+    return reader;
+  }
   const shell = process.env.SHELL || "/bin/zsh";
   const command = forceShell || commandParts.length === 0 ? shell : commandParts[0]!;
   const args = forceShell || commandParts.length === 0 ? ["-l"] : commandParts.slice(1);
-  return { command, args, cwd, renderMath, debug, scale, cellOverride };
+  return { mode: "proxy", command, args, cwd, renderMath, debug, scale, cellOverride };
 }
 
 async function main(): Promise<void> {
@@ -115,12 +142,11 @@ async function main(): Promise<void> {
   const { capabilities, pendingInput, startupProbePending } = await probeTerminal(
     parsed.cellOverride
   );
-  const exitCode = await runProxy(
-    parsed,
-    capabilities,
-    pendingInput,
-    startupProbePending
-  );
+  const exitCode = parsed.mode === "reader"
+    ? await import("./reader.js").then(({ runReader }) =>
+        runReader(parsed, capabilities, pendingInput, startupProbePending))
+    : await import("./proxy.js").then(({ runProxy }) =>
+        runProxy(parsed, capabilities, pendingInput, startupProbePending));
   process.exitCode = exitCode;
 }
 

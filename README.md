@@ -2,7 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Render LaTeX from **any CLI agent** directly inside your terminal.
+Render LaTeX from **any CLI agent**, or read Markdown and images directly
+inside your terminal.
 
 > **Ghostty is the recommended terminal.** TFormula is developed and tested
 > primarily with Ghostty and also works with terminals that implement the Kitty
@@ -25,13 +26,73 @@ in place without replacing the surrounding text.
 
 ![TFormula rendering Maxwell's equations in Ghostty](assets/tformula-maxwell.png)
 
-## Quick start in Ghostty
+## Markdown reader
 
-Recommended global installation. With npm 11, allow `node-pty` to run its
-native install script:
+Pass a Markdown, text, or image path instead of a command to open TFormula's
+full-screen document reader:
 
 ```sh
-npm install -g tformula --allow-scripts=node-pty
+tformula README.md
+tformula notes.txt
+tformula assets/tformula-maxwell.png
+```
+
+Known document extensions are detected automatically. Use `--read` to open
+another UTF-8 text file without making it ambiguous with a command:
+
+```sh
+tformula --read package.json
+```
+
+The reader parses Markdown into a document tree and lays it out again for the
+current terminal width. Markdown markers are hidden: headings, emphasis,
+quotes, nested lists, task items, fenced code, GFM tables, links, inline math,
+display math, and local images are displayed as document elements. Local
+PNG, JPEG, WebP, GIF, AVIF, TIFF, HEIF, and SVG files are converted to a
+terminal-ready PNG and keep their aspect ratio.
+
+The reader recognizes `$...$`, `$$...$$`, `\(...\)`, and `\[...\]` math
+delimiters, including a `$$...$$` display equation written on one line. It also
+recovers standalone `[ ... ]` blocks when their contents contain unambiguous
+TeX such as `\sum`, `\frac`, or structured subscripts, without treating normal
+Markdown brackets as formulas.
+
+Useful reader keys:
+
+| Key | Action |
+|---|---|
+| `j` / `k`, arrows | Scroll one line |
+| `Space` / `b`, Page Down / Up | Scroll one page |
+| `g` / `G` | Go to the start / end |
+| `/`, `n` / `N` | Search, then find next / previous |
+| `t` | Open the table of contents |
+| `[` / `]` | Go to the previous / next heading |
+| `+` / `-` | Zoom document images in / out |
+| `0` | Reset images to automatic fit |
+| `Tab` / `Shift-Tab`, `Enter` | Select and open a link |
+| `h` / Left | Return to the previous local document |
+| `r` | Toggle rendered and Markdown source views |
+| `q` | Quit |
+
+Relative Markdown links and `#heading` fragments open inside the reader.
+HTTP links are identified but are not launched automatically. Remote and data
+images are likewise not fetched in this first release. On a terminal without
+Kitty graphics, all text formatting remains available; formulas fall back to
+TeX and images to labeled placeholders.
+
+At 100%, each local image is automatically fitted to the document width and
+the current viewport while preserving its aspect ratio. Zoom is relative to
+that fitted size. A magnified image may span several screens; scrolling shows
+the corresponding image slice instead of hiding the image until it fits
+entirely in the viewport.
+
+## Quick start in Ghostty
+
+Recommended global installation. With npm 11, allow the native setup scripts
+used by `node-pty` and the reader's `sharp` image pipeline:
+
+```sh
+npm install -g tformula --allow-scripts=node-pty --allow-scripts=sharp
 ```
 
 Then place `tformula` before whichever agent command you already use:
@@ -230,6 +291,7 @@ ordinary prices such as `$12.50` from being rendered.
 
 ```text
 --shell                 Start the login shell
+--read <path>           Open a Markdown, text, or image file
 --no-math               Run only as a transparent PTY proxy
 --scale <number>        Formula-to-terminal text scale (0.5 to 2.0)
 --cell-size <WxH>       Override terminal cell pixels
@@ -252,7 +314,10 @@ tformula -- claude --resume
   `\href`, `\url`, and MathJax HTML/style commands, are rejected.
 - A parse or render failure leaves the original LaTeX visible.
 - On terminals without Kitty graphics support, TFormula remains a transparent
-  PTY proxy.
+  PTY proxy. The document reader retains its ANSI text layout and uses readable
+  formula and image placeholders.
+- Reader HTML is treated as text; it is not executed. Reader images are loaded
+  only from local files in this release.
 
 ## Development
 
@@ -264,7 +329,8 @@ npm run check
 
 The test suite covers delimiter inference, false-positive filtering, Unicode
 column positions, terminal response parsing, text-relative geometry, Kitty
-encoding, MathJax-to-PNG rendering, and generic command wrapping.
+encoding, MathJax-to-PNG rendering, Markdown parsing and layout, and generic
+command wrapping.
 
 For an end-to-end diagnostic, add `--debug`. A successful render reports the
 terminal cell size, source location, and generated pixel rectangle without

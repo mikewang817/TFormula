@@ -18,6 +18,9 @@ describe("MathRenderer", () => {
       .toEqual({ aspectRatio: 4, heightEx: 2.5, depthEx: 0 });
     expect(readSvgDimensions('<svg style="vertical-align: -0.5ex" width="2ex" height="1.5ex"></svg>'))
       .toEqual({ aspectRatio: 4 / 3, heightEx: 1.5, depthEx: 0.5 });
+    expect(readSvgDimensions(
+      '<svg style="vertical-align: -2ex" width="100%" height="6ex" viewBox="0 0 6000 1000"></svg>'
+    )).toEqual({ aspectRatio: 6, heightEx: 6, depthEx: 2 });
   });
 
   it("keeps complete operator expressions in inline MathJax output", async () => {
@@ -205,6 +208,19 @@ describe("MathRenderer", () => {
       expect(svg, latex).toContain("<svg");
       expect(svg, latex).not.toContain("data-mjx-error");
     }
+  });
+
+  it("renders textcircled compatibility and tagged display equations", async () => {
+    const circled = "^{(\\text{\\textcircled{=}})}";
+    expect(normalizeLatexForRendering(circled)).toBe("^{(\\enclose{circle}{=})}");
+    await expect(renderMathJaxSvg(circled, false, 160)).resolves.toContain("<svg");
+
+    const tagged = "K L (P | | Q) = \\sum_ {i = 1} ^ {n} P (x) \\log "
+      + "\\frac {P (x)}{Q (x)} \\tag {2}";
+    const svg = await renderMathJaxSvg(tagged, true, 100_000);
+    const dimensions = readSvgDimensions(svg);
+    expect(dimensions.heightEx).toBeGreaterThan(5);
+    expect(dimensions.aspectRatio).toBeGreaterThan(5);
   });
 
   it("renders a representative technical formula corpus without error glyphs", async () => {

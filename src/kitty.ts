@@ -19,6 +19,11 @@ export function kittyDeleteByZIndex(): string {
   return `${APC_START}a=d,d=Z,z=${TFORMULA_Z_INDEX},q=2${ST}`;
 }
 
+/** Delete placements at TFormula's z-index while retaining uploaded image data. */
+export function kittyDeletePlacementsByZIndex(): string {
+  return `${APC_START}a=d,d=z,z=${TFORMULA_Z_INDEX},q=2${ST}`;
+}
+
 export function kittyTransmitAndPlace(
   png: Uint8Array,
   imageId: number,
@@ -70,13 +75,27 @@ export function kittyTransmitImageFile(path: string, imageId: number): string {
 }
 
 /** Place image data that has already been uploaded to the terminal. */
+export interface KittySourceRectangle {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export function kittyPlaceImage(
   imageId: number,
   placementId: number,
   columns: number,
-  rows: number
+  rows: number,
+  source?: KittySourceRectangle
 ): string {
-  return `${APC_START}a=p,i=${imageId},p=${placementId},q=0,c=${columns},r=${rows},C=1,z=${TFORMULA_Z_INDEX}${ST}`;
+  const crop = source
+    ? `,x=${Math.max(0, Math.round(source.x))}`
+      + `,y=${Math.max(0, Math.round(source.y))}`
+      + `,w=${Math.max(1, Math.round(source.width))}`
+      + `,h=${Math.max(1, Math.round(source.height))}`
+    : "";
+  return `${APC_START}a=p,i=${imageId},p=${placementId},q=0,c=${columns},r=${rows}${crop},C=1,z=${TFORMULA_Z_INDEX}${ST}`;
 }
 
 export function cursorPosition(row: number, column: number): string {

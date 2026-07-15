@@ -55,6 +55,7 @@ export interface RenderedFormula {
 }
 
 export interface CliOptions {
+  mode: "proxy";
   command: string;
   args: string[];
   cwd: string;
@@ -63,3 +64,14 @@ export interface CliOptions {
   scale: number;
   cellOverride?: { width: number; height: number };
 }
+
+export interface ReaderCliOptions {
+  mode: "reader";
+  path: string;
+  cwd: string;
+  debug: boolean;
+  scale: number;
+  cellOverride?: { width: number; height: number };
+}
+
+export type TFormulaOptions = CliOptions | ReaderCliOptions;

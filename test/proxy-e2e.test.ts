@@ -90,14 +90,17 @@ describe("runProxy pseudo-terminal integration", () => {
       }, 5_000);
       terminal.onData((data) => {
         transcript += data;
-        if (!answered && transcript.includes(`${ESC}[16t`)) {
+        // Readiness proves the fixed startup probe window has ended and the
+        // raw-mode child is already running. A wall-clock delay here races
+        // the proxy's quarantine timer when test files execute in parallel.
+        if (!answered && transcript.includes("TFORMULA_EDGE_READY:late-startup")) {
           answered = true;
-          setTimeout(() => terminal.write(
+          terminal.write(
             `${ESC}[6;18;9t${ESC}[4;576;900t`
             + `${ESC}]10;rgb:dddd/eeee/ffff${ST}`
             + `${ESC}]11;rgb:1111/2222/3333${ST}`
             + `${ESC}[?62;4;6;22c${ESC}_Gi=2000000000;OK${ST}`
-          ), 250);
+          );
         }
       });
       terminal.onExit(({ exitCode }) => {
