@@ -2,8 +2,18 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Render LaTeX from **any CLI agent**, or read Markdown and images directly
-inside your terminal.
+Render scientific LaTeX directly inside **OpenAI Codex** and any other CLI
+agent, while keeping the terminal fully interactive.
+
+The primary TFormula workflow is intentionally this simple:
+
+```sh
+tformula codex
+```
+
+Codex continues to behave like the normal Codex CLI, but formulas in its live
+output are rendered in place instead of remaining as raw TeX. The Markdown and
+image reader is an additional mode for opening documents from the terminal.
 
 > **Ghostty is the recommended terminal.** TFormula is developed and tested
 > primarily with Ghostty and also works with terminals that implement the Kitty
@@ -18,13 +28,57 @@ visible TeX, renders it locally with MathJax, and places the result over the
 source text using the Kitty graphics protocol. The original text remains in
 the terminal buffer for copying.
 
+## Quick start: Codex in Ghostty
+
+Install TFormula globally. With npm 11, allow the native setup scripts used by
+`node-pty` and the reader's `sharp` image pipeline:
+
+```sh
+npm install -g tformula --allow-scripts=node-pty --allow-scripts=sharp
+```
+
+Then start Codex through TFormula:
+
+```sh
+tformula codex
+```
+
+That is the complete integration—there is no Codex plugin or configuration to
+install. Codex itself must already be installed and available on your `PATH`.
+
 ## See it in action
 
-This example shows a CLI agent explaining Maxwell's equations in Ghostty.
+This example shows Codex explaining Maxwell's equations in Ghostty.
 TFormula detects the LaTeX in the live terminal output and renders the equations
 in place without replacing the surrounding text.
 
-![TFormula rendering Maxwell's equations in Ghostty](assets/tformula-maxwell.png)
+![TFormula rendering Codex's Maxwell equations in Ghostty](assets/tformula-maxwell.png)
+
+## Other CLI agents
+
+The same PTY wrapper works with other terminal agents:
+
+| Agent | Command |
+|---|---|
+| OpenAI Codex | `tformula codex` |
+| Claude Code | `tformula claude` |
+| Cursor Agent | `tformula agent` |
+| Pi coding agent | `tformula pi` |
+| Gemini CLI | `tformula gemini` |
+| OpenCode | `tformula opencode` |
+| Aider | `tformula aider` |
+| Goose | `tformula goose` |
+| Qwen Code | `tformula qwen` |
+| Any other CLI agent | `tformula -- <agent-command> [args...]` |
+
+`--shell` starts an enhanced login shell, so commands launched inside that
+shell can be wrapped without creating an alias for each agent:
+
+```sh
+tformula --shell
+```
+
+Running `tformula` without arguments is equivalent to `tformula --shell`.
 
 ## Markdown reader
 
@@ -91,53 +145,6 @@ Markdown text is committed before uncached graphics, formulas are measured and
 rasterized only when they enter the viewport, and rapid key input is coalesced
 to the newest frame. An image is normalized and uploaded once; zooming and
 cross-screen scrolling reuse that terminal image with source rectangles.
-
-## Quick start in Ghostty
-
-Recommended global installation. With npm 11, allow the native setup scripts
-used by `node-pty` and the reader's `sharp` image pipeline:
-
-```sh
-npm install -g tformula --allow-scripts=node-pty --allow-scripts=sharp
-```
-
-Then place `tformula` before whichever agent command you already use:
-
-| Agent | Command |
-|---|---|
-| OpenAI Codex | `tformula codex` |
-| Claude Code | `tformula claude` |
-| Cursor Agent | `tformula agent` |
-| Pi coding agent | `tformula pi` |
-| Gemini CLI | `tformula gemini` |
-| OpenCode | `tformula opencode` |
-| Aider | `tformula aider` |
-| Goose | `tformula goose` |
-| Qwen Code | `tformula qwen` |
-| Any other CLI agent | `tformula -- <agent-command> [args...]` |
-
-The agent itself must already be installed and available on your `PATH`.
-TFormula simply wraps the command; it has no agent-specific integration.
-
-For example, start different agents with:
-
-```sh
-tformula codex
-tformula claude
-tformula agent
-tformula gemini
-tformula opencode
-tformula aider
-```
-
-`--shell` starts an enhanced login shell, so commands launched inside that shell
-can be wrapped without creating an alias for each agent:
-
-```sh
-tformula --shell
-```
-
-Running `tformula` without arguments is equivalent to `tformula --shell`.
 
 ## Requirements
 
