@@ -179,6 +179,170 @@ describe("real Codex analytical-chemistry output regression", () => {
     )).toBe(true);
   });
 
+  it("detects all six displays after repeated terminal reflow at every width", async () => {
+    const screen = new FormulaScreen({
+      cols: 160,
+      rows: 160,
+      capabilities: {
+        kittyGraphics: false,
+        foreground: "#eeeeee",
+        background: "#202030",
+        cell: { width: 9, height: 18, source: "fallback" }
+      },
+      scale: 1,
+      writeOuter: () => undefined
+    });
+    const lines = CODEX_CHEMISTRY_BLOCKS.flatMap((block, index) => [
+      `${index + 1}. analytical chemistry step`,
+      ...block.lines,
+      ""
+    ]);
+
+    try {
+      await screen.write(`\x1b[2J\x1b[H${lines.join("\r\n")}`);
+      for (const columns of [140, 112, 96, 80, 72, 64, 56, 48, 88, 128, 60, 160]) {
+        screen.resize(columns, 160);
+        const buffer = screen.terminal.buffer.active;
+        const snapshot = detectScreenFormulaRegions(
+          Array.from({ length: screen.terminal.rows }, (_, row) => {
+            const line = buffer.getLine(buffer.viewportY + row);
+            return {
+              row,
+              text: line?.translateToString(true) ?? "",
+              isWrapped: line?.isWrapped ?? false
+            };
+          }),
+          columns
+        );
+        expect(
+          snapshot.regions.map((region) => region.latex),
+          `detected formulas at ${columns} columns`
+        ).toHaveLength(CODEX_CHEMISTRY_BLOCKS.length);
+        await Promise.all(snapshot.regions.map(async (region) => {
+          await expect(
+            renderMathJaxSvg(region.latex, region.display, columns * 9, cache),
+            `MathJax formula at ${columns} columns: ${region.latex}`
+          ).resolves.toContain('data-mml-node="math"');
+        }));
+      }
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("does not exhaust retries while the six displays stream in line by line", async () => {
+    const debug: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 94,
+      rows: 100,
+      capabilities: {
+        kittyGraphics: true,
+        foreground: "#eeeeee",
+        background: "#202030",
+        cell: { width: 16, height: 34, source: "cell-query" }
+      },
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined,
+      debug: (message) => debug.push(message)
+    });
+    const lines = CODEX_CHEMISTRY_BLOCKS.flatMap((block, index) => [
+      `${index + 1}. analytical chemistry step`,
+      ...block.lines,
+      ""
+    ]);
+
+    try {
+      await screen.write("\x1b[2J\x1b[H");
+      for (const line of lines) {
+        await screen.write(`${line}\r\n`);
+        await screen.flushScan();
+      }
+      expect(debug.filter((message) => message.startsWith("formula render skipped")))
+        .toEqual([]);
+      expect(debug.filter((message) => message.includes("exceeded the render retry limit")))
+        .toEqual([]);
+      // Each completed inner environment can recover independently if a
+      // terminal Markdown renderer never emits the outer bare `]`. There are
+      // seven such environments (the mass-balance block contains two), then
+      // six final outer placements when their bracket delimiters arrive.
+      expect(debug.filter((message) => message.startsWith("rendered ")))
+        .toHaveLength(CODEX_CHEMISTRY_BLOCKS.length + 7);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("keeps all completed displays placed through a rapid Cmd-minus resize storm", async () => {
+    const output: string[] = [];
+    const debug: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 94,
+      rows: 42,
+      capabilities: {
+        kittyGraphics: true,
+        foreground: "#eeeeee",
+        background: "#202030",
+        cell: { width: 16, height: 34, source: "cell-query" }
+      },
+      scale: 1,
+      renderer,
+      writeOuter: (data) => output.push(String(data)),
+      debug: (message) => debug.push(message)
+    });
+    const lines = CODEX_CHEMISTRY_BLOCKS.flatMap((block, index) => [
+      `${index + 1}. analytical chemistry step`,
+      ...block.lines,
+      ""
+    ]);
+    const geometries = [
+      { cols: 102, rows: 46, width: 15, height: 32 },
+      { cols: 114, rows: 50, width: 13.5, height: 29 },
+      { cols: 128, rows: 54, width: 12, height: 26 },
+      { cols: 146, rows: 60, width: 10.5, height: 23 },
+      { cols: 166, rows: 66, width: 9, height: 20 }
+    ];
+
+    try {
+      await screen.write("\x1b[2J\x1b[H");
+      for (const line of lines) {
+        await screen.write(`${line}\r\n`);
+        await screen.flushScan();
+      }
+      expect(debug.filter((message) => message.startsWith("formula render skipped")))
+        .toEqual([]);
+
+      for (const geometry of geometries) {
+        output.length = 0;
+        debug.length = 0;
+        const epoch = screen.invalidateLayout();
+        screen.resize(geometry.cols, geometry.rows, epoch, true);
+        screen.updateCapabilities({
+          kittyGraphics: true,
+          foreground: "#eeeeee",
+          background: "#202030",
+          cell: {
+            width: geometry.width,
+            height: geometry.height,
+            source: "cell-query"
+          }
+        }, epoch);
+        await screen.flushScan();
+
+        const placements = output.join("").match(/\x1b_Ga=p/gu) ?? [];
+        const rendered = debug.filter((message) => message.startsWith("rendered "));
+        expect(placements.length, `placements at ${geometry.cols}x${geometry.rows}`)
+          .toBeGreaterThanOrEqual(3);
+        expect(placements, `completed renders at ${geometry.cols}x${geometry.rows}`)
+          .toHaveLength(rendered.length);
+        expect(debug.filter((message) => message.startsWith("formula render skipped")))
+          .toEqual([]);
+      }
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it.each(CODEX_CHEMISTRY_BLOCKS)(
     "renders the complete $id terminal rectangle",
     async ({ lines }) => {

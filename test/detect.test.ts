@@ -203,6 +203,57 @@ describe("detectFormulaRegions", () => {
     expect(region).toMatchObject({ latex: "E=mc^2", display: true, confidence: "inferred" });
   });
 
+  it("waits for a streamed bare bracket display to close before inferring its rows", () => {
+    const lines = [
+      "[",
+      "\\begin{aligned}",
+      "K_f'&=\\frac{[\\ce{CaY^{2-}}]}{[\\ce{Ca^{2+}}]F_Y}",
+      "=\\alpha_{\\ce{Y^{4-}}}K_f\\",
+      "&=(0.354614)(10^{10.65})",
+      "=1.5840\\times10^{10}.",
+      "\\end{aligned}",
+      "]"
+    ];
+
+    for (let length = 1; length < lines.length - 1; length += 1) {
+      expect(detectFormulaRegions(lines.slice(0, length)), `prefix of ${length} lines`)
+        .toEqual([]);
+    }
+    expect(detectFormulaRegions(lines.slice(0, -1))).toEqual([
+      expect.objectContaining({
+        startRow: 1,
+        endRow: lines.length - 2,
+        display: true,
+        confidence: "explicit"
+      })
+    ]);
+    expect(detectFormulaRegions(lines)).toEqual([
+      expect.objectContaining({
+        startRow: 0,
+        endRow: lines.length - 1,
+        display: true,
+        latex: expect.stringContaining("\\begin{aligned}")
+      })
+    ]);
+  });
+
+  it.each([
+    ["slash display", ["\\[", "\\begin{aligned}", "x&=\\frac{1}{2}"]],
+    ["dollar display", ["$$", "\\begin{aligned}", "x&=\\frac{1}{2}"]],
+    ["display environment", ["\\begin{aligned}", "x&=\\frac{1}{2}"]]
+  ])("waits for an unclosed streamed %s", (_name, lines) => {
+    expect(detectFormulaRegions(lines)).toEqual([]);
+  });
+
+  it("does not render a closed outer block around an incomplete environment", () => {
+    expect(detectFormulaRegions([
+      "[",
+      "\\begin{aligned}",
+      "x&=\\frac{1}{2}",
+      "]"
+    ])).toEqual([]);
+  });
+
   it("repairs aligned row separators stripped by terminal Markdown", () => {
     const strippedRowBreak = "\\";
     const [region] = detectFormulaRegions([

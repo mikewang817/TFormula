@@ -7,7 +7,7 @@ import type {
   ITerminalAddon,
   Terminal as XtermTerminal
 } from "@xterm/headless";
-import { containsFormulaTrigger } from "./detect.js";
+import { containsFormulaTrigger, MAX_DISPLAY_BLOCK_ROWS } from "./detect.js";
 import { MathRenderer } from "./math-renderer.js";
 import {
   cursorPosition,
@@ -40,6 +40,8 @@ interface PlacedFormula {
   latex: string;
   sourceText: string;
   fingerprint: string;
+  /** Resize generation in which this cell-addressed placement was emitted. */
+  resizeGeneration: number;
   bufferType: string;
   absoluteStartRow: number;
   absoluteEndRow: number;
@@ -390,6 +392,7 @@ export class FormulaScreen {
   #scanTimerRetryOnly = false;
   #scanVersion = 0;
   #layoutVersion = 0;
+  #resizeGeneration = 0;
   #scanning = false;
   #rescanRequested = false;
   readonly #scanWaiters: Array<() => void> = [];
@@ -840,6 +843,14 @@ export class FormulaScreen {
   }
 
   resize(cols: number, rows: number, epoch?: number, deferUntilCapabilities = false): void {
+    // A terminal may rebuild its cell grid (notably during rapid font zoom)
+    // without reporting whether Kitty placements survived. Treat every resize
+    // callback as a new placement generation. Rendered PNGs remain cached, but
+    // visible cell pins are reasserted once and a formula blocked by a stale
+    // transient snapshot receives a fresh attempt at the new geometry.
+    this.#resizeGeneration += 1;
+    this.#blockedPlacementKeys.clear();
+    this.#placementRetries.clear();
     // Reflow may dispose both xterm markers before the replacement scan can
     // match the old placement. Snapshot only currently visible placements;
     // off-screen scrollback pins must remain untouched by layout work.
@@ -1625,21 +1636,50 @@ export class FormulaScreen {
 
   #formulaSnapshot(): ReturnType<typeof detectScreenFormulaRegions> {
     const buffer = this.terminal.buffer.active;
-    const bufferLines = Array.from(
+    const viewportY = buffer.viewportY;
+    const visibleBufferLines = Array.from(
       { length: this.terminal.rows },
-      (_, row) => buffer.getLine(buffer.viewportY + row)
+      (_, row) => buffer.getLine(viewportY + row)
     );
-    const physicalLines = bufferLines.map((line, row) => ({
-      row,
-      text: line?.translateToString(true) ?? "",
+    const visibleTexts = visibleBufferLines.map((line) => line?.translateToString(true) ?? "");
+    if (!visibleTexts.some(containsFormulaTrigger)) return { regions: [], deferred: [] };
+
+    // Syntax can start just above the viewport while an Agent is streaming a
+    // long display. Include bounded read-only scrollback so rows such as `&=`
+    // are still known to belong to an unclosed `[`/`\[`/`$$`/environment.
+    // Returned coordinates remain viewport-relative and partial/off-screen
+    // regions are filtered before any Kitty placement is prepared.
+    const contextStart = Math.max(0, viewportY - MAX_DISPLAY_BLOCK_ROWS);
+    const contextRows = viewportY - contextStart;
+    const bufferLines = Array.from(
+      { length: contextRows + this.terminal.rows },
+      (_, index) => buffer.getLine(contextStart + index)
+    );
+    const physicalLines = bufferLines.map((line, index) => ({
+      row: index - contextRows,
+      text: index >= contextRows
+        ? visibleTexts[index - contextRows]!
+        : line?.translateToString(true) ?? "",
       isWrapped: line?.isWrapped ?? false
     }));
-    const nextLine = buffer.getLine(buffer.viewportY + this.terminal.rows);
+    const nextLine = buffer.getLine(viewportY + this.terminal.rows);
     const continuesAfterViewport = nextLine?.isWrapped ?? false;
-    const quickSnapshot = detectScreenFormulaRegions(
-      physicalLines,
-      this.terminal.cols,
-      continuesAfterViewport
+    const visibleSnapshot = (
+      snapshot: ReturnType<typeof detectScreenFormulaRegions>
+    ): ReturnType<typeof detectScreenFormulaRegions> => ({
+      regions: snapshot.regions.filter((region) =>
+        region.startRow >= 0 && region.endRow < this.terminal.rows
+      ),
+      deferred: snapshot.deferred.filter((region) =>
+        region.startRow >= 0 && region.endRow < this.terminal.rows
+      )
+    });
+    const quickSnapshot = visibleSnapshot(
+      detectScreenFormulaRegions(
+        physicalLines,
+        this.terminal.cols,
+        continuesAfterViewport
+      )
     );
 
     // Most TUI frames contain no formula at all. Avoid walking every xterm
@@ -1649,9 +1689,9 @@ export class FormulaScreen {
 
     const detailedRows = new Set<number>();
     const addWrappedLogicalLine = (row: number): void => {
-      let start = row;
+      let start = row + contextRows;
       while (start > 0 && physicalLines[start]!.isWrapped) start -= 1;
-      let end = row;
+      let end = row + contextRows;
       while (end + 1 < physicalLines.length && physicalLines[end + 1]!.isWrapped) end += 1;
       for (let physicalRow = start; physicalRow <= end; physicalRow += 1) {
         detailedRows.add(physicalRow);
@@ -1665,15 +1705,17 @@ export class FormulaScreen {
     const detailedLines = bufferLines.map((line, row) => {
       if (!detailedRows.has(row)) return physicalLines[row]!;
       return {
-        row,
+        row: physicalLines[row]!.row,
         ...lineTextSnapshot(line, physicalLines[row]!.text),
         isWrapped: line?.isWrapped ?? false
       };
     });
-    return detectScreenFormulaRegions(
-      detailedLines,
-      this.terminal.cols,
-      continuesAfterViewport
+    return visibleSnapshot(
+      detectScreenFormulaRegions(
+        detailedLines,
+        this.terminal.cols,
+        continuesAfterViewport
+      )
     );
   }
 
@@ -2002,6 +2044,7 @@ export class FormulaScreen {
         }
         if (replacement?.anchor === anchor
           && existing?.fingerprint === fingerprint
+          && existing.resizeGeneration === this.#resizeGeneration
           && this.#placementExactlyTracksRegion(existing, region, bufferType, viewportY)) {
           // Live markers are now authoritative at the current geometry. Do not
           // let an old resize fallback survive until those markers eventually
@@ -2176,6 +2219,7 @@ export class FormulaScreen {
             latex: region.latex,
             sourceText: this.#regionSourceText(region),
             fingerprint,
+            resizeGeneration: this.#resizeGeneration,
             bufferType: buffer.type,
             absoluteStartRow: buffer.viewportY + region.startRow,
             absoluteEndRow: buffer.viewportY + region.endRow,
