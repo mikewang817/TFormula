@@ -14,6 +14,13 @@ tformula codex
 Codex 仍然是原来的 Codex CLI，但回答中的公式会在终端中原位渲染，不再停留为
 原始 TeX。Markdown、文本和图片阅读器是用于打开本地文档的附加模式。
 
+每个成功渲染的公式也会立即变成可复用内容，不需要重新选择或输入：
+
+```sh
+tformula copy mathml       # 最近公式 -> 剪贴板
+tformula save formula.png  # 最近公式 -> 高清图片
+```
+
 > **推荐在 Ghostty 中使用。** TFormula 主要基于 Ghostty 开发和测试，也支持
 > Kitty、WezTerm 等实现了 Kitty Graphics Protocol 的终端。
 
@@ -136,6 +143,57 @@ WebP、GIF、AVIF、TIFF、HEIF 和 SVG 图片会转换为终端 PNG，并保持
 阅读器会并行执行终端探测与文档加载，先提交 Markdown 文字，再补充尚未缓存的
 图形。公式只在进入视口时测量和栅格化，快速连续按键只绘制最新一帧。每张图片
 只规范化并上传一次；缩放和跨屏滚动通过源矩形复用同一份终端图片数据。
+
+## 公式历史与导出
+
+代理会话中成功渲染的公式会保存到本地历史。同一会话中的相同公式只记录一次，
+因此终端 resize、图片传输重试和 Agent 重复输出不会产生重复条目。查看最近的公式：
+
+```sh
+tformula history
+tformula history --limit 50
+tformula history --json
+```
+
+历史列表会显示可用作导出选择器的短 ID。最直接的用法始终操作最近一个公式：
+
+```sh
+tformula copy                 # 原始 LaTeX -> 剪贴板
+tformula copy mathml          # MathML -> 剪贴板
+tformula save formula.png     # 高清 PNG
+tformula save formula.svg     # 自包含 SVG
+```
+
+目标不是最近一个公式时，指定完整 ID 或唯一的 ID 前缀：
+
+```sh
+tformula copy 12ab34cd markdown
+tformula save 12ab34cd formula.mathml
+tformula save 12ab34cd formula.png --scale 6 --color navy --background white
+```
+
+`save` 会根据文件扩展名选择格式，也可用 `--as <格式>` 覆盖。原来的 `export`
+命令继续保留，适合脚本和 stdout 管道，例如
+`tformula export --last --format html`。
+
+| 格式 | `copy` / `--as` 名称 | 输出规格 |
+|---|---|---|
+| 原始 LaTeX | `latex` | 公式源码，末尾带换行 |
+| 带分隔符 LaTeX | `latex-inline`、`latex-display` | `\(...\)` 或 `\[...\]` |
+| Markdown | `markdown` | 根据公式类型生成 `$...$` 或 `$$...$$` |
+| MathML | `mathml` | MathJax 生成的 Presentation MathML |
+| HTML | `html` | 用语义化 `span` 或 `div` 包裹 MathML |
+| SVG | `svg` | 自包含、透明背景的矢量画布 |
+| PNG | `png` | 默认 4 倍分辨率、四周 16 px、透明背景 |
+| TIFF | `tiff` | LZW 压缩的高分辨率栅格图 |
+
+视觉导出默认为黑色公式、透明背景。`--scale`、`--color`、`--background` 和
+`--padding` 可控制 SVG、PNG、TIFF。所有格式均在本地生成；Linux 的剪贴板导出
+使用 `wl-copy` 或 `xclip`。
+
+历史文件包含原始 LaTeX 明文，目录权限为 `0700`、文件权限为 `0600`。不希望
+记录时可使用 `--no-history`，已有历史可通过 `tformula history --clear` 删除。
+`TFORMULA_HISTORY_DIR` 可以覆盖默认历史目录。
 
 ## 环境要求
 
@@ -297,6 +355,7 @@ $ ... $
 --shell                 启动登录 Shell
 --read <path>           打开 Markdown、文本或图片文件
 --no-math               仅作为透明 PTY 代理，不渲染公式
+--no-history            不保存成功渲染的公式历史
 --scale <number>        公式相对终端文字的比例，范围 0.5～2.0
 --cell-size <WxH>       手动指定终端单元格像素尺寸
 -C, --cwd <directory>  指定 Agent 的工作目录

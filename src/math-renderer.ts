@@ -11,6 +11,7 @@ import { FormulaCache, formulaCacheKey, sharedFormulaCache } from "./formula-cac
 
 interface MathJaxApi {
   init(config: Record<string, unknown>): Promise<MathJaxApi>;
+  tex2mmlPromise(tex: string, options: Record<string, unknown>): Promise<string>;
   tex2svgPromise(tex: string, options: Record<string, unknown>): Promise<unknown>;
   startup: {
     adaptor: {
@@ -437,6 +438,21 @@ export async function renderMathJaxSvg(
     assertValidMathJaxSvg(repaired);
     return repaired;
   }
+}
+
+export async function renderMathJaxMathMl(
+  latex: string,
+  display: boolean
+): Promise<string> {
+  const source = safeLatex(normalizeLatexForRendering(latex));
+  const mathJax = await getMathJax();
+  const mathml = await mathJax.tex2mmlPromise(source, { display });
+  if (typeof mathml !== "string"
+    || !/^<math\b/iu.test(mathml)
+    || /<merror\b|\bdata-mjx-error\s*=/iu.test(mathml)) {
+    throw new Error("MathJax could not convert the formula to MathML");
+  }
+  return mathml;
 }
 
 export class MathRenderer {

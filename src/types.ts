@@ -57,15 +57,67 @@ export interface RenderedFormula {
   naturalHeightEx: number;
 }
 
+export interface FormulaRenderedEvent {
+  latex: string;
+  display: boolean;
+  confidence: FormulaRegion["confidence"];
+}
+
 export interface CliOptions {
   mode: "proxy";
   command: string;
   args: string[];
   cwd: string;
   renderMath: boolean;
+  recordHistory: boolean;
   debug: boolean;
   scale: number;
   cellOverride?: { width: number; height: number };
+}
+
+export interface HistoryCliOptions {
+  mode: "history";
+  limit: number;
+  json: boolean;
+  clear: boolean;
+  debug: boolean;
+}
+
+export type FormulaExportFormat =
+  | "latex"
+  | "latex-inline"
+  | "latex-display"
+  | "markdown"
+  | "mathml"
+  | "html"
+  | "svg"
+  | "png"
+  | "tiff";
+
+export interface FormulaExportOptions {
+  format: FormulaExportFormat;
+  /** Output scale relative to MathJax's natural 8 px/ex size. */
+  scale?: number;
+  /** CSS color used by vector and raster output. */
+  color?: string;
+  /** Optional CSS canvas color. Omit or use transparent for an alpha canvas. */
+  background?: string;
+  /** Canvas padding in output pixels, applied after scale. */
+  padding?: number;
+}
+
+export interface ExportCliOptions extends FormulaExportOptions {
+  mode: "export";
+  selector: string;
+  output?: string;
+  cwd: string;
+  debug: boolean;
+}
+
+export interface CopyCliOptions extends FormulaExportOptions {
+  mode: "copy";
+  selector: string;
+  debug: boolean;
 }
 
 export interface ReaderCliOptions {
@@ -77,4 +129,9 @@ export interface ReaderCliOptions {
   cellOverride?: { width: number; height: number };
 }
 
-export type TFormulaOptions = CliOptions | ReaderCliOptions;
+export type TFormulaOptions =
+  | CliOptions
+  | ReaderCliOptions
+  | HistoryCliOptions
+  | ExportCliOptions
+  | CopyCliOptions;

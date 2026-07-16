@@ -83,6 +83,32 @@ class CapturingMathRenderer extends FastMathRenderer {
 }
 
 describe("FormulaScreen lifecycle", () => {
+  it("reports a formula once after its first successful placement", async () => {
+    const rendered: Array<{ latex: string; display: boolean; confidence: string }> = [];
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer: new FastMathRenderer(),
+      writeOuter: () => undefined,
+      onFormulaRendered: (event) => rendered.push(event)
+    });
+    try {
+      await screen.write("$$E=mc^2$$");
+      await screen.flushScan();
+      await screen.flushScan();
+
+      expect(rendered).toEqual([{
+        latex: "E=mc^2",
+        display: true,
+        confidence: "explicit"
+      }]);
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it("enables checkpoint bypass only for a stable trigger-free viewport", async () => {
     const screen = new FormulaScreen({
       cols: 40,

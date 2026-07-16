@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as pty from "node-pty";
@@ -249,7 +249,9 @@ describe("runProxy pseudo-terminal integration", () => {
     delayedRuntimeProbe
   }) => {
     const cacheRoot = mkdtempSync(join(tmpdir(), "tformula-proxy-e2e-cache-"));
+    const historyRoot = mkdtempSync(join(tmpdir(), "tformula-proxy-e2e-history-"));
     temporaryRoots.push(cacheRoot);
+    temporaryRoots.push(historyRoot);
     const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
     const fixture = join(process.cwd(), "test", "fixtures", "proxy-agent.mjs");
     const environment = Object.fromEntries(
@@ -260,6 +262,7 @@ describe("runProxy pseudo-terminal integration", () => {
       TERM_PROGRAM: "ghostty",
       COLORTERM: "truecolor",
       TFORMULA_CACHE_DIR: cacheRoot,
+      TFORMULA_HISTORY_DIR: historyRoot,
       FORCE_COLOR: "0"
     });
     for (const name of [
@@ -547,5 +550,20 @@ describe("runProxy pseudo-terminal integration", () => {
     expect(occurrences(transcript, `${ESC}[16t`)).toBeGreaterThan(1);
     expect(occurrences(transcript, `${ESC}[14t`)).toBeGreaterThan(1);
     expect(transcript).not.toContain("tformula: terminal output failed");
+
+    const historyEntries = readdirSync(historyRoot)
+      .filter((name) => name.endsWith(".jsonl"))
+      .flatMap((name) => readFileSync(join(historyRoot, name), "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { latex: string }));
+    // History is a per-session collection of unique formulas. Repeated source
+    // output, graphics retries, and the resize storm must all collapse to the
+    // same entry without losing a genuinely different formula.
+    expect(historyEntries.map(({ latex }) => latex)).toEqual([
+      String.raw`\nabla \cdot \mathbf{E}=\frac{\rho}{\varepsilon_0}`,
+      String.raw`\nabla \times \mathbf{B}=\mu_0\mathbf{J}+\mu_0\varepsilon_0\frac{\partial \mathbf{E}}{\partial t}`
+    ]);
   }, 35_000);
 });

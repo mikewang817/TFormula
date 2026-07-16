@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import * as pty from "node-pty";
 import { containsFormulaTrigger } from "./detect.js";
+import { FormulaHistoryStore } from "./formula-history.js";
 import { FormulaScreen } from "./screen.js";
 import {
   isGhosttyTerminal,
@@ -95,6 +96,15 @@ export async function runProxy(
       }
     }
   };
+  const formulaHistory = options.renderMath && options.recordHistory
+    ? new FormulaHistoryStore({
+        // Arguments can contain API tokens or private prompts. Keep only the
+        // executable name in persistent history metadata.
+        command: [options.command],
+        cwd: options.cwd,
+        debug
+      })
+    : undefined;
   const writeOuter = (data: string | Uint8Array): void => {
     terminalWriter.enqueue(data);
   };
@@ -107,6 +117,9 @@ export async function runProxy(
         writeOuter,
         writeGraphics: (create) => terminalWriter.writeGenerated(create),
         debug,
+        onFormulaRendered: formulaHistory
+          ? (event) => formulaHistory.record(event)
+          : undefined,
         transmitImage: imageTransmitter?.transmit,
         // A delayed explicit Kitty ACK can safely enable graphics shortly
         // after startup. Ghostty's ED2 rewrite policy must already be active
@@ -566,7 +579,7 @@ export async function runProxy(
   process.on("SIGWINCH", onResize);
 
   if (pendingInput) child.write(pendingInput);
-  debug(`started ${options.command}; math=${Boolean(screen && capabilities.kittyGraphics)}; image=${imageTransmitter?.mode ?? "disabled"}; cell=${capabilities.cell.width.toFixed(2)}x${capabilities.cell.height.toFixed(2)}px`);
+  debug(`started ${options.command}; math=${Boolean(screen && capabilities.kittyGraphics)}; image=${imageTransmitter?.mode ?? "disabled"}; history=${formulaHistory ? "enabled" : "disabled"}; cell=${capabilities.cell.width.toFixed(2)}x${capabilities.cell.height.toFixed(2)}px`);
 
   return await new Promise<number>((resolve) => {
     child.onExit(({ exitCode, signal }) => {
@@ -603,6 +616,7 @@ export async function runProxy(
         let finalExitCode = signal ? 128 + signal : exitCode;
         try {
           await screen?.flushScan();
+          await formulaHistory?.flush();
           if (responseTailTimer) clearTimeout(responseTailTimer);
           responseTailTimer = undefined;
           const outputTail = outputTransformer.flush();

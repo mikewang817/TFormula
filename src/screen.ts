@@ -21,7 +21,11 @@ import {
   TFORMULA_IMAGE_ID_MIN
 } from "./kitty.js";
 import { detectScreenFormulaRegions } from "./screen-text.js";
-import type { FormulaRegion, TerminalCapabilities } from "./types.js";
+import type {
+  FormulaRegion,
+  FormulaRenderedEvent,
+  TerminalCapabilities
+} from "./types.js";
 
 const { Terminal } = createRequire(import.meta.url)("@xterm/headless") as {
   Terminal: typeof XtermTerminal;
@@ -379,6 +383,7 @@ export class FormulaScreen {
     create: () => string | Uint8Array | undefined
   ) => Promise<boolean>;
   readonly #debug: (message: string) => void;
+  readonly #onFormulaRendered?: (event: FormulaRenderedEvent) => void;
   readonly #preserveImagesOnClear: boolean;
   readonly #maxTerminalImages: number;
   readonly #maxDetachedPlacements: number;
@@ -426,6 +431,7 @@ export class FormulaScreen {
       create: () => string | Uint8Array | undefined
     ) => Promise<boolean>;
     debug?: (message: string) => void;
+    onFormulaRendered?: (event: FormulaRenderedEvent) => void;
     renderer?: MathRenderer;
     transmitImage?: (png: Uint8Array, imageId: number) => string;
     preserveImagesOnClear?: boolean;
@@ -454,6 +460,7 @@ export class FormulaScreen {
     this.#writeOuter = options.writeOuter;
     this.#writeGraphics = options.writeGraphics;
     this.#debug = options.debug ?? (() => undefined);
+    this.#onFormulaRendered = options.onFormulaRendered;
     this.#preserveImagesOnClear = options.preserveImagesOnClear ?? false;
     this.#maxTerminalImages = Math.max(
       1,
@@ -2038,6 +2045,7 @@ export class FormulaScreen {
           replacement = undefined;
           existing = undefined;
         }
+        const reportNewOccurrence = !replacement;
         if (replacement) {
           claimedReplacementAnchors.add(replacement.anchor);
           retainedReplacementAnchors.add(replacement.anchor);
@@ -2227,6 +2235,19 @@ export class FormulaScreen {
           });
           this.#evictIdleTerminalImages();
           this.#debug(`rendered ${region.confidence} formula at ${anchor} (${rendered.widthPx}x${rendered.heightPx}px)`);
+          if (reportNewOccurrence && this.#onFormulaRendered) {
+            try {
+              this.#onFormulaRendered({
+                latex: region.latex,
+                display: region.display,
+                confidence: region.confidence
+              });
+            } catch (error) {
+              this.#debug(
+                `formula history callback failed: ${error instanceof Error ? error.message : String(error)}`
+              );
+            }
+          }
         } catch (error) {
           this.#debug(`formula render skipped: ${error instanceof Error ? error.message : String(error)}`);
           // The old placement is the last known-good rendering of this exact
