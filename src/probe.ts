@@ -18,8 +18,10 @@ interface ParsedResponses {
 // positive image id. Keep it adjacent to (but outside) TFormula's allocatable
 // range so it can never collide with a real cached formula image.
 export const KITTY_QUERY_IMAGE_ID = 2_000_000_000;
-/** Safety fallback; the tagged Kitty reply normally ends quarantine earlier. */
+/** Grace period after child output; the tagged Kitty reply normally ends it earlier. */
 export const STARTUP_PROBE_QUARANTINE_MS = 1_000;
+/** Hard bound for a silent or unusually slow-starting wrapped child. */
+export const STARTUP_PROBE_MAX_WAIT_MS = 5_000;
 // Keep the tagged Kitty response last. It is the only startup response that
 // carries our generation id, so putting DA before it makes the Kitty ACK an
 // actual ordering barrier for every untagged CSI/OSC response.

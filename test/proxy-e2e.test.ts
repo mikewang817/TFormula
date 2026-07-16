@@ -71,7 +71,8 @@ describe("runProxy pseudo-terminal integration", () => {
       ...process.env,
       TERM: "xterm-ghostty",
       TERM_PROGRAM: "ghostty",
-      TFORMULA_EDGE_MODE: "late-startup"
+      TFORMULA_EDGE_MODE: "late-startup",
+      TFORMULA_EDGE_READY_DELAY_MS: "1200"
     } as Record<string, string>;
     delete environment.TFORMULA_ACTIVE;
     let transcript = "";
@@ -90,9 +91,9 @@ describe("runProxy pseudo-terminal integration", () => {
       }, 5_000);
       terminal.onData((data) => {
         transcript += data;
-        // Readiness proves the fixed startup probe window has ended and the
-        // raw-mode child is already running. A wall-clock delay here races
-        // the proxy's quarantine timer when test files execute in parallel.
+        // The fixture deliberately starts emitting after the original fixed
+        // quarantine window. Reply immediately once its raw input listener is
+        // observably active.
         if (!answered && transcript.includes("TFORMULA_EDGE_READY:late-startup")) {
           answered = true;
           terminal.write(

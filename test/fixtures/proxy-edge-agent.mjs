@@ -9,6 +9,11 @@ process.stdin.on("data", (chunk) => {
 });
 
 const mode = process.env.TFORMULA_EDGE_MODE;
+if (mode === "late-startup") {
+  // Model a CLI whose module loading is delayed by CPU contention. Startup
+  // reply quarantine must not expire before the child emits its first byte.
+  await delay(Number(process.env.TFORMULA_EDGE_READY_DELAY_MS ?? 0));
+}
 process.stdout.write(`TFORMULA_EDGE_READY:${mode}\n`);
 if (mode === "idle-pending-resize") {
   // Keep the cursor line separate from the readiness sentinel. OSC title

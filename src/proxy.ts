@@ -21,6 +21,7 @@ import {
   parseTerminalResponses,
   runtimeProbeBarrier,
   runtimeProbeQueryId,
+  STARTUP_PROBE_MAX_WAIT_MS,
   STARTUP_PROBE_QUARANTINE_MS,
   TerminalProbeResponseFilter
 } from "./probe.js";
@@ -68,6 +69,7 @@ export async function runProxy(
   let startupProbeQuarantine = startupProbePending;
   let startupProbeTimer: NodeJS.Timeout | undefined;
   let startupProbeCapture = "";
+  let startupProbeSawChildOutput = false;
   let responseTailTimer: NodeJS.Timeout | undefined;
   let latestLayoutEpoch = 0;
   let exiting = false;
@@ -206,6 +208,21 @@ export async function runProxy(
       debug(`accepted delayed startup Kitty capability; cell ${nextCell.width.toFixed(2)}x${nextCell.height.toFixed(2)}px`);
     }
     startRequestedProbe();
+  };
+
+  const observeFirstChildOutput = (): void => {
+    if (!startupProbeQuarantine || startupProbeSawChildOutput) return;
+    startupProbeSawChildOutput = true;
+    if (startupProbeTimer) clearTimeout(startupProbeTimer);
+    // Child startup time is unrelated to terminal reply latency. Begin the
+    // ordinary grace window only when the wrapped CLI has actually become
+    // observable; otherwise CPU contention can consume it before the Agent
+    // is ready and leak late startup replies into its raw stdin.
+    startupProbeTimer = setTimeout(
+      finishStartupProbeQuarantine,
+      STARTUP_PROBE_QUARANTINE_MS
+    );
+    debug(`startup probe quarantine armed for ${STARTUP_PROBE_QUARANTINE_MS}ms after child output`);
   };
 
   const quarantineTimedOutProbe = (queryId: number): void => {
@@ -348,7 +365,10 @@ export async function runProxy(
   });
 
   if (startupProbeQuarantine) {
-    startupProbeTimer = setTimeout(finishStartupProbeQuarantine, STARTUP_PROBE_QUARANTINE_MS);
+    startupProbeTimer = setTimeout(
+      finishStartupProbeQuarantine,
+      STARTUP_PROBE_MAX_WAIT_MS
+    );
   }
 
   const previousRaw = process.stdin.isRaw;
@@ -540,6 +560,7 @@ export async function runProxy(
   };
 
   child.onData((data) => {
+    observeFirstChildOutput();
     if (!screen) {
       // --no-math is a byte-transparent PTY proxy: it has no graphics or
       // runtime probe transaction that could interleave with child controls.
