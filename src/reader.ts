@@ -44,7 +44,7 @@ import {
 import { ReaderFileWatcher, readerWatchPaths } from "./reader-watch.js";
 import { TerminalResponseFilter } from "./terminal-responses.js";
 import { TerminalWriter } from "./terminal-writer.js";
-import type { FormulaRegion, ReaderCliOptions, TerminalCapabilities } from "./types.js";
+import type { ReaderCliOptions, TerminalCapabilities } from "./types.js";
 import stringWidth from "string-width";
 
 const ESC = "\x1b";
@@ -600,21 +600,33 @@ class TerminalReader {
       };
     }
 
-    const region: FormulaRegion = {
-      startRow: 0,
-      endRow: placement.rows - 1,
-      startCol: 0,
-      endCol: placement.columns,
-      latex: placement.asset.latex,
-      display: placement.asset.display,
-      confidence: "explicit",
-      compact: !placement.asset.display
-    };
     const renderer = await this.#loadMathRenderer();
-    const rendered = await renderer.render(
-      region,
-      placement.columns,
-      placement.rows,
+    const rendered = await renderer.renderPlacement(
+      {
+        formula: {
+          source: {
+            startRow: 0,
+            endRow: placement.rows - 1,
+            startCol: 0,
+            endCol: placement.columns
+          },
+          latex: placement.asset.latex,
+          intent: placement.asset.display ? "display" : "inline",
+          confidence: "explicit",
+          ...(!placement.asset.display ? { compact: true } : {})
+        },
+        canvas: {
+          startRow: 0,
+          endRow: placement.rows - 1,
+          startCol: 0,
+          endCol: placement.columns
+        },
+        sourceMasks: [],
+        formulaSlices: [],
+        mode: placement.asset.display ? "source" : "compact",
+        estimatedQuality: 100,
+        composite: false
+      },
       this.capabilities,
       this.options.scale
     );

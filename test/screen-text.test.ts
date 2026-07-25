@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  detectScreenFormulaRegions,
-  screenTextInternals
-} from "../src/screen-text.js";
+  estimateFormulaCanvasRows,
+  scoreFormulaCanvasCandidate
+} from "../src/formula-layout.js";
+import { detectAndPlan, detectScreenFormulaRegions } from "./mapped-formula-compat.js";
+import { screenTextInternals } from "../src/screen-text.js";
 
 describe("soft-wrapped terminal formula detection", () => {
   it("indexes ASCII directly and never splits Unicode grapheme clusters", () => {
@@ -78,16 +80,119 @@ describe("soft-wrapped terminal formula detection", () => {
   });
 
   it("centers an unwrapped standalone display across the terminal width", () => {
+    const source = "$$\\frac{1}{x}$$";
     const snapshot = detectScreenFormulaRegions([
-      { row: 0, text: "$$\\frac{1}{x}$$", isWrapped: false },
+      { row: 0, text: source, isWrapped: false },
       { row: 1, text: "description", isWrapped: false }
     ], 80);
     expect(snapshot.regions).toEqual([expect.objectContaining({
       startRow: 0,
       endRow: 0,
       startCol: 0,
-      endCol: 80
+      endCol: 80,
+      standalone: true,
+      sourceSegments: [
+        { rowOffset: 0, startCol: 0, endCol: source.length, logicalStartCol: 0 }
+      ]
     })]);
+    expect(snapshot.regions[0]?.canvasMode).toBeUndefined();
+    expect(snapshot.regions[0]?.estimatedQuality).toBeUndefined();
+    expect(snapshot.formulas).toEqual([{
+      formula: expect.objectContaining({
+        latex: "\\frac{1}{x}",
+        intent: "display"
+      }),
+      source: { startRow: 0, endRow: 0, startCol: 0, endCol: source.length },
+      sourceSegments: [
+        { rowOffset: 0, startCol: 0, endCol: source.length, logicalStartCol: 0 }
+      ],
+      formulaSlices: [],
+      fullWidth: true,
+      composite: false
+    }]);
+  });
+
+  it("separates a standalone display source mask from borrowed blank rows", () => {
+    const source = "$$\\frac{a+b}{c+d}$$";
+    const snapshot = detectAndPlan([
+      { row: 0, text: "", isWrapped: false },
+      { row: 1, text: source, isWrapped: false },
+      { row: 2, text: "", isWrapped: false },
+      { row: 3, text: "description", isWrapped: false }
+    ], 80);
+
+    expect(snapshot.regions).toEqual([expect.objectContaining({
+      startRow: 0,
+      endRow: 2,
+      startCol: 0,
+      endCol: 80,
+      standalone: true,
+      canvasMode: "borrowed-both",
+      sourceSegments: [
+        { rowOffset: 1, startCol: 0, endCol: source.length, logicalStartCol: 0 }
+      ]
+    })]);
+  });
+
+  it("keeps a simple standalone equation on its source row despite nearby blanks", () => {
+    const snapshot = detectAndPlan([
+      { row: 0, text: "", isWrapped: false },
+      { row: 1, text: "$$E=mc^2$$", isWrapped: false },
+      { row: 2, text: "", isWrapped: false }
+    ], 80);
+
+    expect(snapshot.regions[0]).toMatchObject({
+      startRow: 1,
+      endRow: 1,
+      canvasMode: "source"
+    });
+  });
+
+  it("scores readability before borrowed-row and displacement costs", () => {
+    const compact = scoreFormulaCanvasCandidate({
+      rows: 1,
+      requiredRows: 3,
+      borrowedRows: 0,
+      centerShift: 0
+    });
+    const expanded = scoreFormulaCanvasCandidate({
+      rows: 3,
+      requiredRows: 3,
+      borrowedRows: 2,
+      centerShift: 0
+    });
+
+    expect(expanded.score).toBeGreaterThan(compact.score);
+    expect(estimateFormulaCanvasRows("E=mc^2")).toBe(1);
+    expect(estimateFormulaCanvasRows("\\frac{a}{b}")).toBe(2);
+    expect(estimateFormulaCanvasRows(
+      "\\begin{aligned}a&=b\\\\c&=d\\\\e&=f\\end{aligned}"
+    )).toBe(3);
+  });
+
+  it("does not lend a blank row shared by two standalone displays", () => {
+    const snapshot = detectAndPlan([
+      { row: 0, text: "$$\\frac{1}{x}$$", isWrapped: false },
+      { row: 1, text: "", isWrapped: false },
+      { row: 2, text: "$$\\frac{1}{y}$$", isWrapped: false }
+    ], 80);
+
+    expect(snapshot.regions.map((region) => [region.startRow, region.endRow]))
+      .toEqual([[0, 0], [2, 2]]);
+  });
+
+  it("does not expand a display delimiter embedded in prose", () => {
+    const snapshot = detectScreenFormulaRegions([
+      { row: 0, text: "", isWrapped: false },
+      { row: 1, text: "before $$x=1$$ after", isWrapped: false },
+      { row: 2, text: "", isWrapped: false }
+    ], 80);
+
+    expect(snapshot.regions).toEqual([expect.objectContaining({
+      startRow: 1,
+      endRow: 1
+    })]);
+    expect(snapshot.regions[0]?.standalone).toBeUndefined();
   });
 
   it("protects a logical line truncated at a viewport boundary", () => {
@@ -133,18 +238,20 @@ describe("soft-wrapped terminal formula detection", () => {
     })]);
   });
 
-  it("keeps a borrowed blank row without treating it as a wrapped formula", () => {
-    const snapshot = detectScreenFormulaRegions([
+  it("lets layout borrow a blank row for a tall trailing inline formula", () => {
+    const snapshot = detectAndPlan([
       { row: 0, text: "This is a deliberately long prefix before the tr", isWrapped: false },
-      { row: 1, text: "ailing formula \\(x_i^2\\)", isWrapped: true },
+      { row: 1, text: "ailing formula \\(\\frac{1}{2}\\)", isWrapped: true },
       { row: 2, text: "", isWrapped: false }
     ], 50);
     expect(snapshot.deferred).toEqual([]);
     expect(snapshot.regions).toEqual([expect.objectContaining({
       startRow: 1,
       endRow: 2,
-      latex: "x_i^2",
-      compact: true
+      latex: "\\frac{1}{2}",
+      compact: true,
+      canvasMode: "borrowed-below",
+      sourceSegments: [expect.objectContaining({ rowOffset: 0, startCol: 0 })]
     })]);
   });
 

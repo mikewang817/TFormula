@@ -33,18 +33,21 @@ describe("scientific formula terminal geometry", () => {
     rows
   }) => {
     const formula = SCIENTIFIC_FORMULA_CORPUS.find((candidate) => candidate.id === id)!;
-    const rendered = await renderer.render(
+    const rendered = await renderer.renderPlacement(
       {
-        startRow: 0,
-        endRow: rows - 1,
-        startCol: 0,
-        endCol: columns,
-        latex: formula.latex,
-        display: formula.display ?? false,
-        confidence: "explicit"
+        formula: {
+          source: { startRow: 0, endRow: rows - 1, startCol: 0, endCol: columns },
+          latex: formula.latex,
+          intent: formula.display ? "display" : "inline",
+          confidence: "explicit"
+        },
+        canvas: { startRow: 0, endRow: rows - 1, startCol: 0, endCol: columns },
+        sourceMasks: [],
+        formulaSlices: [],
+        mode: "source",
+        estimatedQuality: 100,
+        composite: false
       },
-      columns,
-      rows,
       {
         kittyGraphics: true,
         foreground: "#eeeeee",

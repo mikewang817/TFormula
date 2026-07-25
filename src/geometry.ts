@@ -17,6 +17,8 @@ export interface FormulaGeometry {
   canvasHeight: number;
   formulaWidth: number;
   formulaHeight: number;
+  /** Fraction of MathJax's requested natural size retained after fitting. */
+  fitScale: number;
   offsetX: number;
   offsetY: number;
 }
@@ -33,10 +35,11 @@ export function calculateFormulaGeometry(input: FormulaGeometryInput): FormulaGe
   const naturalHeight = Math.max(1, input.naturalHeightEx * exPx);
   const naturalWidth = Math.max(1, naturalHeight * input.aspectRatio);
   const horizontalPadding = input.display ? input.cell.width : Math.min(2, input.cell.width * 0.15);
-  // A multi-row display region already has whitespace reserved by the TUI.
-  // Use its full height so tall fractions keep the same glyph scale as simple
-  // equations. Inline formulas retain padding for adjacent terminal text.
-  const verticalPadding = input.display && input.rows > 1
+  // A display region is whitespace reserved by the TUI, even when the source
+  // only spanned a single row. Use its full height so tall fractions keep the
+  // same glyph scale as simple equations. Inline formulas retain padding for
+  // adjacent terminal text.
+  const verticalPadding = input.display
     ? 0
     : Math.max(1, input.cell.height * 0.08);
   const availableWidth = Math.max(1, canvasWidth - horizontalPadding * 2);
@@ -61,6 +64,7 @@ export function calculateFormulaGeometry(input: FormulaGeometryInput): FormulaGe
     canvasHeight,
     formulaWidth,
     formulaHeight,
+    fitScale: fit,
     offsetX: input.leftAlign
       ? Math.round(horizontalPadding)
       : Math.round((canvasWidth - formulaWidth) / 2),

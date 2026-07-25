@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "agent": "claude",
+  "provenance": {
+    "kind": "pending",
+    "note": "Requires an authorized, anonymized Claude Code terminal capture containing formulas near its input or status UI."
+  }
+}

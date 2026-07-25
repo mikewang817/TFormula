@@ -3,12 +3,36 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { isTFormulaActive, parseArgs } from "../src/cli.js";
+import { isTFormulaActive, parseArgs, parseFocusKey } from "../src/cli.js";
 
 describe("CLI arguments", () => {
   it("wraps any command without agent-specific knowledge", () => {
     const options = parseArgs(["--scale", "1.1", "--", "claude", "--resume"]);
     expect(options).toMatchObject({ command: "claude", args: ["--resume"], scale: 1.1 });
+  });
+
+  it("configures the minimum readable fitted scale", () => {
+    expect(parseArgs(["--min-readable-scale", "0.6", "codex"])).toMatchObject({
+      mode: "proxy",
+      minReadableScale: 0.6
+    });
+  });
+
+  it("configures the background formula stability delay", () => {
+    expect(parseArgs(["--stability-ms", "125", "codex"])).toMatchObject({
+      mode: "proxy",
+      stabilityMs: 125
+    });
+  });
+
+  it("configures a single-character formula focus prefix", () => {
+    expect(parseFocusKey("ctrl-]")).toBe("\x1d");
+    expect(parseFocusKey("none")).toBe("");
+    expect(parseArgs(["--focus-key", "ctrl-f", "codex"])).toMatchObject({
+      mode: "proxy",
+      focusKey: "\x06"
+    });
+    expect(parseArgs(["codex"])).toMatchObject({ focusKey: "\x1d" });
   });
 
   it("starts a login shell by default", () => {

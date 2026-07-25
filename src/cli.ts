@@ -50,6 +50,9 @@ Options:
   --no-math               Run only as a transparent PTY proxy
   --no-history            Do not persist successfully rendered formulas
   --scale <number>         Formula-to-terminal text scale, default 1.0
+  --min-readable-scale <n> Keep raw TeX below this fitted ratio, default 0.4
+  --stability-ms <number>  Background formula quiet period, default 80 ms
+  --focus-key <key>        Focus latest formula, default ctrl-] (or none)
   --cell-size <WxH>        Override terminal cell pixels, for example 9x18
   -C, --cwd <directory>    Child or reader working directory
   --debug                  Print diagnostics
@@ -71,6 +74,15 @@ natural MathJax proportions and are only reduced when they do not fit.
 function fail(message: string): never {
   process.stderr.write(`tformula: ${message}\n`);
   process.exit(2);
+}
+
+export function parseFocusKey(raw: string): string {
+  const normalized = raw.toLowerCase();
+  if (normalized === "none" || normalized === "off") return "";
+  const control = normalized.match(/^ctrl-(.)$/u);
+  if (control) return String.fromCharCode(control[1]!.toUpperCase().charCodeAt(0) & 0x1f);
+  if ([...raw].length === 1) return raw;
+  return fail("--focus-key must be one character, ctrl-X, or none");
 }
 
 export function isTFormulaActive(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -271,6 +283,9 @@ export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" 
   let recordHistory = true;
   let debug = false;
   let scale = Number(process.env.TFORMULA_SCALE ?? "1");
+  let minReadableScale = Number(process.env.TFORMULA_MIN_READABLE_SCALE ?? "0.4");
+  let stabilityMs = Number(process.env.TFORMULA_STABILITY_MS ?? "80");
+  let focusKey = parseFocusKey(process.env.TFORMULA_FOCUS_KEY ?? "ctrl-]");
   let cellOverride: CliOptions["cellOverride"];
   let forceShell = false;
   let readerPath: string | undefined;
@@ -296,6 +311,11 @@ export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" 
     else if (value === "--no-history") recordHistory = false;
     else if (value === "--debug") debug = true;
     else if (value === "--scale") scale = Number(argv[++index]);
+    else if (value === "--min-readable-scale") minReadableScale = Number(argv[++index]);
+    else if (value === "--stability-ms") stabilityMs = Number(argv[++index]);
+    else if (value === "--focus-key") {
+      focusKey = parseFocusKey(argv[++index] ?? fail("--focus-key requires a key"));
+    }
     else if (value === "-C" || value === "--cwd") cwd = argv[++index] ?? fail(`${value} requires a directory`);
     else if (value === "--cell-size") {
       const raw = argv[++index] ?? fail("--cell-size requires WIDTHxHEIGHT");
@@ -306,6 +326,13 @@ export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" 
   }
 
   if (!Number.isFinite(scale) || scale < 0.5 || scale > 2) fail("--scale must be between 0.5 and 2");
+  if (!Number.isFinite(minReadableScale) || minReadableScale < 0 || minReadableScale > 1) {
+    fail("--min-readable-scale must be between 0 and 1");
+  }
+  if (!Number.isFinite(stabilityMs) || stabilityMs < 0 || stabilityMs > 2_000) {
+    fail("--stability-ms must be between 0 and 2000");
+  }
+  stabilityMs = Math.floor(stabilityMs);
   if (forceShell && commandParts.length > 0) fail("--shell cannot be combined with a command");
   if (readerPath && (forceShell || commandParts.length > 0)) {
     fail("--read cannot be combined with --shell or a command");
@@ -337,6 +364,9 @@ export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" 
     recordHistory,
     debug,
     scale,
+    minReadableScale,
+    stabilityMs,
+    focusKey,
     cellOverride
   };
 }

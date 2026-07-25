@@ -13,7 +13,7 @@ export interface TerminalCapabilities {
 }
 
 export interface FormulaWrapSegment {
-  /** Physical row offset from FormulaRegion.startRow. */
+  /** Physical row offset from the owning source/canvas start row. */
   rowOffset: number;
   /** Destination columns occupied by source TeX on this physical row. */
   startCol: number;
@@ -22,26 +22,79 @@ export interface FormulaWrapSegment {
   logicalStartCol: number;
 }
 
-export interface FormulaRegion {
+export type FormulaIntent = "inline" | "display" | "embedded-display";
+
+export interface FormulaSourceRange {
   startRow: number;
   endRow: number;
   startCol: number;
   endCol: number;
+}
+
+/** Semantic detector output, independent of terminal image placement. */
+export interface DetectedFormula {
+  source: FormulaSourceRange;
   latex: string;
-  display: boolean;
+  intent: FormulaIntent;
   confidence: "explicit" | "inferred";
-  /** Use the detected region width even when the formula spans several rows. */
+  /** Transitional semantic hint for definition arrays and trailing formula groups. */
   compact?: boolean;
-  /** Safe terminal-column interval used to center an embedded display. */
+}
+
+export interface CellRectangle {
+  startRow: number;
+  endRow: number;
+  startCol: number;
+  endCol: number;
+}
+
+export type FormulaCanvasMode =
+  | "source"
+  | "borrowed-above"
+  | "borrowed-below"
+  | "borrowed-both"
+  | "embedded"
+  | "wrapped"
+  | "compact";
+
+/** Semantic formula mapped onto its exact physical terminal source cells. */
+export interface MappedFormula {
+  formula: DetectedFormula;
+  /** Bounding rectangle for physical source cells, before any blank-row borrowing. */
+  source: CellRectangle;
+  /** Source-cell masks relative to source.startRow; columns are terminal columns. */
+  sourceSegments: FormulaWrapSegment[];
+  /** Wrapped slices relative to source.startRow; columns are terminal columns. */
+  formulaSlices: FormulaWrapSegment[];
+  /** Safe terminal-column interval for an embedded display. */
   displayRange?: { startCol: number; endCol: number };
-  /** The region combines literal terminal text and inline formula tokens. */
-  composite?: boolean;
-  /**
-   * Slices of a soft- or hard-wrapped source span. The placed image still uses
-   * a rectangular terminal canvas, but pixels outside these slices remain
-   * transparent so prose before and after the formula is not covered.
-   */
-  wrapSegments?: FormulaWrapSegment[];
+  /** Request a terminal-width source canvas before blank-row planning. */
+  fullWidth: boolean;
+  composite: boolean;
+}
+
+/** Physical terminal layout selected independently from semantic detection. */
+export interface FormulaPlacementPlan {
+  formula: DetectedFormula;
+  canvas: CellRectangle;
+  /** Physical cells whose original TeX must be hidden. */
+  sourceMasks: FormulaWrapSegment[];
+  /** Source slices through which one logical formula image is painted. */
+  formulaSlices: FormulaWrapSegment[];
+  /** Safe horizontal interval for an embedded display. */
+  displayRange?: { startCol: number; endCol: number };
+  mode: FormulaCanvasMode;
+  estimatedQuality: number;
+  composite: boolean;
+}
+
+export interface RecentFormulaEntry {
+  id: number;
+  formula: DetectedFormula;
+  plan: FormulaPlacementPlan;
+  fitScale?: number;
+  degradationReason?: string;
+  observedAt: number;
 }
 
 export interface RenderedFormula {
@@ -52,6 +105,8 @@ export interface RenderedFormula {
   rows: number;
   widthPx: number;
   heightPx: number;
+  /** Fraction of the requested natural formula size retained after fitting. */
+  fitScale: number;
   /** MathJax source geometry, cached lazily by the document reader. */
   naturalAspectRatio: number;
   naturalHeightEx: number;
@@ -60,7 +115,7 @@ export interface RenderedFormula {
 export interface FormulaRenderedEvent {
   latex: string;
   display: boolean;
-  confidence: FormulaRegion["confidence"];
+  confidence: DetectedFormula["confidence"];
 }
 
 export interface CliOptions {
@@ -72,6 +127,12 @@ export interface CliOptions {
   recordHistory: boolean;
   debug: boolean;
   scale: number;
+  /** Keep raw TeX when fitting would reduce a formula below this ratio. */
+  minReadableScale: number;
+  /** Quiet period required by background scans before placing new formulas. */
+  stabilityMs: number;
+  /** One control character which toggles the non-destructive formula focus overlay. */
+  focusKey: string;
   cellOverride?: { width: number; height: number };
 }
 

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import * as pty from "node-pty";
 import { containsFormulaTrigger } from "./detect.js";
+import { FormulaFocusInput, type FormulaFocusAction } from "./formula-focus.js";
 import { FormulaHistoryStore } from "./formula-history.js";
 import { FormulaScreen } from "./screen.js";
 import {
@@ -116,6 +117,8 @@ export async function runProxy(
         rows,
         capabilities,
         scale: options.scale,
+        minReadableScale: options.minReadableScale,
+        stabilityMs: options.stabilityMs,
         writeOuter,
         writeGraphics: (create) => terminalWriter.writeGenerated(create),
         debug,
@@ -129,6 +132,9 @@ export async function runProxy(
         preserveImagesOnClear: ghosttyTerminal
       })
     : undefined;
+  const focusInput = screen && options.focusKey
+    ? new FormulaFocusInput(options.focusKey)
+    : undefined;
   const responseFilter = new TerminalResponseFilter((imageId) =>
     imageId === KITTY_QUERY_IMAGE_ID
       || isRuntimeProbeQueryId(imageId)
@@ -140,8 +146,8 @@ export async function runProxy(
   outputSplitter.setCharacterInterval(cols * Math.max(2, Math.floor(rows / 3)));
   let plainOutputFastPath = false;
 
-  const enqueueScreenOperation = (operation: () => Promise<void> | void): void => {
-    outputQueue = outputQueue.then(operation).catch((error) => {
+  const enqueueScreenOperation = (operation: () => Promise<unknown> | void): void => {
+    outputQueue = outputQueue.then(async () => { await operation(); }).catch((error) => {
       debug(`screen operation failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   };
@@ -205,6 +211,9 @@ export async function runProxy(
         background: parsed.background ?? capabilities.background
       };
       screen?.updateCapabilities(capabilities);
+      if (screen?.formulaFocusActive) {
+        enqueueScreenOperation(() => screen.refreshFormulaFocus());
+      }
       debug(`accepted delayed startup Kitty capability; cell ${nextCell.width.toFixed(2)}x${nextCell.height.toFixed(2)}px`);
     }
     startRequestedProbe();
@@ -284,6 +293,9 @@ export async function runProxy(
       // leaves checkpoint scans suspended long enough for formulas to scroll
       // out of the viewport before they can ever be placed.
       screen?.updateCapabilities(capabilities, completedEpoch);
+      if (screen?.formulaFocusActive) {
+        enqueueScreenOperation(() => screen.refreshFormulaFocus());
+      }
       debug(`cell ${nextCell.width.toFixed(2)}x${nextCell.height.toFixed(2)}px (${nextCell.source})`);
     }
     if (parsed.residual) child.write(parsed.residual);
@@ -374,7 +386,27 @@ export async function runProxy(
   const previousRaw = process.stdin.isRaw;
   if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") process.stdin.setRawMode(true);
   process.stdin.resume();
-  const routeInput = (data: string): void => {
+  const applyFocusAction = async (action: FormulaFocusAction): Promise<void> => {
+    if (!screen || !focusInput) return;
+    if (action === "close") {
+      await screen.closeFormulaFocus();
+      focusInput.setActive(false);
+      return;
+    }
+    const active = action === "open"
+      ? await screen.focusLatestFormula()
+      : action === "next"
+        ? await screen.focusNextFormula()
+        : await screen.focusPreviousFormula();
+    focusInput.setActive(active || screen.formulaFocusActive);
+  };
+  const routeInput = (input: string): void => {
+    if (!input) return;
+    const focused = focusInput?.handle(input);
+    const data = focused?.residual ?? input;
+    for (const action of focused?.actions ?? []) {
+      enqueueScreenOperation(() => applyFocusAction(action));
+    }
     if (!data) return;
     if (!startupProbeQuarantine && !probeActive
       && probeQuarantineQueryId === undefined) {
@@ -546,6 +578,7 @@ export async function runProxy(
             realCursorCatchupQueued = false;
           }
           if (slice.checkpoint && !scannedBeforeHeldCell) await screen.flushScan(true);
+          if (screen.formulaFocusActive) await screen.refreshFormulaFocus();
         } catch (error) {
           // Match the former one-operation-per-slice queue semantics: a bad
           // slice must release its reservations without dropping every later
@@ -595,6 +628,9 @@ export async function runProxy(
       && capabilities.kittyGraphics);
     screen?.resize(nextCols, nextRows, epoch, deferUntilProbe);
     child.resize(nextCols, nextRows);
+    if (screen?.formulaFocusActive && !deferUntilProbe) {
+      enqueueScreenOperation(() => screen.refreshFormulaFocus());
+    }
     if (epoch !== undefined && deferUntilProbe) requestProbe(epoch);
   };
   process.on("SIGWINCH", onResize);

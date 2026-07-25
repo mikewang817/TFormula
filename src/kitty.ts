@@ -3,6 +3,7 @@ const APC_START = `${ESC}_G`;
 const ST = `${ESC}\\`;
 
 export const TFORMULA_Z_INDEX = 20_260_713;
+export const TFORMULA_FOCUS_Z_INDEX = TFORMULA_Z_INDEX + 1;
 export const TFORMULA_IMAGE_ID_MIN = 1_400_000_000;
 export const TFORMULA_IMAGE_ID_MAX = 1_999_999_999;
 
@@ -103,7 +104,8 @@ export function kittyPlaceImage(
   placementId: number,
   columns: number,
   rows: number,
-  source?: KittySourceRectangle
+  source?: KittySourceRectangle,
+  zIndex = TFORMULA_Z_INDEX
 ): string {
   const crop = source
     ? `,x=${Math.max(0, Math.round(source.x))}`
@@ -111,7 +113,7 @@ export function kittyPlaceImage(
       + `,w=${Math.max(1, Math.round(source.width))}`
       + `,h=${Math.max(1, Math.round(source.height))}`
     : "";
-  return `${APC_START}a=p,i=${imageId},p=${placementId},q=0,c=${columns},r=${rows}${crop},C=1,z=${TFORMULA_Z_INDEX}${ST}`;
+  return `${APC_START}a=p,i=${imageId},p=${placementId},q=0,c=${columns},r=${rows}${crop},C=1,z=${zIndex}${ST}`;
 }
 
 export function cursorPosition(row: number, column: number): string {

@@ -1,16 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { detectFormulaRegions } from "../src/detect.js";
-import { detectScreenFormulaRegions } from "../src/screen-text.js";
+import { detectFormulas } from "../src/detect.js";
+import { detectScreenFormulaRegions } from "./mapped-formula-compat.js";
 import { SCIENTIFIC_TERMINAL_CORPUS } from "./scientific-formula-corpus.js";
 
 describe("scientific terminal formula detection corpus", () => {
   it.each(SCIENTIFIC_TERMINAL_CORPUS)(
     "$domain/$id recovers agent output after delimiter loss",
     ({ lines, expectedLatex, display = false }) => {
-      const regions = detectFormulaRegions(lines);
-      expect(regions).toEqual(expect.arrayContaining([
-        expect.objectContaining({ latex: expectedLatex, display })
+      const formulas = detectFormulas(lines);
+      expect(formulas).toEqual(expect.arrayContaining([
+        expect.objectContaining({ latex: expectedLatex })
       ]));
+      const formula = formulas.find((candidate) => candidate.latex === expectedLatex);
+      expect(formula?.intent !== "inline").toBe(display);
     }
   );
 
@@ -19,7 +21,7 @@ describe("scientific terminal formula detection corpus", () => {
     "The unit tests are (green).",
     "Use [status] to inspect the current command."
   ])("does not reinterpret ordinary prose: %s", (line) => {
-    expect(detectFormulaRegions([line])).toEqual([]);
+    expect(detectFormulas([line])).toEqual([]);
   });
 
   it("reassembles a scientific command split by terminal soft wrapping", () => {

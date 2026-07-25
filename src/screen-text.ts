@@ -1,6 +1,30 @@
 import stringWidth from "string-width";
-import { containsFormulaTrigger, detectFormulaRegions, escapeTexText } from "./detect.js";
-import type { FormulaRegion, FormulaWrapSegment } from "./types.js";
+import { containsFormulaTrigger, detectFormulas, escapeTexText } from "./detect.js";
+import type {
+  DetectedFormula,
+  FormulaIntent,
+  FormulaWrapSegment,
+  MappedFormula
+} from "./types.js";
+
+/** Internal logical-to-physical mapping candidate; never leaves this module. */
+interface PhysicalFormulaCandidate {
+  startRow: number;
+  endRow: number;
+  startCol: number;
+  endCol: number;
+  latex: string;
+  intent: FormulaIntent;
+  display: boolean;
+  confidence: "explicit" | "inferred";
+  standalone?: boolean;
+  compact?: boolean;
+  composite?: boolean;
+  displayRange?: { startCol: number; endCol: number };
+  sourceSegments?: FormulaWrapSegment[];
+  wrapSegments?: FormulaWrapSegment[];
+  detectedFormula?: DetectedFormula;
+}
 
 export interface PhysicalScreenLine {
   /** Row relative to the current viewport. */
@@ -119,8 +143,21 @@ function spanVisualIndex(span: LogicalSpan): VisualColumnIndex {
   return span.visualIndex ??= new VisualColumnIndex(span.text);
 }
 
+function detectedFormulaRegion(formula: DetectedFormula): PhysicalFormulaCandidate {
+  return {
+    ...formula.source,
+    detectedFormula: formula,
+    latex: formula.latex,
+    intent: formula.intent,
+    display: formula.intent !== "inline",
+    confidence: formula.confidence,
+    ...(formula.compact ? { compact: true } : {})
+  };
+}
+
 export interface FormulaSnapshot {
-  regions: FormulaRegion[];
+  /** Physical source mappings consumed by the layout planner. */
+  formulas: MappedFormula[];
   /** Detected formulas that cannot be safely covered by one opaque rectangle. */
   deferred: Array<{ latex: string; startRow: number; endRow: number }>;
 }
@@ -322,18 +359,18 @@ function containsFragileLiteralGrapheme(value: string): boolean {
  */
 function composeInlineFormulaTails(
   lines: LogicalLine[],
-  regions: FormulaRegion[]
-): FormulaRegion[] {
-  const replacements = new Map<FormulaRegion, FormulaRegion>();
-  const removed = new Set<FormulaRegion>();
-  const inlineByRow: Array<FormulaRegion[] | undefined> = new Array(lines.length);
+  regions: PhysicalFormulaCandidate[]
+): PhysicalFormulaCandidate[] {
+  const replacements = new Map<PhysicalFormulaCandidate, PhysicalFormulaCandidate>();
+  const removed = new Set<PhysicalFormulaCandidate>();
+  const inlineByRow: Array<PhysicalFormulaCandidate[] | undefined> = new Array(lines.length);
   const displayCoverageDelta = new Int32Array(lines.length + 1);
-  const detectionOrder = new Map<FormulaRegion, number>();
+  const detectionOrder = new Map<PhysicalFormulaCandidate, number>();
 
   for (let index = 0; index < regions.length; index += 1) {
     const region = regions[index]!;
     if (!detectionOrder.has(region)) detectionOrder.set(region, index);
-    if (region.display) {
+    if (region.intent !== "inline") {
       const startRow = Math.max(0, region.startRow);
       const endRow = Math.min(lines.length - 1, region.endRow);
       if (startRow <= endRow) {
@@ -382,16 +419,30 @@ function composeInlineFormulaTails(
     }
     if (cursor < line.length) latex.push(`\\text{${escapeTexText(line.slice(cursor))}}`);
 
-    const replacement: FormulaRegion = {
+    const confidence = candidates.some((candidate) => candidate.confidence === "explicit")
+      ? "explicit" as const
+      : "inferred" as const;
+    const compositeLatex = latex.join("");
+    const replacement: PhysicalFormulaCandidate = {
+      intent: "inline",
       startRow: row,
       endRow: row,
       startCol: candidates[0]!.startCol,
       endCol: visualIndex.width,
-      latex: latex.join(""),
+      latex: compositeLatex,
       display: false,
-      confidence: candidates.some((candidate) => candidate.confidence === "explicit")
-        ? "explicit"
-        : "inferred",
+      confidence,
+      detectedFormula: {
+        source: {
+          startRow: row,
+          endRow: row,
+          startCol: candidates[0]!.startCol,
+          endCol: visualIndex.width
+        },
+        latex: compositeLatex,
+        intent: "inline",
+        confidence
+      },
       composite: true
     };
     const firstInDetectionOrder = candidates.reduce((first, candidate) =>
@@ -403,13 +454,61 @@ function composeInlineFormulaTails(
     }
   }
 
-  const composed: FormulaRegion[] = [];
+  const composed: PhysicalFormulaCandidate[] = [];
   for (const region of regions) {
     const replacement = replacements.get(region);
     if (replacement) composed.push(replacement);
     else if (!removed.has(region)) composed.push(region);
   }
   return composed;
+}
+
+function mappedFormulaFromRegion(
+  region: PhysicalFormulaCandidate,
+  terminalColumns: number
+): MappedFormula {
+  const wraps = region.wrapSegments?.length ? region.wrapSegments : [];
+  const independentMasks = region.sourceSegments?.length ? region.sourceSegments : [];
+  const formulaSlices = independentMasks.length === 0 && !region.displayRange ? wraps : [];
+  let sourceSegments = independentMasks.length > 0 ? independentMasks : wraps;
+  if (sourceSegments.length === 0) {
+    sourceSegments = Array.from(
+      { length: region.endRow - region.startRow + 1 },
+      (_, rowOffset) => ({
+        rowOffset,
+        startCol: region.startCol,
+        endCol: region.endCol,
+        logicalStartCol: 0
+      })
+    );
+  }
+  const startCol = Math.min(...sourceSegments.map((segment) => segment.startCol));
+  const endCol = Math.max(...sourceSegments.map((segment) => segment.endCol));
+  return {
+    formula: region.detectedFormula ?? {
+      source: {
+        startRow: region.startRow,
+        endRow: region.endRow,
+        startCol,
+        endCol
+      },
+      latex: region.latex,
+      intent: region.intent,
+      confidence: region.confidence,
+      ...(region.compact ? { compact: true } : {})
+    },
+    source: {
+      startRow: region.startRow,
+      endRow: region.endRow,
+      startCol,
+      endCol
+    },
+    sourceSegments,
+    formulaSlices,
+    ...(region.displayRange ? { displayRange: region.displayRange } : {}),
+    fullWidth: region.startCol === 0 && region.endCol === terminalColumns,
+    composite: Boolean(region.composite)
+  };
 }
 
 /**
@@ -423,14 +522,14 @@ export function detectScreenFormulaRegions(
   continuesAfterViewport = false
 ): FormulaSnapshot {
   if (!physicalLines.some((line) => containsFormulaTrigger(line.text))) {
-    return { regions: [], deferred: [] };
+    return { formulas: [], deferred: [] };
   }
   const logicalLines = collapseSoftWrappedLines(physicalLines, continuesAfterViewport);
   const detected = composeInlineFormulaTails(
     logicalLines,
-    detectFormulaRegions(logicalLines.map((line) => line.text))
+    detectFormulas(logicalLines.map((line) => line.text)).map(detectedFormulaRegion)
   );
-  const regions: FormulaRegion[] = [];
+  const regions: PhysicalFormulaCandidate[] = [];
   const deferred: FormulaSnapshot["deferred"] = [];
 
   for (const detectedRegion of detected) {
@@ -467,36 +566,31 @@ export function detectScreenFormulaRegions(
     region = { ...region, startCol: mappedStartCol, endCol: mappedEndCol };
 
     const hasSoftWrap = involved.some((line) => line.spans.length > 1);
-    const borrowsTrailingBlank = Boolean(region.compact
-      && region.endRow === region.startRow + 1
-      && !endLine.text.trim());
     const start = mapStart(startLine.spans, region.startCol);
-    const end = mapEnd(
-      borrowsTrailingBlank ? startLine.spans : endLine.spans,
-      region.endCol
-    );
+    const end = mapEnd(endLine.spans, region.endCol);
     const formulaCrossesPhysicalRows = start.row !== end.row;
-    const standaloneDisplay = region.display
-      && involved.some((line) => /^(?:\\\[[\s\S]+\\\]|\$\$[^$]+\$\$)$/u.test(line.text.trim()))
-      && involved.every((line) => !line.text.trim()
-        || /^(?:\\\[[\s\S]+\\\]|\$\$[^$]+\$\$)$/u.test(line.text.trim()));
-    const standaloneBlock = region.display
-      && region.startRow < region.endRow
-      && /^(?:\\\[|\$\$|\[)$/u.test(startLine.text.trim())
-      && /^(?:\\\]|\$\$|\])$/u.test(endLine.text.trim());
-
-    if (standaloneDisplay || standaloneBlock) {
+    if (region.intent === "display") {
+      const firstPhysicalRow = involved[0]!.spans[0]!.row;
       regions.push({
         ...region,
-        startRow: involved[0]!.spans[0]!.row,
+        startRow: firstPhysicalRow,
         endRow: involved.at(-1)!.spans.at(-1)!.row,
         startCol: 0,
-        endCol: terminalColumns
+        endCol: terminalColumns,
+        standalone: true,
+        sourceSegments: multilineFormulaSegments(
+          logicalLines,
+          region.startRow,
+          region.endRow,
+          region.startCol,
+          region.endCol,
+          firstPhysicalRow
+        )
       });
       continue;
     }
 
-    if (region.display && !standaloneBlock) {
+    if (region.intent === "embedded-display") {
       const wrapSegments = multilineFormulaSegments(
         logicalLines,
         region.startRow,
@@ -524,8 +618,7 @@ export function detectScreenFormulaRegions(
     }
 
     if (region.startRow < region.endRow
-      && !standaloneDisplay
-      && !standaloneBlock
+      && region.intent === "inline"
       && !region.compact) {
       const wrapSegments = multilineFormulaSegments(
         logicalLines,
@@ -548,8 +641,7 @@ export function detectScreenFormulaRegions(
     }
     if (hasSoftWrap
       && formulaCrossesPhysicalRows
-      && region.compact
-      && !borrowsTrailingBlank) {
+      && region.compact) {
       // A compact definition array is intrinsically two-dimensional. Keep its
       // MathJax content whole, but paint backgrounds only over the physical
       // source slices so a wrapped continuation at column zero is not leaked
@@ -576,7 +668,7 @@ export function detectScreenFormulaRegions(
 
     if (hasSoftWrap
       && formulaCrossesPhysicalRows
-      && (region.startRow === region.endRow || borrowsTrailingBlank)) {
+      && region.startRow === region.endRow) {
       const wrapSegments = wrappedFormulaSegments(
         startLine,
         region.startCol,
@@ -609,13 +701,16 @@ export function detectScreenFormulaRegions(
     regions.push({
       ...region,
       startRow: start.row,
-      endRow: borrowsTrailingBlank ? endLine.spans.at(-1)!.row : end.row,
+      endRow: end.row,
       startCol: start.column,
       endCol: end.column
     });
   }
 
-  return { regions, deferred };
+  return {
+    formulas: regions.map((region) => mappedFormulaFromRegion(region, terminalColumns)),
+    deferred
+  };
 }
 
 export const screenTextInternals = {
@@ -623,8 +718,10 @@ export const screenTextInternals = {
   compactFormulaSegments,
   composeInlineFormulaTails,
   createVisualColumnIndex: (value: string) => new VisualColumnIndex(value),
+  detectedFormulaRegion,
   mapEnd,
   mapStart,
+  mappedFormulaFromRegion,
   multilineFormulaSegments,
   utf16IndexAtVisualColumn,
   wrappedFormulaSegments

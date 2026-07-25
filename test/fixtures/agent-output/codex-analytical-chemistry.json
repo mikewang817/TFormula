@@ -1,0 +1,196 @@
+{
+  "version": 1,
+  "id": "codex-analytical-chemistry-aligned",
+  "agent": "codex",
+  "provenance": {
+    "kind": "captured",
+    "note": "Anonymized excerpt from the real Codex analytical-chemistry regression already preserved in test/codex-chemistry-output.test.ts."
+  },
+  "geometry": {
+    "columns": 80,
+    "rows": 9
+  },
+  "ansi": "\u001b[2J\u001b[HCodex response\r\n[\r\n\\begin{aligned}\r\nx&=\\frac{2C}{1+\\sqrt{1+4K_f'C}}\\\\\r\n\\mathrm{pCa}&=-\\log_{10}(x)=6.2504\r\n\\end{aligned}\r\n]\r\nstatus: complete",
+  "expected": {
+    "cells": [
+      {
+        "row": 0,
+        "text": "Codex response",
+        "isWrapped": false
+      },
+      {
+        "row": 1,
+        "text": "[",
+        "isWrapped": false
+      },
+      {
+        "row": 2,
+        "text": "\\begin{aligned}",
+        "isWrapped": false
+      },
+      {
+        "row": 3,
+        "text": "x&=\\frac{2C}{1+\\sqrt{1+4K_f'C}}\\\\",
+        "isWrapped": false
+      },
+      {
+        "row": 4,
+        "text": "\\mathrm{pCa}&=-\\log_{10}(x)=6.2504",
+        "isWrapped": false
+      },
+      {
+        "row": 5,
+        "text": "\\end{aligned}",
+        "isWrapped": false
+      },
+      {
+        "row": 6,
+        "text": "]",
+        "isWrapped": false
+      },
+      {
+        "row": 7,
+        "text": "status: complete",
+        "isWrapped": false
+      },
+      {
+        "row": 8,
+        "text": "",
+        "isWrapped": false
+      }
+    ],
+    "formulas": [
+      {
+        "formula": {
+          "source": {
+            "startRow": 1,
+            "endRow": 6,
+            "startCol": 0,
+            "endCol": 34
+          },
+          "latex": "\\begin{aligned}\nx&=\\frac{2C}{1+\\sqrt{1+4K_f'C}}\\\\\n\\mathrm{pCa}&=-\\log_{10}(x)=6.2504\n\\end{aligned}",
+          "intent": "display",
+          "confidence": "inferred"
+        },
+        "source": {
+          "startRow": 1,
+          "endRow": 6,
+          "startCol": 0,
+          "endCol": 34
+        },
+        "sourceSegments": [
+          {
+            "rowOffset": 0,
+            "startCol": 0,
+            "endCol": 1,
+            "logicalStartCol": 0
+          },
+          {
+            "rowOffset": 1,
+            "startCol": 0,
+            "endCol": 15,
+            "logicalStartCol": 1
+          },
+          {
+            "rowOffset": 2,
+            "startCol": 0,
+            "endCol": 33,
+            "logicalStartCol": 16
+          },
+          {
+            "rowOffset": 3,
+            "startCol": 0,
+            "endCol": 34,
+            "logicalStartCol": 49
+          },
+          {
+            "rowOffset": 4,
+            "startCol": 0,
+            "endCol": 13,
+            "logicalStartCol": 83
+          },
+          {
+            "rowOffset": 5,
+            "startCol": 0,
+            "endCol": 1,
+            "logicalStartCol": 96
+          }
+        ],
+        "formulaSlices": [],
+        "fullWidth": true,
+        "composite": false
+      }
+    ],
+    "plans": [
+      {
+        "formula": {
+          "source": {
+            "startRow": 1,
+            "endRow": 6,
+            "startCol": 0,
+            "endCol": 34
+          },
+          "latex": "\\begin{aligned}\nx&=\\frac{2C}{1+\\sqrt{1+4K_f'C}}\\\\\n\\mathrm{pCa}&=-\\log_{10}(x)=6.2504\n\\end{aligned}",
+          "intent": "display",
+          "confidence": "inferred"
+        },
+        "canvas": {
+          "startRow": 1,
+          "endRow": 6,
+          "startCol": 0,
+          "endCol": 80
+        },
+        "sourceMasks": [
+          {
+            "rowOffset": 0,
+            "startCol": 0,
+            "endCol": 1,
+            "logicalStartCol": 0
+          },
+          {
+            "rowOffset": 1,
+            "startCol": 0,
+            "endCol": 15,
+            "logicalStartCol": 1
+          },
+          {
+            "rowOffset": 2,
+            "startCol": 0,
+            "endCol": 33,
+            "logicalStartCol": 16
+          },
+          {
+            "rowOffset": 3,
+            "startCol": 0,
+            "endCol": 34,
+            "logicalStartCol": 49
+          },
+          {
+            "rowOffset": 4,
+            "startCol": 0,
+            "endCol": 13,
+            "logicalStartCol": 83
+          },
+          {
+            "rowOffset": 5,
+            "startCol": 0,
+            "endCol": 1,
+            "logicalStartCol": 96
+          }
+        ],
+        "formulaSlices": [],
+        "mode": "source",
+        "estimatedQuality": 100,
+        "composite": false
+      }
+    ],
+    "kitty": [
+      {
+        "row": 2,
+        "column": 1,
+        "columns": 80,
+        "rows": 6
+      }
+    ]
+  }
+}

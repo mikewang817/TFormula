@@ -8,6 +8,7 @@ import type {
   Terminal as XtermTerminal
 } from "@xterm/headless";
 import { containsFormulaTrigger, MAX_DISPLAY_BLOCK_ROWS } from "./detect.js";
+import { planFormulaPlacements } from "./formula-layout.js";
 import { MathRenderer } from "./math-renderer.js";
 import {
   cursorPosition,
@@ -17,13 +18,15 @@ import {
   kittyPlaceImage,
   kittyTransmitImage,
   synchronizedOutput,
+  TFORMULA_FOCUS_Z_INDEX,
   TFORMULA_IMAGE_ID_MAX,
   TFORMULA_IMAGE_ID_MIN
 } from "./kitty.js";
 import { detectScreenFormulaRegions } from "./screen-text.js";
 import type {
-  FormulaRegion,
+  FormulaPlacementPlan,
   FormulaRenderedEvent,
+  RecentFormulaEntry,
   TerminalCapabilities
 } from "./types.js";
 
@@ -35,6 +38,16 @@ const { UnicodeGraphemesAddon } = createRequire(import.meta.url)(
 ) as {
   UnicodeGraphemesAddon: new () => ITerminalAddon;
 };
+
+interface FocusPlacement {
+  imageId: number;
+  placementId: number;
+}
+
+interface PlannedFormulaSnapshot {
+  regions: FormulaPlacementPlan[];
+  deferred: Array<{ latex: string; startRow: number; endRow: number }>;
+}
 
 interface PlacedFormula {
   anchor: string;
@@ -61,6 +74,11 @@ interface TerminalImage {
   imageId: number;
   placements: number;
   lastUsed: number;
+}
+
+interface FormulaStabilityState {
+  firstSeenAt: number;
+  stable: boolean;
 }
 
 const DEFAULT_MAX_TERMINAL_IMAGES = 256;
@@ -378,6 +396,13 @@ export class FormulaScreen {
   readonly #imageRetries = new Map<string, { attempt: number; notBefore: number }>();
   readonly #blockedPlacementKeys = new Set<string>();
   readonly #placementRetries = new Map<string, { attempt: number; notBefore: number }>();
+  readonly #formulaStability = new Map<string, FormulaStabilityState>();
+  readonly #recentFormulas: RecentFormulaEntry[] = [];
+  readonly #recentFormulaLimit = 50;
+  #recentFormulaId = 1;
+  #focusIndex = -1;
+  #focusPlacement?: FocusPlacement;
+  #focusDirty = false;
   readonly #writeOuter: (data: string | Uint8Array) => void;
   readonly #writeGraphics?: (
     create: () => string | Uint8Array | undefined
@@ -387,6 +412,8 @@ export class FormulaScreen {
   readonly #preserveImagesOnClear: boolean;
   readonly #maxTerminalImages: number;
   readonly #maxDetachedPlacements: number;
+  readonly #minReadableScale: number;
+  readonly #stabilityMs: number;
   #capabilities: TerminalCapabilities;
   #scale: number;
   #imageId = TFORMULA_IMAGE_ID_MIN;
@@ -426,6 +453,8 @@ export class FormulaScreen {
     rows: number;
     capabilities: TerminalCapabilities;
     scale: number;
+    minReadableScale?: number;
+    stabilityMs?: number;
     writeOuter: (data: string | Uint8Array) => void;
     writeGraphics?: (
       create: () => string | Uint8Array | undefined
@@ -455,6 +484,12 @@ export class FormulaScreen {
     this.terminal.loadAddon(new UnicodeGraphemesAddon());
     this.#capabilities = options.capabilities;
     this.#scale = options.scale;
+    this.#minReadableScale = Number.isFinite(options.minReadableScale)
+      ? Math.max(0, Math.min(1, options.minReadableScale!))
+      : 0.4;
+    this.#stabilityMs = Number.isFinite(options.stabilityMs)
+      ? Math.max(0, Math.min(2_000, Math.floor(options.stabilityMs!)))
+      : 80;
     this.#renderer = options.renderer ?? new MathRenderer();
     this.#transmitImage = options.transmitImage ?? kittyTransmitImage;
     this.#writeOuter = options.writeOuter;
@@ -538,6 +573,7 @@ export class FormulaScreen {
     alreadyQueued = false,
     preservedEraseDisplayOffsets: readonly number[] = []
   ): Promise<void> {
+    if (this.#focusIndex >= 0 && data) this.#focusDirty = true;
     if (!alreadyQueued) this.queueWrite();
     if (this.#controlTail === ""
       && preservedEraseDisplayOffsets.length === 0
@@ -760,6 +796,157 @@ export class FormulaScreen {
     }
   }
 
+  get recentFormulas(): readonly RecentFormulaEntry[] {
+    return this.#recentFormulas;
+  }
+
+  get formulaFocusActive(): boolean {
+    return this.#focusIndex >= 0;
+  }
+
+  #rememberFormula(
+    plan: FormulaPlacementPlan,
+    update: { fitScale?: number; degradationReason?: string | null } = {}
+  ): RecentFormulaEntry {
+    const identity = JSON.stringify([plan.formula, plan.canvas, plan.mode]);
+    const existingIndex = this.#recentFormulas.findIndex((entry) =>
+      JSON.stringify([entry.plan.formula, entry.plan.canvas, entry.plan.mode]) === identity
+    );
+    const existing = existingIndex >= 0
+      ? this.#recentFormulas.splice(existingIndex, 1)[0]
+      : undefined;
+    const entry: RecentFormulaEntry = {
+      id: existing?.id ?? this.#recentFormulaId++,
+      formula: plan.formula,
+      plan,
+      ...(update.fitScale !== undefined
+        ? { fitScale: update.fitScale }
+        : existing?.fitScale !== undefined ? { fitScale: existing.fitScale } : {}),
+      ...(typeof update.degradationReason === "string"
+        ? { degradationReason: update.degradationReason }
+        : update.degradationReason === null
+          ? {}
+          : existing?.degradationReason !== undefined
+            ? { degradationReason: existing.degradationReason }
+            : {}),
+      observedAt: Date.now()
+    };
+    this.#recentFormulas.unshift(entry);
+    if (this.#recentFormulas.length > this.#recentFormulaLimit) {
+      this.#recentFormulas.length = this.#recentFormulaLimit;
+    }
+    return entry;
+  }
+
+  async focusLatestFormula(): Promise<boolean> {
+    if (this.#recentFormulas.length === 0 || !this.#capabilities.kittyGraphics) return false;
+    const previousIndex = this.#focusIndex;
+    this.#focusIndex = 0;
+    this.#focusDirty = true;
+    const focused = await this.refreshFormulaFocus();
+    if (!focused && !this.#focusPlacement) {
+      this.#focusIndex = previousIndex;
+      this.#focusDirty = false;
+    }
+    return focused;
+  }
+
+  async focusNextFormula(): Promise<boolean> {
+    if (this.#recentFormulas.length === 0) return false;
+    this.#focusIndex = this.#focusIndex < 0
+      ? 0
+      : (this.#focusIndex + 1) % this.#recentFormulas.length;
+    this.#focusDirty = true;
+    return this.refreshFormulaFocus();
+  }
+
+  async focusPreviousFormula(): Promise<boolean> {
+    if (this.#recentFormulas.length === 0) return false;
+    this.#focusIndex = this.#focusIndex < 0
+      ? 0
+      : (this.#focusIndex - 1 + this.#recentFormulas.length) % this.#recentFormulas.length;
+    this.#focusDirty = true;
+    return this.refreshFormulaFocus();
+  }
+
+  async refreshFormulaFocus(): Promise<boolean> {
+    if (this.#focusIndex < 0) return false;
+    if (!this.#focusDirty && this.#focusPlacement) return true;
+    if (this.#disposed || this.#layoutSuspended || !this.#capabilities.kittyGraphics) return false;
+    const entry = this.#recentFormulas[this.#focusIndex];
+    if (!entry) {
+      await this.closeFormulaFocus();
+      return false;
+    }
+    const columns = this.terminal.cols;
+    const rows = this.terminal.rows;
+    const plan: FormulaPlacementPlan = {
+      formula: entry.formula,
+      canvas: { startRow: 0, endRow: rows - 1, startCol: 0, endCol: columns },
+      sourceMasks: [],
+      formulaSlices: [],
+      mode: "source",
+      estimatedQuality: 100,
+      composite: false
+    };
+    try {
+      const rendered = await this.#renderer.renderPlacement(
+        plan,
+        this.#capabilities,
+        this.#scale
+      );
+      const previous = this.#focusPlacement;
+      const restoreCursor = this.#cursorRestoreAfterGraphics();
+      if (!restoreCursor) return false;
+      const imageId = this.#nextImageId();
+      const placementId = this.#nextPlacementId();
+      const emitted = await this.#writeGraphicsTransaction([
+        previous ? kittyDeletePlacement(previous.imageId, previous.placementId) : "",
+        previous ? kittyDeleteImage(previous.imageId) : "",
+        this.#transmitImage(rendered.png, imageId),
+        cursorPosition(1, 1),
+        kittyPlaceImage(
+          imageId,
+          placementId,
+          columns,
+          rows,
+          undefined,
+          TFORMULA_FOCUS_Z_INDEX
+        ),
+        restoreCursor
+      ].join(""));
+      if (!emitted) {
+        this.#allocatedImageIds.delete(imageId);
+        return false;
+      }
+      if (previous) this.#allocatedImageIds.delete(previous.imageId);
+      this.#focusPlacement = { imageId, placementId };
+      this.#focusDirty = false;
+      entry.fitScale = rendered.fitScale;
+      this.#debug(`focused formula ${entry.id} across ${columns}x${rows} cells`);
+      return true;
+    } catch (error) {
+      entry.degradationReason = `focus render failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.#debug(`formula focus skipped: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
+  async closeFormulaFocus(): Promise<void> {
+    this.#focusIndex = -1;
+    this.#focusDirty = false;
+    const placement = this.#focusPlacement;
+    this.#focusPlacement = undefined;
+    if (!placement) return;
+    const restoreCursor = this.#cursorRestoreAfterGraphics() ?? "";
+    await this.#writeGraphicsTransaction(
+      kittyDeletePlacement(placement.imageId, placement.placementId)
+      + kittyDeleteImage(placement.imageId)
+      + restoreCursor
+    );
+    this.#allocatedImageIds.delete(placement.imageId);
+  }
+
   /** True while at least one terminal-side placement must survive ED 2. */
   get hasTerminalPlacements(): boolean {
     return this.#placed.size > 0 || this.#detachedPlacements.size > 0;
@@ -779,7 +966,8 @@ export class FormulaScreen {
       || this.#placed.size !== 0
       || this.#detachedPlacements.size !== 0
       || this.#imageRetries.size !== 0
-      || this.#placementRetries.size !== 0) return false;
+      || this.#placementRetries.size !== 0
+      || this.#formulaStability.size !== 0) return false;
 
     // A stable but incomplete opener such as `x-`, `$`, or `\(` may become a
     // real formula when the next callback contains only operands. Require the
@@ -837,7 +1025,7 @@ export class FormulaScreen {
         // mirrored. Run one scan of our own before releasing the queue barrier.
         if (allowQueuedWrites) continue;
       } else {
-        await this.#scan(allowQueuedWrites);
+        await this.#scan(allowQueuedWrites, true);
         // Later PTY slices are deliberately reserved before they execute so an
         // unrelated background scan cannot commit stale coordinates. At an
         // output checkpoint, however, those slices are behind this operation
@@ -850,6 +1038,7 @@ export class FormulaScreen {
   }
 
   resize(cols: number, rows: number, epoch?: number, deferUntilCapabilities = false): void {
+    if (this.#focusIndex >= 0) this.#focusDirty = true;
     // A terminal may rebuild its cell grid (notably during rapid font zoom)
     // without reporting whether Kitty placements survived. Treat every resize
     // callback as a new placement generation. Rendered PNGs remain cached, but
@@ -858,6 +1047,7 @@ export class FormulaScreen {
     this.#resizeGeneration += 1;
     this.#blockedPlacementKeys.clear();
     this.#placementRetries.clear();
+    this.#formulaStability.clear();
     // Reflow may dispose both xterm markers before the replacement scan can
     // match the old placement. Snapshot only currently visible placements;
     // off-screen scrollback pins must remain untouched by layout work.
@@ -993,6 +1183,7 @@ export class FormulaScreen {
     this.#layoutVersion += 1;
     this.#scanVersion += 1;
     this.#rescanRequested = true;
+    this.#formulaStability.clear();
     if (this.#scanTimer) clearTimeout(this.#scanTimer);
     this.#scanTimer = undefined;
     this.#scanTimerDueAt = 0;
@@ -1001,6 +1192,7 @@ export class FormulaScreen {
   }
 
   updateCapabilities(capabilities: TerminalCapabilities, resumeEpoch?: number): void {
+    if (this.#focusIndex >= 0) this.#focusDirty = true;
     const graphicsChanged = capabilities.kittyGraphics !== this.#capabilities.kittyGraphics;
     const dimensionsChanged = capabilities.cell.width !== this.#capabilities.cell.width
       || capabilities.cell.height !== this.#capabilities.cell.height;
@@ -1026,6 +1218,7 @@ export class FormulaScreen {
   }
 
   setScale(scale: number): void {
+    if (this.#focusIndex >= 0) this.#focusDirty = true;
     this.#scale = scale;
     this.#layoutVersion += 1;
     this.scheduleScan();
@@ -1057,6 +1250,7 @@ export class FormulaScreen {
 
   resetPlacements(): void {
     this.#layoutVersion += 1;
+    this.#formulaStability.clear();
     if (this.#capabilities.kittyGraphics) {
       const imageIds = new Set(Array.from(this.#terminalImages.values(), (image) => image.imageId));
       const commands = [
@@ -1263,6 +1457,7 @@ export class FormulaScreen {
 
   #forgetAllPlacements(): void {
     this.#layoutVersion += 1;
+    this.#formulaStability.clear();
     for (const placement of this.#placed.values()) this.#releasePlacement(placement);
     for (const placement of this.#detachedPlacements.values()) {
       this.#releasePlacement(placement);
@@ -1304,6 +1499,9 @@ export class FormulaScreen {
     }
     for (const key of this.#blockedPlacementKeys) {
       if (key.startsWith(prefix)) this.#blockedPlacementKeys.delete(key);
+    }
+    for (const key of this.#formulaStability.keys()) {
+      if (key.startsWith(prefix)) this.#formulaStability.delete(key);
     }
     if (bufferType === "alternate") {
       this.#alternateLayoutDirty = false;
@@ -1603,12 +1801,12 @@ export class FormulaScreen {
     return removed;
   }
 
-  #markersForRegion(region: FormulaRegion): { startMarker?: IMarker; endMarker?: IMarker } {
+  #markersForRegion(region: FormulaPlacementPlan): { startMarker?: IMarker; endMarker?: IMarker } {
     const buffer = this.terminal.buffer.active;
     if (buffer.type !== "normal") return {};
     const cursorAbsoluteRow = buffer.baseY + buffer.cursorY;
-    const startAbsoluteRow = buffer.viewportY + region.startRow;
-    const endAbsoluteRow = buffer.viewportY + region.endRow;
+    const startAbsoluteRow = buffer.viewportY + region.canvas.startRow;
+    const endAbsoluteRow = buffer.viewportY + region.canvas.endRow;
     return {
       startMarker: this.terminal.registerMarker(startAbsoluteRow - cursorAbsoluteRow),
       endMarker: this.terminal.registerMarker(endAbsoluteRow - cursorAbsoluteRow)
@@ -1629,6 +1827,7 @@ export class FormulaScreen {
   }
 
   dispose(): void {
+    void this.closeFormulaFocus();
     this.#disposed = true;
     if (this.#scanTimer) clearTimeout(this.#scanTimer);
     this.#scanTimer = undefined;
@@ -1641,7 +1840,7 @@ export class FormulaScreen {
     this.terminal.dispose();
   }
 
-  #formulaSnapshot(): ReturnType<typeof detectScreenFormulaRegions> {
+  #formulaSnapshot(): PlannedFormulaSnapshot {
     const buffer = this.terminal.buffer.active;
     const viewportY = buffer.viewportY;
     const visibleBufferLines = Array.from(
@@ -1671,21 +1870,33 @@ export class FormulaScreen {
     }));
     const nextLine = buffer.getLine(viewportY + this.terminal.rows);
     const continuesAfterViewport = nextLine?.isWrapped ?? false;
-    const visibleSnapshot = (
-      snapshot: ReturnType<typeof detectScreenFormulaRegions>
-    ): ReturnType<typeof detectScreenFormulaRegions> => ({
+    const plannedSnapshot = (
+      snapshot: ReturnType<typeof detectScreenFormulaRegions>,
+      lines: typeof physicalLines
+    ): PlannedFormulaSnapshot => ({
+      regions: planFormulaPlacements(
+        snapshot.formulas,
+        lines,
+        this.terminal.cols
+      ),
+      deferred: snapshot.deferred
+    });
+    const visibleSnapshot = (snapshot: PlannedFormulaSnapshot): PlannedFormulaSnapshot => ({
       regions: snapshot.regions.filter((region) =>
-        region.startRow >= 0 && region.endRow < this.terminal.rows
+        region.canvas.startRow >= 0 && region.canvas.endRow < this.terminal.rows
       ),
       deferred: snapshot.deferred.filter((region) =>
         region.startRow >= 0 && region.endRow < this.terminal.rows
       )
     });
     const quickSnapshot = visibleSnapshot(
-      detectScreenFormulaRegions(
-        physicalLines,
-        this.terminal.cols,
-        continuesAfterViewport
+      plannedSnapshot(
+        detectScreenFormulaRegions(
+          physicalLines,
+          this.terminal.cols,
+          continuesAfterViewport
+        ),
+        physicalLines
       )
     );
 
@@ -1705,7 +1916,7 @@ export class FormulaScreen {
       }
     };
     for (const region of quickSnapshot.regions) {
-      for (let row = region.startRow; row <= region.endRow; row += 1) {
+      for (let row = region.canvas.startRow; row <= region.canvas.endRow; row += 1) {
         addWrappedLogicalLine(row);
       }
     }
@@ -1718,10 +1929,13 @@ export class FormulaScreen {
       };
     });
     return visibleSnapshot(
-      detectScreenFormulaRegions(
-        detailedLines,
-        this.terminal.cols,
-        continuesAfterViewport
+      plannedSnapshot(
+        detectScreenFormulaRegions(
+          detailedLines,
+          this.terminal.cols,
+          continuesAfterViewport
+        ),
+        detailedLines
       )
     );
   }
@@ -1742,35 +1956,24 @@ export class FormulaScreen {
     return /[\x40-\x7e]/u.test(suffix.slice(2)) ? "" : suffix.slice(-32);
   }
 
-  #regionPresentation(region: FormulaRegion): {
+  #regionPresentation(region: FormulaPlacementPlan): {
     invisible: boolean;
     foreground: string;
     background: string;
   } {
     const buffer = this.terminal.buffer.active;
-    const ranges = region.wrapSegments?.length
-      ? region.wrapSegments.map((segment) => ({
-          row: region.startRow + segment.rowOffset,
-          startCol: segment.startCol,
-          endCol: segment.endCol
+    const ranges = region.sourceMasks.length
+      ? region.sourceMasks.map((segment) => ({
+          row: region.canvas.startRow + segment.rowOffset,
+          startCol: region.canvas.startCol + segment.startCol,
+          endCol: region.canvas.startCol + segment.endCol
         }))
-      : region.startRow < region.endRow && !region.compact
-      ? Array.from(
-          { length: region.endRow - region.startRow + 1 },
-          (_, offset) => ({
-            row: region.startRow + offset,
-            startCol: offset === 0 ? region.startCol : 0,
-            endCol: offset === region.endRow - region.startRow
-              ? region.endCol
-              : this.terminal.cols
-          })
-        )
       : Array.from(
-          { length: region.endRow - region.startRow + 1 },
+          { length: region.canvas.endRow - region.canvas.startRow + 1 },
           (_, offset) => ({
-            row: region.startRow + offset,
-            startCol: region.startCol,
-            endCol: region.endCol
+            row: region.canvas.startRow + offset,
+            startCol: region.canvas.startCol,
+            endCol: region.canvas.endCol
           })
         );
     let invisible = false;
@@ -1815,41 +2018,54 @@ export class FormulaScreen {
     return { invisible, foreground, background };
   }
 
-  #regionSourceText(region: FormulaRegion): string {
+  #regionSourceText(region: FormulaPlacementPlan): string {
     const buffer = this.terminal.buffer.active;
     return Array.from(
-      { length: region.endRow - region.startRow + 1 },
-      (_, offset) => buffer.getLine(buffer.viewportY + region.startRow + offset)
+      { length: region.canvas.endRow - region.canvas.startRow + 1 },
+      (_, offset) => buffer.getLine(buffer.viewportY + region.canvas.startRow + offset)
         ?.translateToString(true) ?? ""
     ).join("\n");
   }
 
   #anchor(
-    region: FormulaRegion,
+    region: FormulaPlacementPlan,
     columns: number,
     rows: number,
     bufferType: string,
     viewportY: number
   ): string {
-    return `${bufferType}:${viewportY + region.startRow}:${region.startCol}:${columns}:${rows}`;
+    return `${bufferType}:${viewportY + region.canvas.startRow}:${region.canvas.startCol}:${columns}:${rows}`;
   }
 
-  #regionIdentity(region: FormulaRegion): string {
-    return JSON.stringify([
-      region.startRow,
-      region.endRow,
-      region.startCol,
-      region.endCol,
-      region.latex,
-      region.display,
-      region.compact ?? false,
-      region.displayRange ?? null,
-      region.composite ?? false,
-      region.wrapSegments ?? null
-    ]);
+  #regionIdentity(region: FormulaPlacementPlan): string {
+    return JSON.stringify(region);
   }
 
-  #regionStillVisible(region: FormulaRegion, viewportY: number, bufferType: string): boolean {
+  #formulaStabilityKey(
+    region: FormulaPlacementPlan,
+    viewportY: number,
+    bufferType: string
+  ): string {
+    return `${bufferType}:${viewportY}:${this.#regionIdentity(region)}`;
+  }
+
+  /** Return zero when stable, otherwise the remaining quiet-period delay. */
+  #observeFormulaStability(key: string, forceStable: boolean): number {
+    const now = Date.now();
+    let state = this.#formulaStability.get(key);
+    if (!state) {
+      state = { firstSeenAt: now, stable: forceStable || this.#stabilityMs === 0 };
+      this.#formulaStability.set(key, state);
+    }
+    if (forceStable) state.stable = true;
+    if (state.stable) return 0;
+    const remaining = this.#stabilityMs - (now - state.firstSeenAt);
+    if (remaining > 0) return remaining;
+    state.stable = true;
+    return 0;
+  }
+
+  #regionStillVisible(region: FormulaPlacementPlan, viewportY: number, bufferType: string): boolean {
     const buffer = this.terminal.buffer.active;
     if (buffer.viewportY !== viewportY || buffer.type !== bufferType) return false;
     const version = this.#scanVersion;
@@ -1873,18 +2089,18 @@ export class FormulaScreen {
 
   #replacementForRegion(
     anchor: string,
-    region: FormulaRegion,
+    region: FormulaPlacementPlan,
     bufferType: string,
     viewportY: number,
     claimedAnchors: ReadonlySet<string>
   ): { anchor: string; placement: PlacedFormula } | undefined {
     const exact = claimedAnchors.has(anchor) ? undefined : this.#placed.get(anchor);
     if (exact) return { anchor, placement: exact };
-    const start = viewportY + region.startRow;
-    const end = viewportY + region.endRow;
+    const start = viewportY + region.canvas.startRow;
+    const end = viewportY + region.canvas.endRow;
     for (const [oldAnchor, placement] of this.#placed) {
       if (claimedAnchors.has(oldAnchor)) continue;
-      if (placement.bufferType !== bufferType || placement.latex !== region.latex) continue;
+      if (placement.bufferType !== bufferType || placement.latex !== region.formula.latex) continue;
       const bounds = this.#placementBounds(placement);
       if (bounds.start < 0 || bounds.end < 0) continue;
       if (bounds.start <= end && bounds.end >= start) {
@@ -1899,7 +2115,7 @@ export class FormulaScreen {
     const candidates = Array.from(this.#placed.entries())
       .filter(([oldAnchor, placement]) => !claimedAnchors.has(oldAnchor)
         && placement.bufferType === bufferType
-        && placement.latex === region.latex
+        && placement.latex === region.formula.latex
         && placement.layoutHint
         && ![placement.startMarker, placement.endMarker].some((marker) =>
           Boolean(marker && !marker.isDisposed && marker.line >= 0)
@@ -1915,11 +2131,11 @@ export class FormulaScreen {
 
   #placementExactlyTracksRegion(
     placement: PlacedFormula,
-    region: FormulaRegion,
+    region: FormulaPlacementPlan,
     bufferType: string,
     viewportY: number
   ): boolean {
-    if (placement.bufferType !== bufferType || placement.latex !== region.latex) return false;
+    if (placement.bufferType !== bufferType || placement.latex !== region.formula.latex) return false;
     // Normal-buffer absolute row numbers are reused after xterm reaches its
     // scrollback limit. Once both markers have expired, layoutHint is only a
     // resize fallback; it is not proof that an old placement belongs to new
@@ -1931,11 +2147,11 @@ export class FormulaScreen {
       if (!hasLiveMarker) return false;
     }
     const bounds = this.#placementBounds(placement);
-    return bounds.start === viewportY + region.startRow
-      && bounds.end === viewportY + region.endRow;
+    return bounds.start === viewportY + region.canvas.startRow
+      && bounds.end === viewportY + region.canvas.endRow;
   }
 
-  async #scan(allowQueuedWrites = false): Promise<void> {
+  async #scan(allowQueuedWrites = false, forceStable = false): Promise<void> {
     if (this.#disposed || !this.#capabilities.kittyGraphics || this.terminal.modes.originMode) return;
     if ((!allowQueuedWrites && this.#pendingWrites > 0) || this.#layoutSuspended) {
       this.#rescanRequested = true;
@@ -1963,20 +2179,23 @@ export class FormulaScreen {
     const viewportY = activeBuffer.viewportY;
     const bufferType = activeBuffer.type;
     let retryDelay: number | undefined;
+    let stabilityRetryDelay: number | undefined;
+    const observedStabilityKeys = new Set<string>();
     try {
       this.#detachExpiredMarkerPlacements();
       const snapshot = this.#formulaSnapshot();
       const regions = snapshot.regions;
       const prepared = regions.flatMap((region) => {
+        this.#rememberFormula(region);
         const presentation = this.#regionPresentation(region);
         if (presentation.invisible) return [];
-        const rows = region.endRow - region.startRow + 1;
-        const columns = rows > 1 && !region.compact
-          ? this.terminal.cols
-          : Math.max(1, Math.min(this.terminal.cols - region.startCol, region.endCol - region.startCol));
+        const rows = region.canvas.endRow - region.canvas.startRow + 1;
+        const columns = region.canvas.endCol - region.canvas.startCol;
+        const plan = region;
         const anchor = this.#anchor(region, columns, rows, bufferType, viewportY);
         return [{
           region,
+          plan,
           rows,
           columns,
           anchor,
@@ -1994,7 +2213,7 @@ export class FormulaScreen {
       const retainedReplacementAnchors = new Set<string>();
       const claimedReplacementAnchors = new Set<string>();
 
-      for (const { region, rows, columns, anchor, colors } of prepared) {
+      for (const { region, plan, rows, columns, anchor, colors } of prepared) {
         if (this.#disposed
           || (!allowQueuedWrites && this.#pendingWrites > 0)
           || this.#layoutSuspended
@@ -2011,12 +2230,14 @@ export class FormulaScreen {
           };
         }
         const fingerprint = createHash("sha1").update(JSON.stringify({
-          latex: region.latex,
-          display: region.display,
-          compact: region.compact,
-          displayRange: region.displayRange,
-          composite: region.composite,
-          wrapSegments: region.wrapSegments,
+          formula: plan.formula,
+          canvas: plan.canvas,
+          mode: plan.mode,
+          estimatedQuality: plan.estimatedQuality,
+          displayRange: plan.displayRange,
+          composite: plan.composite,
+          sourceMasks: plan.sourceMasks,
+          formulaSlices: plan.formulaSlices,
           colors: renderColors,
           cell: this.#capabilities.cell,
           scale: this.#scale
@@ -2031,7 +2252,8 @@ export class FormulaScreen {
         let existing = replacement?.placement;
         if (replacement?.anchor === anchor
           && existing
-          && (existing.bufferType !== bufferType || existing.latex !== region.latex)) {
+          && (existing.bufferType !== bufferType
+            || existing.latex !== region.formula.latex)) {
           // An anchor identifies terminal coordinates, not content. A TUI can
           // overwrite those cells with a different formula, and absolute row
           // numbers are also recycled at the scrollback cap. Do not leave the
@@ -2063,6 +2285,19 @@ export class FormulaScreen {
         }
         const placementRetryKey = `${anchor}|${fingerprint}`;
         if (this.#blockedPlacementKeys.has(placementRetryKey)) continue;
+        const stabilityKey = this.#formulaStabilityKey(region, viewportY, bufferType);
+        if (!existing) {
+          observedStabilityKeys.add(stabilityKey);
+          const stabilityDelay = this.#observeFormulaStability(stabilityKey, forceStable);
+          if (stabilityDelay > 0) {
+            stabilityRetryDelay = Math.min(
+              stabilityRetryDelay ?? stabilityDelay,
+              stabilityDelay
+            );
+            this.#debug(`collecting formula at ${anchor}; waiting ${Math.ceil(stabilityDelay)} ms for stability`);
+            continue;
+          }
+        }
         const placementRetry = this.#placementRetries.get(placementRetryKey);
         if (placementRetry && placementRetry.notBefore > Date.now()) {
           const remaining = placementRetry.notBefore - Date.now();
@@ -2071,10 +2306,8 @@ export class FormulaScreen {
         }
 
         try {
-          const rendered = await this.#renderer.render(
-            region,
-            columns,
-            rows,
+          const rendered = await this.#renderer.renderPlacement(
+            plan,
             this.#capabilities,
             this.#scale,
             renderColors.foreground,
@@ -2104,6 +2337,31 @@ export class FormulaScreen {
               this.#rescanRequested = true;
               continue;
             }
+          }
+
+          if (rendered.fitScale < this.#minReadableScale) {
+            this.#rememberFormula(plan, {
+              fitScale: rendered.fitScale,
+              degradationReason: `fit scale ${rendered.fitScale.toFixed(3)} below ${this.#minReadableScale.toFixed(3)}`
+            });
+            // A tiny but technically successful rasterization is less useful
+            // than the original TeX. Remember this exact layout variant so
+            // unrelated screen updates do not repeatedly render it; a resize
+            // or newly available blank row changes the key and retries.
+            this.#blockedPlacementKeys.add(placementRetryKey);
+            if (existing && replacement) {
+              await this.#writeGraphicsTransaction(
+                kittyDeletePlacement(existing.imageId, existing.placementId)
+              );
+              this.#releasePlacement(existing);
+              this.#placed.delete(replacement.anchor);
+              retainedReplacementAnchors.delete(replacement.anchor);
+            }
+            this.#formulaStability.delete(stabilityKey);
+            this.#debug(
+              `kept raw TeX at ${anchor}: fitted scale ${rendered.fitScale.toFixed(3)} is below ${this.#minReadableScale.toFixed(3)}`
+            );
+            continue;
           }
 
           const buffer = this.terminal.buffer.active;
@@ -2176,7 +2434,7 @@ export class FormulaScreen {
               if (!restoreCursor) return undefined;
               return [
                 existing ? kittyDeletePlacement(existing.imageId, existing.placementId) : "",
-                cursorPosition(region.startRow + 1, region.startCol + 1),
+                cursorPosition(plan.canvas.startRow + 1, plan.canvas.startCol + 1),
                 kittyPlaceImage(image.imageId, placementId, columns, rows),
                 restoreCursor
               ].join("");
@@ -2224,23 +2482,30 @@ export class FormulaScreen {
             imageId: image.imageId,
             placementId,
             imageKey: terminalImageKey,
-            latex: region.latex,
+            latex: region.formula.latex,
             sourceText: this.#regionSourceText(region),
             fingerprint,
             resizeGeneration: this.#resizeGeneration,
             bufferType: buffer.type,
-            absoluteStartRow: buffer.viewportY + region.startRow,
-            absoluteEndRow: buffer.viewportY + region.endRow,
+            absoluteStartRow: buffer.viewportY + region.canvas.startRow,
+            absoluteEndRow: buffer.viewportY + region.canvas.endRow,
             ...markers
           });
+          this.#formulaStability.delete(stabilityKey);
+          this.#rememberFormula(plan, {
+            fitScale: rendered.fitScale,
+            degradationReason: null
+          });
           this.#evictIdleTerminalImages();
-          this.#debug(`rendered ${region.confidence} formula at ${anchor} (${rendered.widthPx}x${rendered.heightPx}px)`);
+          this.#debug(
+            `rendered ${plan.formula.confidence} formula at ${anchor} (${rendered.widthPx}x${rendered.heightPx}px, fit ${rendered.fitScale.toFixed(3)}, canvas ${plan.mode})`
+          );
           if (reportNewOccurrence && this.#onFormulaRendered) {
             try {
               this.#onFormulaRendered({
-                latex: region.latex,
-                display: region.display,
-                confidence: region.confidence
+                latex: plan.formula.latex,
+                display: plan.formula.intent !== "inline",
+                confidence: plan.formula.confidence
               });
             } catch (error) {
               this.#debug(
@@ -2249,6 +2514,9 @@ export class FormulaScreen {
             }
           }
         } catch (error) {
+          this.#rememberFormula(plan, {
+            degradationReason: `render failed: ${error instanceof Error ? error.message : String(error)}`
+          });
           this.#debug(`formula render skipped: ${error instanceof Error ? error.message : String(error)}`);
           // The old placement is the last known-good rendering of this exact
           // LaTeX. Leave it in place; a later layout/output scan can replace it
@@ -2275,6 +2543,9 @@ export class FormulaScreen {
       // moved into scrollback. Markers keep this visibility check valid after
       // normal-buffer reflow.
       if (layoutVersion === this.#layoutVersion && version === this.#scanVersion) {
+        for (const key of this.#formulaStability.keys()) {
+          if (!observedStabilityKeys.has(key)) this.#formulaStability.delete(key);
+        }
         let detachedAfterLayout = 0;
         for (const [anchor, placement] of this.#placed) {
           const hasLiveMarker = [placement.startMarker, placement.endMarker].some((marker) =>
@@ -2315,6 +2586,11 @@ export class FormulaScreen {
       if (!this.#disposed && (this.#rescanRequested || version !== this.#scanVersion)) {
         this.#rescanRequested = false;
         if (this.#pendingWrites === 0 && !this.#layoutSuspended) this.scheduleScan(140);
+      } else if (!this.#disposed && stabilityRetryDelay !== undefined) {
+        // Stability is a quiet-period debounce, not an error backoff. Keep its
+        // timer flushable so an output checkpoint can promote the complete
+        // formula immediately before later PTY rows scroll it away.
+        this.scheduleScan(Math.max(16, stabilityRetryDelay));
       } else if (!this.#disposed && retryDelay !== undefined) {
         this.scheduleScan(Math.max(16, retryDelay), true);
       }

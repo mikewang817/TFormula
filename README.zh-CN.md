@@ -221,8 +221,14 @@ TFormula 会在启动时以及终端尺寸变化后查询单元格的像素尺�
 公式的自然 `ex` 高度映射到终端文字高度。因此普通数学符号会与周围文字大小
 接近，而分式、求和与导数仍保留自然的上下结构。
 
-公式不会为了填满源码区域而强制放大；只有在超出原始行列范围时才会缩小。
+公式不会为了填满源码区域而强制放大；只有在超出安全显示画布时才会缩小。
 这是因为全屏 TUI 中不能随意插入额外行，否则会破坏 Agent 的光标坐标。
+当 Agent 把独立的 `$$...$$` 或 `\[...\]` 公式放在单个物理行时，TFormula 会为
+原位画布及所有可安全借用相邻空白行的候选方案评分。简单方程仍留在源码行；分式、
+导数、大型算符和多行环境只有在可读性收益超过借用行数及中心偏移代价时才扩展。
+用于遮住原始 TeX 的不透明背景仍然只绘制在源码实际占用的单元格内，因此扩大后的
+画布不会把空白行或邻近正文涂成整块背景。夹在正文中的 display 公式不会借用空白
+行；两个独立公式共享的空白行也不会分配给其中任何一个。
 
 TeX 在终端边缘软换行，或终端 TUI 按自己的内容宽度插入硬换行时，TFormula 都会
 重组完整公式，再用逐行透明切片覆盖源码；与公式共用首尾物理行的正文不会被图片
@@ -260,6 +266,33 @@ tformula --cell-size 10x20 claude
 ```sh
 tformula --scale 1.1 codex
 TFORMULA_SCALE=0.9 tformula --shell
+```
+
+TFormula 还会测量公式为了装入安全画布而保留的自然尺寸比例。默认最低可读比例为
+0.4；低于该值时保留原始 TeX，而不是覆盖一张几乎无法辨认的小图。可以调整该值，
+也可以设为零以禁用这一降级策略：
+
+```sh
+tformula --min-readable-scale 0.6 codex
+TFORMULA_MIN_READABLE_SCALE=0 tformula claude
+```
+
+后台扫描还要求新识别的公式区域保持 80 毫秒不变后才上传图片。因此被快速从
+`x=1` 改写为 `x=2` 的区域只会渲染最终状态。输出检查点会让已经完整的公式跳过
+该静默期，避免长回答把尚未渲染的公式滚出屏幕。可以调整或禁用延迟：
+
+```sh
+tformula --stability-ms 150 codex
+TFORMULA_STABILITY_MS=0 tformula claude
+```
+
+按 `Ctrl-]` 可将最近识别的公式显示在覆盖整个终端的高 z-index 聚焦层中。聚焦时，
+`n`/`j` 选择更早的公式，`p`/`k` 选择更新的公式，`q`、`Esc` 或再次按
+`Ctrl-]` 退出；这些按键由 TFormula 消费，不会泄漏给 Agent。可以修改或禁用快捷键：
+
+```sh
+tformula --focus-key ctrl-f codex
+TFORMULA_FOCUS_KEY=none tformula claude
 ```
 
 ## 科学 LaTeX 兼容性
@@ -357,6 +390,9 @@ $ ... $
 --no-math               仅作为透明 PTY 代理，不渲染公式
 --no-history            不保存成功渲染的公式历史
 --scale <number>        公式相对终端文字的比例，范围 0.5～2.0
+--min-readable-scale <n> 低于该缩放比例时保留原始 TeX，范围 0～1
+--stability-ms <number> 后台公式静默期，范围 0～2000 毫秒
+--focus-key <key>       公式聚焦快捷键（ctrl-X、单字符或 none）
 --cell-size <WxH>       手动指定终端单元格像素尺寸
 -C, --cwd <directory>  指定 Agent 的工作目录
 --debug                 输出检测与尺寸调试信息

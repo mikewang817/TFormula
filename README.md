@@ -241,9 +241,9 @@ the same visual size as neighboring terminal text. Fractions, sums, and other
 tall constructs retain their natural proportions.
 
 Formulas are never enlarged merely to fill the source rectangle. They are only
-scaled down when they would exceed the columns or rows already occupied by the
-source. This is necessary because inserting terminal rows behind a full-screen
-TUI would desynchronize its cursor coordinates.
+scaled down when they would exceed the available safe visual canvas. This is
+necessary because inserting terminal rows behind a full-screen TUI would
+desynchronize its cursor coordinates.
 
 Formula scans are coalesced during streaming output instead of waiting for the
 terminal to become completely idle. Unrelated status-bar or spinner updates do
@@ -278,10 +278,14 @@ TFormula reserves a private image-ID range and deletes that complete range on
 full reset and shutdown, including interrupted transmissions.
 
 When an agent emits display math as a single standalone `$$...$$` or
-`\[...\]` line, TFormula borrows adjacent blank terminal rows when available.
-This gives fractions and derivatives enough vertical space to retain the same
-base glyph size as simple equations. Inline math and display delimiters mixed
-with prose are never expanded, so neighboring text is not covered.
+`\[...\]` line, TFormula scores the source-only canvas and every candidate that
+borrows unambiguous adjacent blank rows. Simple equations stay on their source
+row; fractions, derivatives, large operators, and row environments use extra
+height when its readability gain outweighs borrowing and displacement costs.
+The chosen visual canvas remains transparent: an opaque background masks only
+the cells containing the original TeX. Inline math and display delimiters mixed
+with prose are never expanded, and a blank row shared by two standalone
+displays is assigned to neither.
 
 A trailing inline formula can similarly use one following blank row for tall
 fraction content. TFormula absorbs terminal punctuation into that overlay so it
@@ -315,6 +319,38 @@ terminal font:
 ```sh
 tformula --scale 1.1 codex
 TFORMULA_SCALE=0.9 tformula --shell
+```
+
+TFormula also measures how much a formula had to be reduced to fit its safe
+canvas. The default minimum readable ratio is 0.4; below it, the original TeX
+is kept instead of placing an illegibly small image. This policy can be tuned
+or disabled with zero:
+
+```sh
+tformula --min-readable-scale 0.6 codex
+TFORMULA_MIN_READABLE_SCALE=0 tformula claude
+```
+
+Background scans also require a newly detected formula region to remain
+unchanged for 80 ms before uploading it. A rapidly rewritten `x=1` → `x=2`
+region therefore renders only its final state. Output checkpoints bypass this
+quiet period for complete formulas so long responses cannot scroll them away.
+The delay can be adjusted or disabled:
+
+```sh
+tformula --stability-ms 150 codex
+TFORMULA_STABILITY_MS=0 tformula claude
+```
+
+Press `Ctrl-]` to open the most recently observed formula in a full-terminal,
+high-z-index focus overlay. While focused, `n`/`j` selects an older formula,
+`p`/`k` selects a newer formula, and `q`, `Esc`, or `Ctrl-]` closes the overlay.
+These keys are consumed by TFormula and never reach the Agent. The shortcut can
+be changed or disabled:
+
+```sh
+tformula --focus-key ctrl-f codex
+TFORMULA_FOCUS_KEY=none tformula claude
 ```
 
 ## Scientific LaTeX compatibility
@@ -420,6 +456,9 @@ ordinary prices such as `$12.50` from being rendered.
 --no-math               Run only as a transparent PTY proxy
 --no-history            Do not persist successfully rendered formulas
 --scale <number>        Formula-to-terminal text scale (0.5 to 2.0)
+--min-readable-scale <n> Keep raw TeX below this fitted ratio (0 to 1)
+--stability-ms <number> Background formula quiet period (0 to 2000 ms)
+--focus-key <key>       Formula focus shortcut (ctrl-X, one character, or none)
 --cell-size <WxH>       Override terminal cell pixels
 -C, --cwd <directory>  Child working directory
 --debug                 Print detection and sizing diagnostics

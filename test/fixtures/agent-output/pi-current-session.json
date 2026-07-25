@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "id": "pi-current-session-borrowed-row",
+  "agent": "pi",
+  "provenance": {
+    "kind": "session-derived",
+    "note": "Derived from the current local Pi coding-agent session to preserve a display formula adjacent to status text; no user content retained."
+  },
+  "geometry": {
+    "columns": 60,
+    "rows": 7
+  },
+  "ansi": "\u001b[2J\u001b[HPi response\r\npreceding explanation\r\n$$\\frac{a+b}{c+d}$$\r\n\r\nstatus: ready",
+  "expected": {
+    "cells": [
+      {
+        "row": 0,
+        "text": "Pi response",
+        "isWrapped": false
+      },
+      {
+        "row": 1,
+        "text": "preceding explanation",
+        "isWrapped": false
+      },
+      {
+        "row": 2,
+        "text": "$$\\frac{a+b}{c+d}$$",
+        "isWrapped": false
+      },
+      {
+        "row": 3,
+        "text": "",
+        "isWrapped": false
+      },
+      {
+        "row": 4,
+        "text": "status: ready",
+        "isWrapped": false
+      },
+      {
+        "row": 5,
+        "text": "",
+        "isWrapped": false
+      },
+      {
+        "row": 6,
+        "text": "",
+        "isWrapped": false
+      }
+    ],
+    "formulas": [
+      {
+        "formula": {
+          "source": {
+            "startRow": 2,
+            "endRow": 2,
+            "startCol": 0,
+            "endCol": 19
+          },
+          "latex": "\\frac{a+b}{c+d}",
+          "intent": "display",
+          "confidence": "explicit"
+        },
+        "source": {
+          "startRow": 2,
+          "endRow": 2,
+          "startCol": 0,
+          "endCol": 19
+        },
+        "sourceSegments": [
+          {
+            "rowOffset": 0,
+            "startCol": 0,
+            "endCol": 19,
+            "logicalStartCol": 0
+          }
+        ],
+        "formulaSlices": [],
+        "fullWidth": true,
+        "composite": false
+      }
+    ],
+    "plans": [
+      {
+        "formula": {
+          "source": {
+            "startRow": 2,
+            "endRow": 2,
+            "startCol": 0,
+            "endCol": 19
+          },
+          "latex": "\\frac{a+b}{c+d}",
+          "intent": "display",
+          "confidence": "explicit"
+        },
+        "canvas": {
+          "startRow": 2,
+          "endRow": 3,
+          "startCol": 0,
+          "endCol": 60
+        },
+        "sourceMasks": [
+          {
+            "rowOffset": 0,
+            "startCol": 0,
+            "endCol": 19,
+            "logicalStartCol": 0
+          }
+        ],
+        "formulaSlices": [],
+        "mode": "borrowed-below",
+        "estimatedQuality": 97,
+        "composite": false
+      }
+    ],
+    "kitty": [
+      {
+        "row": 3,
+        "column": 1,
+        "columns": 60,
+        "rows": 2
+      }
+    ]
+  }
+}

@@ -1,7 +1,7 @@
 import { renderAsync } from "@resvg/resvg-js";
 import type {
   CellMetrics,
-  FormulaRegion,
+  FormulaPlacementPlan,
   FormulaWrapSegment,
   RenderedFormula,
   TerminalCapabilities
@@ -385,6 +385,27 @@ function buildHorizontallySlicedSvg(options: {
   ].join("");
 }
 
+function buildSourceMaskedSvg(options: {
+  canvasWidth: number;
+  canvasHeight: number;
+  sourceSegments: FormulaWrapSegment[];
+  cell: CellMetrics;
+  background: string;
+  content: string;
+}): string {
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${options.canvasWidth}" height="${options.canvasHeight}" viewBox="0 0 ${options.canvasWidth} ${options.canvasHeight}">`,
+    ...options.sourceSegments.map((segment) => {
+      const x = segment.startCol * options.cell.width;
+      const y = segment.rowOffset * options.cell.height;
+      const width = (segment.endCol - segment.startCol) * options.cell.width;
+      return `<rect x="${x}" y="${y}" width="${width}" height="${options.cell.height}" fill="${escapeAttribute(options.background)}"/>`;
+    }),
+    options.content,
+    "</svg>"
+  ].join("");
+}
+
 function lruCacheGet<Key, Value>(cache: Map<Key, Value>, key: Key): Value | undefined {
   const value = cache.get(key);
   if (value === undefined) return undefined;
@@ -460,33 +481,32 @@ export class MathRenderer {
 
   constructor(readonly persistentCache: FormulaCache = sharedFormulaCache) {}
 
-  async render(
-    region: FormulaRegion,
-    columns: number,
-    rows: number,
+  async renderPlacement(
+    plan: FormulaPlacementPlan,
     capabilities: TerminalCapabilities,
     scale: number,
     foreground = capabilities.foreground,
     background = capabilities.background
   ): Promise<RenderedFormula> {
-    const wrapSegments = region.wrapSegments?.length ? region.wrapSegments : undefined;
+    const columns = Math.max(1, plan.canvas.endCol - plan.canvas.startCol);
+    const rows = Math.max(1, plan.canvas.endRow - plan.canvas.startRow + 1);
+    const display = plan.formula.intent !== "inline";
+    const wrapSegments = plan.formulaSlices.length ? plan.formulaSlices : undefined;
     const segmentLogicalColumns = wrapSegments
       ? Math.max(...wrapSegments.map((segment) =>
         segment.logicalStartCol + segment.endCol - segment.startCol
       ))
       : 0;
-    const logicalColumns = region.displayRange
-      ? Math.max(1, region.displayRange.endCol - region.displayRange.startCol)
+    const logicalColumns = plan.displayRange
+      ? Math.max(1, plan.displayRange.endCol - plan.displayRange.startCol)
       : wrapSegments
       ? Math.max(1, segmentLogicalColumns)
       : columns;
-    const segmented = Boolean(wrapSegments);
-    const rangedDisplay = Boolean(region.displayRange);
-    const horizontallySliced = segmented && !rangedDisplay;
+    const horizontallySliced = Boolean(wrapSegments);
     // A one-row TUI region has no vertical space for MathJax's line boxes and
     // can become less legible when several lines are compressed back into it.
     // Multi-row, non-segmented displays can use their reserved height safely.
-    const linebreakDisplay = region.display && !horizontallySliced && rows > 1;
+    const linebreakDisplay = display && !horizontallySliced && rows > 1;
     const availableWidthPx = Math.max(
       1,
       logicalColumns * capabilities.cell.width - capabilities.cell.width * 2
@@ -496,18 +516,21 @@ export class MathRenderer {
       ? Math.max(1, availableWidthPx * MATHJAX_EX_PX / targetExPx)
       : CANONICAL_CONTAINER_WIDTH;
     const { svgKey } = mathJaxCacheRequest(
-      region.latex,
-      region.display,
+      plan.formula.latex,
+      display,
       mathJaxContainerWidth
     );
     const cacheKey = formulaCacheKey({
       version: PNG_CACHE_VERSION,
       svgKey,
-      display: region.display,
-      compact: Boolean(region.compact),
-      displayRange: region.displayRange,
-      composite: Boolean(region.composite),
-      wrapSegments: region.wrapSegments,
+      intent: plan.formula.intent,
+      display,
+      compact: Boolean(plan.formula.compact),
+      displayRange: plan.displayRange,
+      composite: plan.composite,
+      sourceMasks: plan.sourceMasks,
+      formulaSlices: plan.formulaSlices,
+      mode: plan.mode,
       columns,
       rows,
       cell: { width: capabilities.cell.width, height: capabilities.cell.height },
@@ -519,8 +542,8 @@ export class MathRenderer {
     if (cached) return cached;
 
     const formulaSvg = await renderMathJaxSvg(
-      region.latex,
-      region.display,
+      plan.formula.latex,
+      display,
       mathJaxContainerWidth,
       this.persistentCache
     );
@@ -533,11 +556,11 @@ export class MathRenderer {
       rows: horizontallySliced ? 1 : rows,
       cell: capabilities.cell,
       scale,
-      display: horizontallySliced ? false : region.display,
-      leftAlign: !region.display || Boolean(region.compact)
+      display: horizontallySliced ? false : display,
+      leftAlign: !display || Boolean(plan.formula.compact)
     });
     const nestedX = geometry.offsetX
-      + (region.displayRange?.startCol ?? 0) * capabilities.cell.width;
+      + (plan.displayRange?.startCol ?? 0) * capabilities.cell.width;
     const nested = resizeNestedSvg(
       formulaSvg,
       nestedX,
@@ -548,24 +571,20 @@ export class MathRenderer {
     const content = `<g color="${escapeAttribute(foreground)}" fill="${escapeAttribute(foreground)}">${nested}</g>`;
     const canvasWidth = Math.max(1, Math.round(columns * capabilities.cell.width));
     const canvasHeight = Math.max(1, Math.round(rows * capabilities.cell.height));
-    const sliceBackgrounds = wrapSegments?.map((segment) => {
-      const x = segment.startCol * capabilities.cell.width;
-      const y = segment.rowOffset * capabilities.cell.height;
-      const width = (segment.endCol - segment.startCol) * capabilities.cell.width;
-      return `<rect x="${x}" y="${y}" width="${width}" height="${capabilities.cell.height}" fill="${escapeAttribute(background)}"/>`;
-    }) ?? [];
-    const wrapper = region.displayRange && wrapSegments
-      ? [
-          `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasWidth}" height="${canvasHeight}" viewBox="0 0 ${canvasWidth} ${canvasHeight}">`,
-          ...sliceBackgrounds,
-          content,
-          "</svg>"
-        ].join("")
-      : wrapSegments
+    const wrapper = wrapSegments
       ? buildHorizontallySlicedSvg({
           canvasWidth,
           canvasHeight,
           wrapSegments,
+          cell: capabilities.cell,
+          background,
+          content
+        })
+      : plan.sourceMasks.length > 0
+      ? buildSourceMaskedSvg({
+          canvasWidth,
+          canvasHeight,
+          sourceSegments: plan.sourceMasks,
           cell: capabilities.cell,
           background,
           content
@@ -586,6 +605,7 @@ export class MathRenderer {
       rows,
       widthPx: canvasWidth,
       heightPx: canvasHeight,
+      fitScale: geometry.fitScale,
       naturalAspectRatio: dimensions.aspectRatio,
       naturalHeightEx: dimensions.heightEx
     };
@@ -601,6 +621,7 @@ export class MathRenderer {
 
 export const mathRendererInternals = {
   buildHorizontallySlicedSvg,
+  buildSourceMaskedSvg,
   lruCacheGet,
   renderSvgToPng,
   svgNeedsSystemFonts

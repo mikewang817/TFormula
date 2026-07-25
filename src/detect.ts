@@ -1,5 +1,18 @@
 import stringWidth from "string-width";
-import type { FormulaRegion } from "./types.js";
+import type { DetectedFormula, FormulaIntent } from "./types.js";
+
+/** Internal semantic candidate used while detection passes merge and filter spans. */
+interface SemanticFormulaCandidate {
+  startRow: number;
+  endRow: number;
+  startCol: number;
+  endCol: number;
+  latex: string;
+  display: boolean;
+  confidence: "explicit" | "inferred";
+  compact?: boolean;
+}
+
 
 const COMMAND_RE = /\\(?:frac|dfrac|tfrac|binom|sum|prod|coprod|int|iint|iiint|oint|log|ln|exp|sqrt|lim|liminf|limsup|sin|cos|tan|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh|det|dim|gcd|hom|ker|max|min|sup|inf|Pr|mod|pmod|bmod|ce|pu|qty|dv|pdv|bra|ket|braket|begin|end|left|right|text|mathrm|mathbf|mathit|mathsf|mathtt|mathbb|mathcal|mathfrak|operatorname|overline|underline|widehat|widetilde|hat|bar|vec|dot|ddot|partial|nabla|ell|infty|forall|exists|neg|pm|mp|times|div|cdot|ast|star|circ|bullet|oplus|otimes|cap|cup|subset|supset|subseteq|supseteq|in|notin|ni|le|leq|ge|geq|neq|ne|approx|sim|simeq|cong|equiv|propto|to|mapsto|rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|Leftrightarrow|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|omicron|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega)(?![A-Za-z])/gu;
 
@@ -240,7 +253,7 @@ function definitionItem(line: string): DefinitionItem | undefined {
   return undefined;
 }
 
-function inferredDefinitionGroup(lines: string[], startRow: number): FormulaRegion | undefined {
+function inferredDefinitionGroup(lines: string[], startRow: number): SemanticFormulaCandidate | undefined {
   const items: DefinitionItem[] = [];
   for (let row = startRow; row < lines.length; row += 1) {
     const item = definitionItem(lines[row] ?? "");
@@ -732,8 +745,8 @@ function slashDelimitedRegions(
   opening: "\\(" | "\\[",
   closing: "\\)" | "\\]",
   display: boolean
-): FormulaRegion[] {
-  const regions: FormulaRegion[] = [];
+): SemanticFormulaCandidate[] {
+  const regions: SemanticFormulaCandidate[] = [];
   let pending: DelimiterPosition | undefined;
 
   for (let row = 0; row < lines.length; row += 1) {
@@ -808,7 +821,7 @@ interface EnvironmentToken {
 function environmentRegions(
   lines: string[],
   contexts: DetectionLineContext[]
-): FormulaRegion[] {
+): SemanticFormulaCandidate[] {
   const tokens: EnvironmentToken[] = [];
   const pattern = /\\(begin|end)\{([A-Za-z]+\*?)\}/gu;
   for (let row = 0; row < lines.length; row += 1) {
@@ -832,7 +845,7 @@ function environmentRegions(
     }
   }
 
-  const regions: FormulaRegion[] = [];
+  const regions: SemanticFormulaCandidate[] = [];
   const stack: EnvironmentToken[] = [];
   let outer: EnvironmentToken | undefined;
   for (const token of tokens) {
@@ -888,7 +901,7 @@ function dollarDelimitedRegions(
   contexts: DetectionLineContext[],
   delimiter: "$" | "$$",
   display: boolean
-): FormulaRegion[] {
+): SemanticFormulaCandidate[] {
   const positions: DelimiterPosition[] = [];
   for (let row = 0; row < lines.length; row += 1) {
     const context = contexts[row]!;
@@ -1005,7 +1018,7 @@ function hardWrappedDollarDisplay(
   lines: string[],
   startRow: number,
   codeRanges: InlineCodeRange[]
-): FormulaRegion | undefined {
+): SemanticFormulaCandidate | undefined {
   const line = lines[startRow] ?? "";
   const openings = dollarDelimiterPositions(line, "$$")
     .filter((position) => !overlapsInlineCode(position, position + 2, codeRanges));
@@ -1243,63 +1256,6 @@ function pendingDisplayRows(
   return pendingRows;
 }
 
-function expandStandaloneDisplayRegions(
-  lines: string[],
-  regions: FormulaRegion[]
-): FormulaRegion[] {
-  const claimedRows = new Set<number>();
-  const standaloneRows = new Set(regions
-    .filter((region) => region.display
-      && region.startRow === region.endRow
-      && isStandaloneDisplayLine(lines[region.startRow] ?? ""))
-    .map((region) => region.startRow));
-  for (const region of regions) {
-    for (let row = region.startRow; row <= region.endRow; row += 1) claimedRows.add(row);
-  }
-
-  const exclusivelyAdjacent = (blankRow: number, formulaRow: number): boolean => {
-    const neighbors = [blankRow - 1, blankRow + 1]
-      .filter((row) => standaloneRows.has(row));
-    return neighbors.length === 1 && neighbors[0] === formulaRow;
-  };
-
-  return regions.map((region) => {
-    if (!region.display
-      || region.startRow !== region.endRow
-      || !isStandaloneDisplayLine(lines[region.startRow] ?? "")) {
-      return region;
-    }
-
-    let startRow = region.startRow;
-    let endRow = region.endRow;
-    const previousRow = startRow - 1;
-    const nextRow = endRow + 1;
-    if (previousRow >= 0
-      && !(lines[previousRow] ?? "").trim()
-      && exclusivelyAdjacent(previousRow, region.startRow)
-      && !claimedRows.has(previousRow)) {
-      startRow = previousRow;
-      claimedRows.add(previousRow);
-    }
-    if (nextRow < lines.length
-      && !(lines[nextRow] ?? "").trim()
-      && exclusivelyAdjacent(nextRow, region.endRow)
-      && !claimedRows.has(nextRow)) {
-      endRow = nextRow;
-      claimedRows.add(nextRow);
-    }
-    if (startRow === region.startRow && endRow === region.endRow) return region;
-
-    return {
-      ...region,
-      startRow,
-      endRow,
-      startCol: 0,
-      endCol: Math.max(...lines.slice(startRow, endRow + 1).map((line) => stringWidth(line)), 1)
-    };
-  });
-}
-
 function trailingInlineRegion(
   lines: string[],
   row: number,
@@ -1307,13 +1263,12 @@ function trailingInlineRegion(
   startIndex: number,
   endIndex: number,
   latex: string,
-  confidence: FormulaRegion["confidence"]
-): FormulaRegion {
+  confidence: SemanticFormulaCandidate["confidence"]
+): SemanticFormulaCandidate {
   const suffix = line.slice(endIndex);
   const trailing = suffix.match(/^([.,;:!?，。；：！？]?)\s*$/u);
   let regionEndIndex = endIndex;
   let regionLatex = latex;
-  let endRow = row;
   let compact = false;
 
   if (trailing) {
@@ -1323,13 +1278,12 @@ function trailingInlineRegion(
       regionEndIndex += punctuation.length;
     }
     compact = true;
-    if (row + 1 < lines.length && !(lines[row + 1] ?? "").trim()) endRow = row + 1;
   }
 
   const [startCol, endCol] = visualEnd(line, startIndex, regionEndIndex);
   return {
     startRow: row,
-    endRow,
+    endRow: row,
     startCol,
     endCol,
     latex: regionLatex,
@@ -1339,12 +1293,30 @@ function trailingInlineRegion(
   };
 }
 
+function firstNonWhitespaceColumn(line: string): number {
+  const index = line.search(/\S/u);
+  return index < 0 ? 0 : stringWidth(line.slice(0, index));
+}
+
+/** Classify semantic intent before terminal-cell layout is considered. */
+export function classifyFormulaIntent(
+  region: SemanticFormulaCandidate,
+  lines: string[]
+): FormulaIntent {
+  if (!region.display) return "inline";
+  const firstLine = lines[region.startRow] ?? "";
+  const lastLine = lines[region.endRow] ?? "";
+  const ownsFirstLineStart = region.startCol <= firstNonWhitespaceColumn(firstLine);
+  const ownsLastLineEnd = region.endCol >= stringWidth(lastLine.trimEnd());
+  return ownsFirstLineStart && ownsLastLineEnd ? "display" : "embedded-display";
+}
+
 /**
  * Detect formulas in the post-ANSI terminal screen. Explicit TeX delimiters are
  * preferred. A conservative inferred form handles TUIs that turn `\[`/`\]`
  * into bare bracket lines while leaving the TeX body visible.
  */
-export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
+export function detectFormulas(lines: string[]): DetectedFormula[] {
   // Every supported explicit delimiter, TeX command, inferred ASCII form, and
   // Unicode-math form contains at least one of these characters. Most TUI
   // frames are plain status/log text, so avoid building code-range contexts
@@ -1358,9 +1330,9 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
     }
     return false;
   };
-  const intersectsPendingDisplay = (region: FormulaRegion): boolean =>
+  const intersectsPendingDisplay = (region: SemanticFormulaCandidate): boolean =>
     rangeIntersectsPendingDisplay(region.startRow, region.endRow);
-  const regions: FormulaRegion[] = [
+  const regions: SemanticFormulaCandidate[] = [
     // A complete environment is self-delimiting and remains safe even when a
     // Markdown renderer has emitted a bare `[` but never emits its matching
     // `]`. Preserve that recovery path while suppressing incomplete interior
@@ -1501,8 +1473,7 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
     }
   }
 
-  const expanded = expandStandaloneDisplayRegions(lines, regions);
-  const contains = (container: FormulaRegion, candidate: FormulaRegion): boolean =>
+  const contains = (container: SemanticFormulaCandidate, candidate: SemanticFormulaCandidate): boolean =>
     container.startRow <= candidate.startRow
     && container.endRow >= candidate.endRow
     && (container.startRow !== candidate.startRow || container.startCol <= candidate.startCol)
@@ -1511,32 +1482,45 @@ export function detectFormulaRegions(lines: string[]): FormulaRegion[] {
   // Explicit multi-row regions are detected before the per-row compatibility
   // pass. Remove only candidates genuinely inside them: formulas before an
   // opener or after a closer on the same physical rows must remain visible.
-  return expanded.filter((candidate, index) => !expanded.some((container, containerIndex) => {
-    if (containerIndex === index || !contains(container, candidate)) return false;
-    const sameBounds = container.startRow === candidate.startRow
-      && container.endRow === candidate.endRow
-      && container.startCol === candidate.startCol
-      && container.endCol === candidate.endCol;
-    if (sameBounds) {
-      if (container.display !== candidate.display) return container.display;
-      if (container.confidence !== candidate.confidence) {
-        return container.confidence === "explicit";
+  return regions
+    .filter((candidate, index) => !regions.some((container, containerIndex) => {
+      if (containerIndex === index || !contains(container, candidate)) return false;
+      const sameBounds = container.startRow === candidate.startRow
+        && container.endRow === candidate.endRow
+        && container.startCol === candidate.startCol
+        && container.endCol === candidate.endCol;
+      if (sameBounds) {
+        if (container.display !== candidate.display) return container.display;
+        if (container.confidence !== candidate.confidence) {
+          return container.confidence === "explicit";
+        }
+        return container.latex === candidate.latex && containerIndex < index;
       }
-      return container.latex === candidate.latex && containerIndex < index;
-    }
-    if (container.compact && container.startRow < container.endRow) return true;
-    if (container.display) return true;
-    return container.confidence === "explicit" && candidate.confidence === "inferred";
-  }));
+      if (container.compact && container.startRow < container.endRow) return true;
+      if (container.display) return true;
+      return container.confidence === "explicit" && candidate.confidence === "inferred";
+    }))
+    .map((region) => ({
+      source: {
+        startRow: region.startRow,
+        endRow: region.endRow,
+        startCol: region.startCol,
+        endCol: region.endCol
+      },
+      latex: region.latex,
+      intent: classifyFormulaIntent(region, lines),
+      confidence: region.confidence,
+      ...(region.compact ? { compact: true } : {})
+    }));
 }
 
 export const detectorInternals = {
+  classifyFormulaIntent,
   descriptionToLatex,
   definitionItem,
   dollarDelimiterPositions,
   dollarDelimitedSegments,
   escapeTexText,
-  expandStandaloneDisplayRegions,
   inferredDefinitionGroup,
   inferredParenthesizedMath,
   hardWrappedDollarDisplay,

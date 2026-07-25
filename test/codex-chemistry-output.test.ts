@@ -2,11 +2,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { detectFormulaRegions } from "../src/detect.js";
+import { detectFormulas } from "../src/detect.js";
 import { FormulaCache } from "../src/formula-cache.js";
+import { planFormulaPlacements } from "../src/formula-layout.js";
 import { MathRenderer, renderMathJaxSvg } from "../src/math-renderer.js";
 import { FormulaScreen } from "../src/screen.js";
-import { detectScreenFormulaRegions } from "../src/screen-text.js";
+import { detectScreenFormulaRegions } from "./mapped-formula-compat.js";
 
 const strippedRowBreak = "\\";
 
@@ -148,13 +149,13 @@ describe("real Codex analytical-chemistry output regression", () => {
   );
 
   it("keeps a split left-hand side on the same aligned row", () => {
-    const [region] = detectFormulaRegions(CODEX_CHEMISTRY_BLOCKS[0].lines);
+    const [region] = detectFormulas(CODEX_CHEMISTRY_BLOCKS[0].lines);
     expect(region?.latex).toContain("\\alpha_{\\ce{Y^{4-}}}\n&=\\left[");
     expect(region?.latex).not.toContain("\\alpha_{\\ce{Y^{4-}}}\\\\\n");
   });
 
   it("restores a Markdown-stripped \\\\[2pt] row break before MathJax", async () => {
-    const [region] = detectFormulaRegions(CODEX_CHEMISTRY_BLOCKS[1].lines);
+    const [region] = detectFormulas(CODEX_CHEMISTRY_BLOCKS[1].lines);
     expect(region?.latex).toContain("6.2504,\\\\[2pt]\n");
     expect(region?.latex).not.toContain("6.2504,\\[2pt]\\\\");
     await expect(renderMathJaxSvg(region!.latex, true, 1080, cache))
@@ -346,14 +347,11 @@ describe("real Codex analytical-chemistry output regression", () => {
   it.each(CODEX_CHEMISTRY_BLOCKS)(
     "renders the complete $id terminal rectangle",
     async ({ lines }) => {
-      const snapshot = detectScreenFormulaRegions(
-        lines.map((text, row) => ({ row, text, isWrapped: false })),
-        120
-      );
-      const rendered = await renderer.render(
-        snapshot.regions[0]!,
-        120,
-        lines.length,
+      const physicalLines = lines.map((text, row) => ({ row, text, isWrapped: false }));
+      const snapshot = detectScreenFormulaRegions(physicalLines, 120);
+      const [plan] = planFormulaPlacements(snapshot.formulas, physicalLines, 120);
+      const rendered = await renderer.renderPlacement(
+        plan!,
         {
           kittyGraphics: true,
           foreground: "#eeeeee",

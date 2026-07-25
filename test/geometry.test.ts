@@ -19,6 +19,7 @@ describe("calculateFormulaGeometry", () => {
     expect(geometry.canvasHeight).toBe(60);
     expect(geometry.formulaHeight).toBe(18);
     expect(geometry.formulaWidth).toBe(72);
+    expect(geometry.fitScale).toBe(1);
   });
 
   it("uses the full reserved height for a tall multi-row display", () => {
@@ -51,6 +52,7 @@ describe("calculateFormulaGeometry", () => {
     // Integer pixels introduce rounding when a very wide expression becomes
     // only a couple of pixels tall, but it must remain strongly horizontal.
     expect(geometry.formulaWidth / geometry.formulaHeight).toBeGreaterThan(80);
+    expect(geometry.fitScale).toBeLessThanOrEqual(0.1);
   });
 
   it("left-aligns ordinary inline math beside its preceding text", () => {

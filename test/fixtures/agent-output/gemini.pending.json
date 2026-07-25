@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "agent": "gemini",
+  "provenance": {
+    "kind": "pending",
+    "note": "Gemini CLI is not installed in the current environment; collect an authorized, anonymized terminal capture before marking P5.4 complete."
+  }
+}

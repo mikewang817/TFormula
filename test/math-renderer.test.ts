@@ -11,6 +11,68 @@ import {
   readSvgDimensions,
   renderMathJaxSvg
 } from "../src/math-renderer.js";
+import type { FormulaIntent, FormulaWrapSegment, TerminalCapabilities } from "../src/types.js";
+
+interface TestFormulaRegion {
+  startRow: number;
+  endRow: number;
+  startCol: number;
+  endCol: number;
+  latex: string;
+  display: boolean;
+  intent?: FormulaIntent;
+  confidence: "explicit" | "inferred";
+  compact?: boolean;
+  composite?: boolean;
+  displayRange?: { startCol: number; endCol: number };
+  sourceSegments?: FormulaWrapSegment[];
+  wrapSegments?: FormulaWrapSegment[];
+}
+
+function renderTestRegion(
+  renderer: MathRenderer,
+  region: TestFormulaRegion,
+  columns: number,
+  rows: number,
+  capabilities: TerminalCapabilities,
+  scale: number
+) {
+  const wraps = region.wrapSegments?.length ? region.wrapSegments : [];
+  const sourceMasks = region.sourceSegments?.length ? region.sourceSegments : wraps;
+  const formulaSlices = region.sourceSegments?.length || region.displayRange ? [] : wraps;
+  return renderer.renderPlacement(
+    {
+      formula: {
+        source: {
+          startRow: region.startRow,
+          endRow: region.endRow,
+          startCol: region.startCol,
+          endCol: region.endCol
+        },
+        latex: region.latex,
+        intent: region.intent ?? (region.display ? "display" : "inline"),
+        confidence: region.confidence,
+        ...(region.compact ? { compact: true } : {})
+      },
+      canvas: {
+        startRow: region.startRow,
+        endRow: region.startRow + rows - 1,
+        startCol: region.startCol,
+        endCol: region.startCol + columns
+      },
+      sourceMasks,
+      formulaSlices,
+      ...(region.displayRange ? { displayRange: region.displayRange } : {}),
+      mode: region.displayRange
+        ? "embedded"
+        : formulaSlices.length ? "wrapped" : region.compact ? "compact" : "source",
+      estimatedQuality: 100,
+      composite: Boolean(region.composite)
+    },
+    capabilities,
+    scale
+  );
+}
 
 describe("MathRenderer", () => {
   it("reads MathJax ex dimensions", () => {
@@ -97,6 +159,23 @@ describe("MathRenderer", () => {
     expect(optimizedPng).toEqual(legacyPng);
     expect(await mathRendererInternals.renderSvgToPng(optimized, false))
       .toEqual(optimizedPng);
+  });
+
+  it("masks only TeX source cells inside a larger borrowed display canvas", () => {
+    const svg = mathRendererInternals.buildSourceMaskedSvg({
+      canvasWidth: 720,
+      canvasHeight: 54,
+      sourceSegments: [
+        { rowOffset: 1, startCol: 4, endCol: 20, logicalStartCol: 0 }
+      ],
+      cell: { width: 9, height: 18, source: "cell-query" },
+      background: "#202030",
+      content: '<g id="formula-content"/>'
+    });
+
+    expect(svg).toContain('<rect x="36" y="18" width="144" height="18" fill="#202030"/>');
+    expect(svg).not.toContain('<rect width="100%"');
+    expect(svg.match(/id="formula-content"/gu)).toHaveLength(1);
   });
 
   it("propagates asynchronous Resvg parse failures", async () => {
@@ -250,7 +329,7 @@ describe("MathRenderer", () => {
   });
 
   it("renders a PNG exactly matching the terminal cell rectangle", async () => {
-    const rendered = await new MathRenderer().render(
+    const rendered = await renderTestRegion(new MathRenderer(),
       {
         startRow: 0,
         endRow: 2,
@@ -274,10 +353,12 @@ describe("MathRenderer", () => {
     expect(png.subarray(1, 4).toString()).toBe("PNG");
     expect(png.readUInt32BE(16)).toBe(360);
     expect(png.readUInt32BE(20)).toBe(54);
+    expect(rendered.fitScale).toBeGreaterThan(0);
+    expect(rendered.fitScale).toBeLessThanOrEqual(1);
   });
 
   it("renders an aligned definition group containing Chinese text", async () => {
-    const rendered = await new MathRenderer().render(
+    const rendered = await renderTestRegion(new MathRenderer(),
       {
         startRow: 0,
         endRow: 5,
@@ -305,7 +386,7 @@ describe("MathRenderer", () => {
   });
 
   it("treats an empty wrap segment list as an ordinary rectangular region", async () => {
-    const rendered = await new MathRenderer().render(
+    const rendered = await renderTestRegion(new MathRenderer(),
       {
         startRow: 0,
         endRow: 0,
@@ -354,8 +435,8 @@ describe("MathRenderer", () => {
         confidence: "explicit" as const
       };
 
-      await renderer.render(region, 20, 1, capabilities, 1);
-      await renderer.render({ ...region, endRow: 2 }, 20, 3, capabilities, 1);
+      await renderTestRegion(renderer, region, 20, 1, capabilities, 1);
+      await renderTestRegion(renderer, { ...region, endRow: 2 }, 20, 3, capabilities, 1);
 
       const svgRoot = join(cache.root, "svg");
       const buckets = await readdir(svgRoot);
@@ -377,7 +458,7 @@ describe("MathRenderer", () => {
     try {
       const cache = new FormulaCache({ root, maxDiskBytes: 0 });
       const renderer = new MathRenderer(cache);
-      const rendered = await renderer.render(
+      const rendered = await renderTestRegion(renderer,
         {
           startRow: 0,
           endRow: 1,
@@ -436,10 +517,10 @@ describe("MathRenderer", () => {
       cell: { width: 9, height: 18, source: "cell-query" as const }
     };
 
-    const original = await renderer.render(region, 20, 2, capabilities, 1);
-    const enlarged = await renderer.render(region, 20, 2, capabilities, 1.2);
+    const original = await renderTestRegion(renderer, region, 20, 2, capabilities, 1);
+    const enlarged = await renderTestRegion(renderer, region, 20, 2, capabilities, 1.2);
     renderer.clear();
-    const restored = await renderer.render(region, 20, 2, capabilities, 1);
+    const restored = await renderTestRegion(renderer, region, 20, 2, capabilities, 1);
 
     expect(enlarged.cacheKey).not.toBe(original.cacheKey);
     expect(restored.cacheKey).toBe(original.cacheKey);

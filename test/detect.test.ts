@@ -1,13 +1,43 @@
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
-import { detectFormulaRegions, detectorInternals } from "../src/detect.js";
+import { detectFormulas, detectorInternals } from "../src/detect.js";
 
-describe("detectFormulaRegions", () => {
+/** Test-only projection while legacy coordinate assertions migrate to source.*. */
+function detectedSources(lines: string[]) {
+  return detectFormulas(lines).map((formula) => ({
+    ...formula.source,
+    latex: formula.latex,
+    intent: formula.intent,
+    display: formula.intent !== "inline",
+    confidence: formula.confidence,
+    ...(formula.compact ? { compact: true } : {})
+  }));
+}
+
+const detectFormulaRegions = detectedSources;
+
+describe("detectFormulas", () => {
+  it("returns semantic detections without terminal placement fields", () => {
+    const [formula] = detectFormulas(["before $$x=1$$ after"]);
+
+    expect(formula).toEqual({
+      source: { startRow: 0, endRow: 0, startCol: 7, endCol: 14 },
+      latex: "x=1",
+      intent: "embedded-display",
+      confidence: "explicit"
+    });
+    expect(formula).not.toHaveProperty("display");
+    expect(formula).not.toHaveProperty("canvasMode");
+    expect(formula).not.toHaveProperty("sourceSegments");
+    expect(formula).not.toHaveProperty("wrapSegments");
+  });
+
   it("does not infer a second formula inside an explicit delimiter", () => {
     const regions = detectFormulaRegions(["value \\(\\operatorname{Var}(X_i)\\) suffix"]);
     expect(regions).toHaveLength(1);
     expect(regions[0]).toMatchObject({
       latex: "\\operatorname{Var}(X_i)",
+      intent: "inline",
       confidence: "explicit"
     });
   });
@@ -21,10 +51,16 @@ describe("detectFormulaRegions", () => {
       "after"
     ]);
     expect(regions).toHaveLength(1);
-    expect(regions[0]).toMatchObject({ startRow: 1, endRow: 3, display: true, confidence: "explicit" });
+    expect(regions[0]).toMatchObject({
+      startRow: 1,
+      endRow: 3,
+      intent: "display",
+      display: true,
+      confidence: "explicit"
+    });
   });
 
-  it("borrows an adjacent blank row for a standalone one-line display", () => {
+  it("keeps standalone display detection on its exact source row", () => {
     const [region] = detectFormulaRegions([
       "1. Gauss's law",
       "",
@@ -32,7 +68,7 @@ describe("detectFormulaRegions", () => {
       "Electric field explanation"
     ]);
     expect(region).toMatchObject({
-      startRow: 1,
+      startRow: 2,
       endRow: 2,
       startCol: 0,
       display: true,
@@ -40,9 +76,13 @@ describe("detectFormulaRegions", () => {
     });
   });
 
-  it("does not expand display delimiters embedded in prose", () => {
+  it("classifies display delimiters embedded in prose explicitly", () => {
     const [region] = detectFormulaRegions(["", "before $$x=1$$ after", ""]);
-    expect(region).toMatchObject({ startRow: 1, endRow: 1 });
+    expect(region).toMatchObject({
+      startRow: 1,
+      endRow: 1,
+      intent: "embedded-display"
+    });
   });
 
   it("rejects malformed standalone displays without exponential backtracking", () => {
@@ -84,6 +124,7 @@ describe("detectFormulaRegions", () => {
     expect(regions).toHaveLength(4);
     expect(regions.map((region) => region.startCol)).toEqual([3, 3, 3, 3]);
     expect(regions.every((region) => region.display)).toBe(true);
+    expect(regions.every((region) => region.intent === "embedded-display")).toBe(true);
   });
 
   it("reassembles display math hard-wrapped by a terminal TUI", () => {
@@ -176,16 +217,15 @@ describe("detectFormulaRegions", () => {
     ])).toEqual([]);
   });
 
-  it("does not give a shared blank row to only one of two displays", () => {
+  it("leaves blank-row ownership out of semantic display detection", () => {
     const regions = detectFormulaRegions([
       "$$\\frac{1}{x}$$",
       "",
       "$$\\frac{1}{x}$$"
     ]);
     expect(regions).toHaveLength(2);
-    expect(regions.map((region) => region.endRow - region.startRow + 1)).toEqual([1, 1]);
-    expect(regions.map((region) => region.endCol - region.startCol))
-      .toEqual([regions[0]!.endCol, regions[0]!.endCol]);
+    expect(regions.map((region) => [region.startRow, region.endRow]))
+      .toEqual([[0, 0], [2, 2]]);
   });
 
   it("infers the bracket form left by terminal markdown renderers", () => {
@@ -346,14 +386,14 @@ describe("detectFormulaRegions", () => {
     expect(region?.display).toBe(false);
   });
 
-  it("uses a following blank row for a trailing inline formula and its punctuation", () => {
+  it("keeps a trailing inline formula on its exact semantic source row", () => {
     const [region] = detectFormulaRegions([
       "waves propagate at \\(c=1/\\sqrt{\\mu_0\\varepsilon_0}\\).",
       ""
     ]);
     expect(region).toMatchObject({
       startRow: 0,
-      endRow: 1,
+      endRow: 0,
       latex: "c=1/\\sqrt{\\mu_0\\varepsilon_0}\\text{.}",
       display: false,
       compact: true

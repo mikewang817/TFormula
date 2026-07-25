@@ -3,6 +3,7 @@ import { FormulaScreen } from "../src/screen.js";
 import { OutputCheckpointSplitter } from "../src/output-checkpoints.js";
 import { MathRenderer } from "../src/math-renderer.js";
 import { KittyImageTransmitter } from "../src/image-transmitter.js";
+import { TFORMULA_FOCUS_Z_INDEX } from "../src/kitty.js";
 import { TerminalOutputTransformer } from "../src/terminal-output.js";
 
 const capabilities = {
@@ -37,7 +38,9 @@ class DelayedMathRenderer extends MathRenderer {
   started?: () => void;
   release?: () => void;
 
-  override async render(...args: Parameters<MathRenderer["render"]>): ReturnType<MathRenderer["render"]> {
+  override async renderPlacement(
+    ...args: Parameters<MathRenderer["renderPlacement"]>
+  ): ReturnType<MathRenderer["renderPlacement"]> {
     this.calls += 1;
     if (this.fail) throw new Error("intentional render failure");
     if (this.failNext > 0) {
@@ -51,34 +54,45 @@ class DelayedMathRenderer extends MathRenderer {
         this.started?.();
       });
     }
-    return super.render(...args);
+    return super.renderPlacement(...args);
   }
 }
 
 class FastMathRenderer extends MathRenderer {
-  override async render(
-    ...args: Parameters<MathRenderer["render"]>
-  ): ReturnType<MathRenderer["render"]> {
-    const [region, columns, rows] = args;
+  override async renderPlacement(
+    ...args: Parameters<MathRenderer["renderPlacement"]>
+  ): ReturnType<MathRenderer["renderPlacement"]> {
+    const [plan] = args;
+    const columns = plan.canvas.endCol - plan.canvas.startCol;
+    const rows = plan.canvas.endRow - plan.canvas.startRow + 1;
     return {
       png: new Uint8Array([137, 80, 78, 71]),
-      cacheKey: `${region.display ? "display" : "inline"}:${region.latex}:${columns}:${rows}`,
+      cacheKey: `${plan.formula.intent}:${plan.formula.latex}:${columns}:${rows}`,
       columns,
       rows,
       widthPx: columns * 9,
-      heightPx: rows * 18
+      heightPx: rows * 18,
+      fitScale: 1
     };
   }
 }
 
 class CapturingMathRenderer extends FastMathRenderer {
-  readonly arguments: Array<Parameters<MathRenderer["render"]>> = [];
+  readonly arguments: Array<Parameters<MathRenderer["renderPlacement"]>> = [];
 
-  override async render(
-    ...args: Parameters<MathRenderer["render"]>
-  ): ReturnType<MathRenderer["render"]> {
+  override async renderPlacement(
+    ...args: Parameters<MathRenderer["renderPlacement"]>
+  ): ReturnType<MathRenderer["renderPlacement"]> {
     this.arguments.push(args);
-    return super.render(...args);
+    return super.renderPlacement(...args);
+  }
+}
+
+class UnreadableMathRenderer extends FastMathRenderer {
+  override async renderPlacement(
+    ...args: Parameters<MathRenderer["renderPlacement"]>
+  ): ReturnType<MathRenderer["renderPlacement"]> {
+    return { ...await super.renderPlacement(...args), fitScale: 0.2 };
   }
 }
 
@@ -162,7 +176,7 @@ describe("FormulaScreen lifecycle", () => {
       await screen.write("\\(\x1b[31mx^2\x1b[39m\\)");
       await screen.flushScan();
       expect(renderer.arguments).toHaveLength(1);
-      expect(renderer.arguments[0]?.[5]).toBe("#cd0000");
+      expect(renderer.arguments[0]?.[3]).toBe("#cd0000");
 
       await screen.write("\r\x1b[2K\x1b[8m\\(secret=42\\)\x1b[28m");
       await screen.flushScan();
@@ -179,7 +193,7 @@ describe("FormulaScreen lifecycle", () => {
       await screen.write("\x1b[2J\x1b[H\\[\r\n\x1b[31mE=mc^2\x1b[39m\r\n\\]");
       await screen.flushScan();
       expect(renderer.arguments).toHaveLength(3);
-      expect(renderer.arguments[2]?.[5]).toBe("#cd0000");
+      expect(renderer.arguments[2]?.[3]).toBe("#cd0000");
     } finally {
       screen.dispose();
     }
@@ -198,6 +212,228 @@ describe("FormulaScreen lifecycle", () => {
       expect(output.join("")).toContain("a=d,d=Z,z=20260713");
     } finally {
       screen.dispose();
+    }
+  });
+
+  it("renders only the final formula after a rapidly rewritten region stabilizes", async () => {
+    const renderer = new CapturingMathRenderer();
+    const debug: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      stabilityMs: 80,
+      renderer,
+      writeOuter: () => undefined,
+      debug: (message) => debug.push(message)
+    });
+    try {
+      await screen.write("$$x=1$$");
+      screen.scheduleScan(0);
+      await waitFor(() => debug.some((message) => message.startsWith("collecting formula")));
+      expect(renderer.arguments).toHaveLength(0);
+
+      await screen.write("\r\x1b[2K$$x=2$$");
+      screen.scheduleScan(0);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(renderer.arguments).toHaveLength(0);
+
+      await waitFor(() => renderer.arguments.length === 1);
+      expect(renderer.arguments[0]?.[0].formula.latex).toBe("x=2");
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("promotes a complete formula immediately at an output checkpoint", async () => {
+    const renderer = new CapturingMathRenderer();
+    const screen = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      stabilityMs: 1_000,
+      renderer,
+      writeOuter: () => undefined
+    });
+    try {
+      await screen.write("$$E=mc^2$$");
+      await screen.flushScan(true);
+      expect(renderer.arguments).toHaveLength(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("keeps raw TeX when a formula would be reduced below the readable threshold", async () => {
+    const output: string[] = [];
+    const debug: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      minReadableScale: 0.45,
+      renderer: new UnreadableMathRenderer(),
+      writeOuter: (data) => output.push(String(data)),
+      debug: (message) => debug.push(message)
+    });
+    try {
+      await screen.write("$$a+b+c+d+e+f+g+h+i+j+k+l+m+n$$");
+      await screen.flushScan();
+
+      expect(output.join("")).not.toContain("a=p");
+      expect(debug).toContainEqual(expect.stringContaining("kept raw TeX"));
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("allows the readable threshold to be disabled", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      minReadableScale: 0,
+      renderer: new UnreadableMathRenderer(),
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("$$a+b+c+d+e+f+g+h+i+j+k+l+m+n$$");
+      await screen.flushScan();
+      expect(output.join("")).toContain("a=p");
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("keeps a recent formula registry including fit and degradation metadata", async () => {
+    const readable = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      renderer: new FastMathRenderer(),
+      writeOuter: () => undefined
+    });
+    try {
+      await readable.write("$$\\frac{a}{b}$$");
+      await readable.flushScan();
+      expect(readable.recentFormulas[0]).toMatchObject({
+        formula: { latex: "\\frac{a}{b}", intent: "display" },
+        plan: { mode: "borrowed-below" },
+        fitScale: 1
+      });
+      expect(readable.recentFormulas[0]?.degradationReason).toBeUndefined();
+    } finally {
+      readable.dispose();
+    }
+
+    const unreadable = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      minReadableScale: 0.4,
+      renderer: new UnreadableMathRenderer(),
+      writeOuter: () => undefined
+    });
+    try {
+      await unreadable.write("$$a+b+c+d+e+f+g+h+i+j+k$$");
+      await unreadable.flushScan();
+      expect(unreadable.recentFormulas[0]).toMatchObject({ fitScale: 0.2 });
+      expect(unreadable.recentFormulas[0]?.degradationReason).toContain("below 0.400");
+    } finally {
+      unreadable.dispose();
+    }
+  });
+
+  it("shows a non-destructive focus overlay and restores it after output, resize, and clear", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      renderer: new FastMathRenderer(),
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("$$\\frac{a}{b}$$");
+      await screen.flushScan();
+      output.length = 0;
+
+      expect(await screen.focusLatestFormula()).toBe(true);
+      const focused = output.join("");
+      expect(focused).toContain(`c=40,r=4,C=1,z=${TFORMULA_FOCUS_Z_INDEX}`);
+      expect(focused).not.toContain("\x1b[?1049h");
+      expect(screen.formulaFocusActive).toBe(true);
+
+      output.length = 0;
+      await screen.write("\x1b[4;1Hagent status");
+      expect(await screen.refreshFormulaFocus()).toBe(true);
+      expect(output.join("")).toContain("a=d,d=i");
+      expect(output.join("")).toContain(`z=${TFORMULA_FOCUS_Z_INDEX}`);
+
+      output.length = 0;
+      screen.resize(50, 5);
+      expect(await screen.refreshFormulaFocus()).toBe(true);
+      expect(output.join("")).toContain(`c=50,r=5,C=1,z=${TFORMULA_FOCUS_Z_INDEX}`);
+
+      output.length = 0;
+      await screen.write("\x1b[2J");
+      expect(await screen.refreshFormulaFocus()).toBe(true);
+      expect(output.join("")).toContain(`z=${TFORMULA_FOCUS_Z_INDEX}`);
+
+      output.length = 0;
+      await screen.closeFormulaFocus();
+      expect(output.join("")).toContain("a=d,d=i");
+      expect(screen.formulaFocusActive).toBe(false);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("fails focus safely when no formula or rendering is available", async () => {
+    const noFormula = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      renderer: new FastMathRenderer(),
+      writeOuter: () => undefined
+    });
+    try {
+      expect(await noFormula.focusLatestFormula()).toBe(false);
+      expect(noFormula.formulaFocusActive).toBe(false);
+    } finally {
+      noFormula.dispose();
+    }
+
+    const renderer = new DelayedMathRenderer();
+    const output: string[] = [];
+    const failed = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await failed.write("$$x=1$$");
+      await failed.flushScan();
+      renderer.fail = true;
+      output.length = 0;
+      expect(await failed.focusLatestFormula()).toBe(false);
+      expect(failed.formulaFocusActive).toBe(false);
+      expect(output.join("")).not.toContain(`z=${TFORMULA_FOCUS_Z_INDEX}`);
+      expect(failed.recentFormulas[0]?.degradationReason).toContain("focus render failed");
+    } finally {
+      failed.dispose();
     }
   });
 
@@ -221,6 +457,168 @@ describe("FormulaScreen lifecycle", () => {
       ].join("\r\n"));
       await waitFor(() => debug.some((message) => message.startsWith("rendered ")));
       expect(output.join("")).toContain("c=80,r=2,C=1");
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("transactionally replaces a borrowed-below placement when output occupies its blank row", async () => {
+    const output: string[] = [];
+    const renderer = new CapturingMathRenderer();
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[2J\x1b[Hpreceding\x1b[2;1H$$\\frac{a}{b}$$");
+      await screen.flushScan();
+      expect(renderer.arguments.at(-1)?.[0].mode).toBe("borrowed-below");
+      const first = output.join("").match(/a=p,i=(\d+),p=(\d+)/u);
+      expect(first).toBeTruthy();
+
+      output.length = 0;
+      await screen.write("\x1b[3;1Hnew status text");
+      await screen.flushScan();
+
+      expect(renderer.arguments.at(-1)?.[0]).toMatchObject({
+        mode: "source",
+        canvas: { startRow: 1, endRow: 1 }
+      });
+      const replacement = output.join("");
+      const deletion = `a=d,d=i,i=${first![1]},p=${first![2]}`;
+      expect(replacement).toContain(deletion);
+      expect(replacement.match(/\x1b_Ga=p/gu)).toHaveLength(1);
+      expect(replacement.indexOf(deletion)).toBeLessThan(replacement.indexOf("\x1b_Ga=p"));
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("replans a borrowed row away when resize removes that blank row", async () => {
+    const output: string[] = [];
+    const renderer = new CapturingMathRenderer();
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[2J\x1b[Hpreceding\x1b[2;1H$$\\frac{a}{b}$$");
+      await screen.flushScan();
+      expect(renderer.arguments.at(-1)?.[0].mode).toBe("borrowed-below");
+      const first = output.join("").match(/a=p,i=(\d+),p=(\d+)/u);
+      expect(first).toBeTruthy();
+
+      output.length = 0;
+      screen.resize(80, 2);
+      await screen.flushScan();
+
+      expect(renderer.arguments.at(-1)?.[0]).toMatchObject({
+        mode: "source",
+        canvas: { startRow: 1, endRow: 1 }
+      });
+      const resized = output.join("");
+      expect(resized).toContain(`a=d,d=i,i=${first![1]},p=${first![2]}`);
+      expect(resized.match(/\x1b_Ga=p/gu)).toHaveLength(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("replaces a borrowed alternate-screen row when a status bar appears and clears it safely", async () => {
+    const output: string[] = [];
+    const renderer = new CapturingMathRenderer();
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 5,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[2J\x1b[Hheader\x1b[2;1H$$\\frac{a}{b}$$");
+      await screen.flushScan();
+      expect(renderer.arguments.at(-1)?.[0].mode).toBe("borrowed-below");
+      const borrowed = output.join("").match(/a=p,i=(\d+),p=(\d+)/u);
+      expect(borrowed).toBeTruthy();
+
+      output.length = 0;
+      await screen.write("\x1b[3;1Hagent status: working");
+      await screen.flushScan();
+      expect(renderer.arguments.at(-1)?.[0].mode).toBe("source");
+      expect(output.join("")).toContain(
+        `a=d,d=i,i=${borrowed![1]},p=${borrowed![2]}`
+      );
+      const replacement = output.join("").match(/a=p,i=(\d+),p=(\d+)/u);
+      expect(replacement).toBeTruthy();
+
+      output.length = 0;
+      await screen.write("\x1b[2J");
+      // ED 2 clears Kitty placements for the active alternate screen itself;
+      // TFormula must forget the pin without emitting a stale replacement.
+      expect(output.join("")).not.toContain("\x1b_Ga=p");
+      expect(screen.hasTerminalPlacements).toBe(false);
+
+      output.length = 0;
+      await screen.write("\x1b[?1049l");
+      await screen.flushScan();
+      expect(output.join("")).not.toContain("\x1b_Ga=p");
+      expect(screen.hasTerminalPlacements).toBe(false);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("keeps a borrowed placement pinned while scrolling out of and back into the viewport", async () => {
+    const output: string[] = [];
+    const renderer = new CapturingMathRenderer();
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[2J\x1b[Hpreceding\x1b[2;1H$$\\frac{a}{b}$$");
+      await screen.flushScan();
+      expect(renderer.arguments.at(-1)?.[0].mode).toBe("borrowed-below");
+      const placement = output.join("").match(/a=p,i=(\d+),p=(\d+)/u);
+      expect(placement).toBeTruthy();
+
+      output.length = 0;
+      await screen.write("\x1b[4;1Htail\r\nline 1\r\nline 2\r\nline 3\r\nline 4");
+      await screen.flushScan();
+      expect(screen.terminal.buffer.active.viewportY).toBeGreaterThan(0);
+      expect(output.join("")).not.toContain(
+        `a=d,d=i,i=${placement![1]},p=${placement![2]}`
+      );
+      expect(screen.hasTerminalPlacements).toBe(true);
+
+      output.length = 0;
+      screen.terminal.scrollToTop();
+      await screen.flushScan();
+      expect(output.join("")).not.toContain(
+        `a=d,d=i,i=${placement![1]},p=${placement![2]}`
+      );
+      expect(output.join("")).not.toContain("\x1b_Ga=p");
+
+      output.length = 0;
+      screen.terminal.scrollToBottom();
+      await screen.flushScan();
+      expect(output.join("")).not.toContain(
+        `a=d,d=i,i=${placement![1]},p=${placement![2]}`
+      );
+      expect(screen.hasTerminalPlacements).toBe(true);
     } finally {
       screen.dispose();
     }
@@ -251,7 +649,7 @@ describe("FormulaScreen lifecycle", () => {
       await screen.flushScan();
 
       expect(renderer.arguments).toHaveLength(1);
-      expect(renderer.arguments[0]?.[0].latex).toContain(
+      expect(renderer.arguments[0]?.[0].formula.latex).toContain(
         "K_{a1}\\\\\n\\ce{H3Y-"
       );
       expect(output.join("")).toContain("c=100,r=7,C=1");
