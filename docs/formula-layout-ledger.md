@@ -367,6 +367,7 @@ type FormulaIntent = "inline" | "display" | "embedded-display";
 | 2026-07-25 | Reader 行内公式字距与中英文换行 | 移除行内公式整列冗余预留、将边距收紧为亚字符单元，并在 MathJax 首次测量后保持语义锚点即时重排；统一移除紧邻源空格，行内画布采用固定约 1px 左侧 bearing，将不可避免的整数列余量留在不再叠加源空格的右侧；CJK token 使用剩余列，公式携带后续首字/标点，增加中文闭标点禁则；PNG cache 升至 v5；覆盖 `i`、`c_{ij}`、`X_{ij}` 实测列宽及公式/CJK 边界；`npm run check`：32 files passed；489 passed；1 expected fail；`git diff --check` 通过 |
 | 2026-07-25 | Reader 紧尺寸行内公式 | 已先提交 `fca2c33`；reader 单行公式改用透明紧尺寸 PNG 与 Kitty 自然像素 `X/Y` placement，列宽先按单行垂直 fit，再在 floor/ceil 间选择，额外缩小上限 8%，Agent/source-mask 路径保持单元格 placement；PNG cache v6；新增 geometry/Kitty/renderer/layout 回归。首次全量中的独立 file-watch 用例超时，单测与随后全量重跑均通过：32 files passed；493 passed；1 expected fail；build 与 `git diff --check` 通过 |
 | 2026-07-25 | README 双语同步 | 更新 `README.md`、`README.zh-CN.md`：PDF/OCR 数学边界恢复、HTML 实体、混合图片段落、表格换行、独立单美元公式、紧尺寸透明 PNG、Kitty `X/Y`、floor/ceil 8% 限制、CJK 换行、缓存及整数单元格限制；仅文档变更，双语内容对照检查，`git diff --check` 通过 |
+| 2026-07-25 | npm `0.2.1` 发布 | `npm run check`：32 files passed；493 passed；1 expected fail；`npm pack --dry-run`：87 files、230.6 kB、无意外文件；发布级浏览器二次验证后 registry 核验 `tformula@0.2.1`，`latest=0.2.1`，shasum `25c8bc5bbab5ec77a99426acdf83d7b27ce2b20d` |
 
 ---
 
