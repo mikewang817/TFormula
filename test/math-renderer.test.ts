@@ -385,6 +385,40 @@ describe("MathRenderer", () => {
     expect(png.readUInt32BE(20)).toBe(108);
   });
 
+  it("renders one-row reader math as a tight natural-size PNG", async () => {
+    const rendered = await renderTestRegion(new MathRenderer(),
+      {
+        startRow: 0,
+        endRow: 0,
+        startCol: 0,
+        endCol: 3,
+        latex: "X_{ij}",
+        display: false,
+        confidence: "explicit",
+        compact: true
+      },
+      3,
+      1,
+      {
+        kittyGraphics: true,
+        foreground: "#eeeeee",
+        background: "#202030",
+        cell: { width: 9, height: 18, source: "cell-query" }
+      },
+      1
+    );
+    const png = Buffer.from(rendered.png);
+
+    expect(rendered.pixelPlacement).toEqual(expect.objectContaining({
+      offsetX: expect.any(Number),
+      offsetY: expect.any(Number)
+    }));
+    expect(rendered.widthPx).toBeLessThan(27);
+    expect(rendered.heightPx).toBeLessThanOrEqual(18);
+    expect(png.readUInt32BE(16)).toBe(rendered.widthPx);
+    expect(png.readUInt32BE(20)).toBe(rendered.heightPx);
+  });
+
   it("treats an empty wrap segment list as an ordinary rectangular region", async () => {
     const rendered = await renderTestRegion(new MathRenderer(),
       {

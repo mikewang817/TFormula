@@ -124,7 +124,7 @@ describe("reader layout", () => {
     expect(layout.lines[0]?.plain).toBe("  A B   C");
   });
 
-  it("uses centered formula side bearings instead of stacking source spaces", () => {
+  it("uses vertically fitted formula width instead of stacking source spaces", () => {
     const inlineSource = "其中， $X_{ij}$ 为数据";
     const inlineDocument: ReaderDocument = {
       ...document(),
@@ -140,8 +140,8 @@ describe("reader layout", () => {
     };
     const layout = layoutReaderDocument(inlineDocument, options);
 
-    expect(layout.placements[0]?.columns).toBe(4);
-    expect(layout.lines[0]?.plain).toBe("  其中，    为数据");
+    expect(layout.placements[0]?.columns).toBe(3);
+    expect(layout.lines[0]?.plain).toBe("  其中，   为数据");
   });
 
   it("keeps an inline formula with following CJK prose at a wrap boundary", () => {

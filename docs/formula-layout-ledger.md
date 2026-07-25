@@ -365,6 +365,7 @@ type FormulaIntent = "inline" | "display" | "embedded-display";
 | 2026-07-25 | PDF/OCR Markdown reader 兼容性 | 修复 contaminated `$$`/`$CN` close、math HTML entities、专利编号公式误作 inline、图片尾随文字和表格内容截断；真实 760 行专利文档恢复 8 headings/12 images/141 formulas，141/141 MathJax 可渲染；`npm run check`：32 files passed；484 passed；1 expected fail；`git diff --check` 通过 |
 | 2026-07-25 | 学术 PDF Markdown display 边界兼容性 | 将非代码区内嵌/相邻的 `$$`（含 `\\[...\\]`、`$$$text`、`$$$$`）正规化为独立块边界，并提升独立单美元公式；真实 HortiVQA 文件从 10 headings/5 images/1 table/16 formulas 恢复为 28 headings/11 images/6 tables/103 formulas，103/103 MathJax 可渲染；`npm run check`：32 files passed；486 passed；1 expected fail；`git diff --check` 通过 |
 | 2026-07-25 | Reader 行内公式字距与中英文换行 | 移除行内公式整列冗余预留、将边距收紧为亚字符单元，并在 MathJax 首次测量后保持语义锚点即时重排；统一移除紧邻源空格，行内画布采用固定约 1px 左侧 bearing，将不可避免的整数列余量留在不再叠加源空格的右侧；CJK token 使用剩余列，公式携带后续首字/标点，增加中文闭标点禁则；PNG cache 升至 v5；覆盖 `i`、`c_{ij}`、`X_{ij}` 实测列宽及公式/CJK 边界；`npm run check`：32 files passed；489 passed；1 expected fail；`git diff --check` 通过 |
+| 2026-07-25 | Reader 紧尺寸行内公式 | 已先提交 `fca2c33`；reader 单行公式改用透明紧尺寸 PNG 与 Kitty 自然像素 `X/Y` placement，列宽先按单行垂直 fit，再在 floor/ceil 间选择，额外缩小上限 8%，Agent/source-mask 路径保持单元格 placement；PNG cache v6；新增 geometry/Kitty/renderer/layout 回归。首次全量中的独立 file-watch 用例超时，单测与随后全量重跑均通过：32 files passed；493 passed；1 expected fail；build 与 `git diff --check` 通过 |
 
 ---
 

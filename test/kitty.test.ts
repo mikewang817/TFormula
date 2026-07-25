@@ -3,6 +3,7 @@ import {
   kittyDeletePlacement,
   kittyDeletePlacementsByZIndex,
   kittyPlaceImage,
+  kittyPlaceImagePixels,
   kittyTransmitImage,
   kittyTransmitImageChunks,
   kittyTransmitImageFile,
@@ -38,6 +39,14 @@ describe("Kitty graphics encoding", () => {
     expect(cropped).toContain("c=30,r=5,x=0,y=36,w=270,h=90");
     expect(kittyDeletePlacement(42, 7)).toContain("a=d,d=i,i=42,p=7");
     expect(kittyDeletePlacementsByZIndex()).toContain("a=d,d=z");
+  });
+
+  it("places natural-size images with sub-cell pixel offsets", () => {
+    const placement = kittyPlaceImagePixels(42, 9, 2.4, 3.6);
+
+    expect(placement).toContain("a=p,i=42,p=9");
+    expect(placement).toContain("X=2,Y=4,C=1");
+    expect(placement).not.toMatch(/(?:^|,)c=|(?:^|,)r=/u);
   });
 
   it("keeps every direct-transmission payload within the Kitty chunk limit", () => {

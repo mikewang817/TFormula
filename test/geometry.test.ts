@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { calculateFormulaGeometry } from "../src/geometry.js";
+import {
+  calculateFormulaGeometry,
+  chooseInlineFormulaColumns
+} from "../src/geometry.js";
 
 const cell = { width: 10, height: 20, source: "cell-query" as const };
 
@@ -84,6 +87,38 @@ describe("calculateFormulaGeometry", () => {
       leftAlign: true
     });
     expect(geometry.offsetX).toBeLessThan(cell.width);
+  });
+
+  it("uses the floor column count when quantization needs at most 8% extra shrink", () => {
+    const choice = chooseInlineFormulaColumns({
+      aspectRatio: 19 / 16.8,
+      naturalHeightEx: 2,
+      cell,
+      scale: 1
+    });
+
+    expect(choice).toMatchObject({
+      columns: 2,
+      ceilColumns: 3,
+      usedFloor: true
+    });
+    expect(choice.quantizationFit).toBeCloseTo(18 / 19);
+  });
+
+  it("keeps the ceil column count when floor fitting would shrink more than 8%", () => {
+    const choice = chooseInlineFormulaColumns({
+      aspectRatio: 22 / 16.8,
+      naturalHeightEx: 2,
+      cell,
+      scale: 1
+    });
+
+    expect(choice).toEqual({
+      columns: 3,
+      ceilColumns: 3,
+      usedFloor: false,
+      quantizationFit: 1
+    });
   });
 
   it("aligns inline formulas using their MathJax baselines", () => {

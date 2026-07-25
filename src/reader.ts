@@ -10,6 +10,7 @@ import {
   kittyDeleteImage,
   kittyDeletePlacementsByZIndex,
   kittyPlaceImage,
+  kittyPlaceImagePixels,
   synchronizedOutput,
   type KittySourceRectangle,
   TFORMULA_IMAGE_ID_MAX,
@@ -56,6 +57,7 @@ interface PreparedAsset {
   png: Uint8Array;
   width: number;
   height: number;
+  pixelPlacement?: { offsetX: number; offsetY: number };
 }
 
 interface UploadedAsset {
@@ -63,6 +65,7 @@ interface UploadedAsset {
   key: string;
   width: number;
   height: number;
+  pixelPlacement?: { offsetX: number; offsetY: number };
 }
 
 export interface VisibleReaderPlacement {
@@ -553,15 +556,23 @@ class TerminalReader {
       const uploaded = this.#touchUploaded(key);
       if (!uploaded) continue;
       const { placement } = visible;
+      const placementId = this.#allocatePlacementId();
       graphics.push(
         cursorPosition(visible.screenRow + 1, placement.col + 1),
-        kittyPlaceImage(
-          uploaded.imageId,
-          this.#allocatePlacementId(),
-          placement.columns,
-          visible.rows,
-          sourceRectangleForVisiblePlacement(visible, uploaded.width, uploaded.height)
-        )
+        uploaded.pixelPlacement
+          ? kittyPlaceImagePixels(
+              uploaded.imageId,
+              placementId,
+              uploaded.pixelPlacement.offsetX,
+              uploaded.pixelPlacement.offsetY
+            )
+          : kittyPlaceImage(
+              uploaded.imageId,
+              placementId,
+              placement.columns,
+              visible.rows,
+              sourceRectangleForVisiblePlacement(visible, uploaded.width, uploaded.height)
+            )
       );
     }
   }
@@ -642,7 +653,8 @@ class TerminalReader {
       key: `math\0${rendered.cacheKey}`,
       png: rendered.png,
       width: rendered.widthPx,
-      height: rendered.heightPx
+      height: rendered.heightPx,
+      ...(rendered.pixelPlacement ? { pixelPlacement: rendered.pixelPlacement } : {})
     };
     this.#placementAssetKeys.set(placement, prepared.key);
     return { key: prepared.key, prepared };
@@ -906,7 +918,10 @@ class TerminalReader {
         key: asset.key,
         imageId: this.#allocateImageId(),
         width: asset.prepared.width,
-        height: asset.prepared.height
+        height: asset.prepared.height,
+        ...(asset.prepared.pixelPlacement
+          ? { pixelPlacement: asset.prepared.pixelPlacement }
+          : {})
       };
       await this.#writer.write(
         this.#transmitter.transmitPayload(asset.prepared.png, uploaded.imageId)

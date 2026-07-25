@@ -29,7 +29,7 @@ interface SvgDimensions {
 
 let mathJaxPromise: Promise<MathJaxApi> | undefined;
 const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-scientific-svg-v5";
-const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v5";
+const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v6";
 const CANONICAL_CONTAINER_WIDTH = 100_000;
 const MATHJAX_EX_PX = 8;
 
@@ -503,6 +503,12 @@ export class MathRenderer {
       ? Math.max(1, segmentLogicalColumns)
       : columns;
     const horizontallySliced = Boolean(wrapSegments);
+    const tightInline = !display
+      && rows === 1
+      && plan.mode === "compact"
+      && plan.sourceMasks.length === 0
+      && !wrapSegments
+      && !plan.displayRange;
     // A one-row TUI region has no vertical space for MathJax's line boxes and
     // can become less legible when several lines are compressed back into it.
     // Multi-row, non-segmented displays can use their reserved height safely.
@@ -531,6 +537,7 @@ export class MathRenderer {
       sourceMasks: plan.sourceMasks,
       formulaSlices: plan.formulaSlices,
       mode: plan.mode,
+      tightInline,
       columns,
       rows,
       cell: { width: capabilities.cell.width, height: capabilities.cell.height },
@@ -567,15 +574,21 @@ export class MathRenderer {
       + (plan.displayRange?.startCol ?? 0) * capabilities.cell.width;
     const nested = resizeNestedSvg(
       formulaSvg,
-      nestedX,
-      geometry.offsetY,
+      tightInline ? 0 : nestedX,
+      tightInline ? 0 : geometry.offsetY,
       geometry.formulaWidth,
       geometry.formulaHeight
     );
     const content = `<g color="${escapeAttribute(foreground)}" fill="${escapeAttribute(foreground)}">${nested}</g>`;
     const canvasWidth = Math.max(1, Math.round(columns * capabilities.cell.width));
     const canvasHeight = Math.max(1, Math.round(rows * capabilities.cell.height));
-    const wrapper = wrapSegments
+    const wrapper = tightInline
+      ? [
+          `<svg xmlns="http://www.w3.org/2000/svg" width="${geometry.formulaWidth}" height="${geometry.formulaHeight}" viewBox="0 0 ${geometry.formulaWidth} ${geometry.formulaHeight}">`,
+          content,
+          "</svg>"
+        ].join("")
+      : wrapSegments
       ? buildHorizontallySlicedSvg({
           canvasWidth,
           canvasHeight,
@@ -607,8 +620,14 @@ export class MathRenderer {
       cacheKey,
       columns,
       rows,
-      widthPx: canvasWidth,
-      heightPx: canvasHeight,
+      widthPx: tightInline ? geometry.formulaWidth : canvasWidth,
+      heightPx: tightInline ? geometry.formulaHeight : canvasHeight,
+      ...(tightInline ? {
+        pixelPlacement: {
+          offsetX: geometry.offsetX,
+          offsetY: geometry.offsetY
+        }
+      } : {}),
       fitScale: geometry.fitScale,
       naturalAspectRatio: dimensions.aspectRatio,
       naturalHeightEx: dimensions.heightEx

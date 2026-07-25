@@ -116,6 +116,20 @@ export function kittyPlaceImage(
   return `${APC_START}a=p,i=${imageId},p=${placementId},q=0,c=${columns},r=${rows}${crop},C=1,z=${zIndex}${ST}`;
 }
 
+/** Place an image at its natural pixel dimensions with a sub-cell offset. */
+export function kittyPlaceImagePixels(
+  imageId: number,
+  placementId: number,
+  offsetX: number,
+  offsetY: number,
+  zIndex = TFORMULA_Z_INDEX
+): string {
+  return `${APC_START}a=p,i=${imageId},p=${placementId},q=0`
+    + `,X=${Math.max(0, Math.round(offsetX))}`
+    + `,Y=${Math.max(0, Math.round(offsetY))}`
+    + `,C=1,z=${zIndex}${ST}`;
+}
+
 export function cursorPosition(row: number, column: number): string {
   return `${ESC}[${Math.max(1, row)};${Math.max(1, column)}H`;
 }

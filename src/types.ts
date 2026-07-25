@@ -105,6 +105,8 @@ export interface RenderedFormula {
   rows: number;
   widthPx: number;
   heightPx: number;
+  /** Natural-size Kitty placement inside the first reserved terminal cell. */
+  pixelPlacement?: { offsetX: number; offsetY: number };
   /** Fraction of the requested natural formula size retained after fitting. */
   fitScale: number;
   /** MathJax source geometry, cached lazily by the document reader. */

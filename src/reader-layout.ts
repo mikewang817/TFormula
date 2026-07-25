@@ -7,6 +7,7 @@ import type {
   Table
 } from "mdast";
 import stringWidth from "string-width";
+import { chooseInlineFormulaColumns } from "./geometry.js";
 import type { CellMetrics } from "./types.js";
 import {
   mathResourceKey,
@@ -571,13 +572,12 @@ class LayoutBuilder {
               break;
             }
             const dimensions = resolvedMathDimensions(resource, node.value, false);
-            const heightPx = dimensions.heightEx * this.options.cell.height
-              * 0.45 * this.options.scale;
-            const widthPx = heightPx * dimensions.aspectRatio;
-            const horizontalPadding = Math.min(1, this.options.cell.width * 0.1);
-            const columns = Math.max(1, Math.ceil(
-              (widthPx + horizontalPadding * 2) / this.options.cell.width
-            ));
+            const { columns } = chooseInlineFormulaColumns({
+              aspectRatio: dimensions.aspectRatio,
+              naturalHeightEx: dimensions.heightEx,
+              cell: this.options.cell,
+              scale: this.options.scale
+            });
             atoms.push({
               kind: "math",
               latex: node.value,
