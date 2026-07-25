@@ -109,9 +109,11 @@ tformula --read package.json
 The reader parses Markdown into a document tree and lays it out again for the
 current terminal width. Markdown markers are hidden: headings, emphasis,
 quotes, nested lists, task items, fenced code, GFM tables, links, inline math,
-display math, and local images are displayed as document elements. Local
-PNG, JPEG, WebP, GIF, AVIF, TIFF, HEIF, and SVG files are converted to a
-terminal-ready PNG and keep their aspect ratio.
+display math, and local images are displayed as document elements. Long table
+cells wrap vertically instead of losing their tails. Local PNG, JPEG, WebP,
+GIF, AVIF, TIFF, HEIF, and SVG files are converted to a terminal-ready PNG and
+keep their aspect ratio. An image is still drawn when a PDF/OCR converter has
+placed a caption or page header in the same paragraph.
 
 The open document and its referenced local images are watched for changes.
 Saving from an editor refreshes the rendered view automatically without
@@ -124,6 +126,28 @@ delimiters, including a `$$...$$` display equation written on one line. It also
 recovers standalone `[ ... ]` blocks when their contents contain unambiguous
 TeX such as `\sum`, `\frac`, or structured subscripts, without treating normal
 Markdown brackets as formulas.
+
+PDF/OCR exports often place display content on the delimiter line, concatenate
+two boundaries as `$$$$`, or attach a page header directly to a closing
+`$$`/`$`. Outside code spans and fences, the reader converts those boundaries
+to block-safe lines before CommonMark can swallow the rest of the document.
+HTML entities inside math, including matrix alignment `&amp;`, are decoded for
+MathJax. A paragraph containing only one single-dollar equation is displayed as
+block math when it is clearly standalone, optionally with an academic equation
+number such as `(4)` or a four-digit patent paragraph label.
+
+Inline formulas use a reader-specific tight-image path. After lazy MathJax
+measurement, TFormula creates a transparent PNG at the fitted glyph dimensions
+and places it at natural pixel size with Kitty `X`/`Y` sub-cell offsets. Width
+selection compares the neighboring floor and ceil terminal-column counts; the
+floor is used only when it requires no more than 8% additional proportional
+shrink. Adjacent Markdown space cells are replaced by the formula's pixel side
+bearing, CJK prose uses the remaining line width, and closing punctuation is
+kept off the start of the next line. Agent proxy overlays keep their original
+source masks and PTY coordinates; this tighter placement applies only to the
+document reader. Adjacent terminal prose still starts on integer cell
+boundaries, so this is not browser-style subpixel text layout, but tight PNGs,
+pixel offsets, and bounded fitting minimize the remaining quantization gap.
 
 Useful reader keys:
 
@@ -156,15 +180,18 @@ entirely in the viewport.
 
 Reader startup probes the terminal while loading the document in parallel.
 Markdown text is committed before uncached graphics, formulas are measured and
-rasterized only when they enter the viewport, and rapid key input is coalesced
-to the newest frame. An image is normalized and uploaded once; zooming and
-cross-screen scrolling reuse that terminal image with source rectangles.
+rasterized only when they enter the viewport, and the semantic viewport anchor
+is preserved when measured formula widths replace conservative estimates.
+Rapid key input is coalesced to the newest frame. An image is normalized and
+uploaded once; zooming and cross-screen scrolling reuse that terminal image
+with source rectangles.
 
 ## Formula history and export
 
-Successfully rendered formulas are saved to local history. Identical formulas
-are recorded once per Agent session, so terminal resize, graphics retries, and
-repeated Agent output do not create duplicate entries. List recent formulas with:
+Formulas successfully rendered in wrapped Agent sessions are saved to local
+history. Identical formulas are recorded once per Agent session, so terminal
+resize, graphics retries, and repeated Agent output do not create duplicate
+entries. List recent formulas with:
 
 ```sh
 tformula history
@@ -376,9 +403,11 @@ visible instead of silently changing its meaning.
 Math rendering is content-addressed and shared by every TFormula-wrapped Agent
 run for the current user. A normalized formula is typeset to SVG once. Each
 terminal-ready PNG variant is then rasterized once for its exact display mode,
-cell dimensions, scale, foreground, background, and source rectangle. Returning
-to an earlier terminal font size reuses the existing PNG instead of invoking
-MathJax or the rasterizer again.
+cell dimensions, scale, foreground, background, and source rectangle. Reader
+inline variants cache their transparent fitted glyph PNG separately from Kitty
+placement, allowing one natural-size upload to be reused with sub-cell offsets.
+Returning to an earlier terminal font size reuses the existing PNG instead of
+invoking MathJax or the rasterizer again.
 
 Local reader images use the same bounded persistent cache. The cache key
 includes the source path, size, modification time, orientation-aware
