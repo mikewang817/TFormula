@@ -34,7 +34,7 @@ export function calculateFormulaGeometry(input: FormulaGeometryInput): FormulaGe
   const exPx = input.cell.height * 0.45 * input.scale;
   const naturalHeight = Math.max(1, input.naturalHeightEx * exPx);
   const naturalWidth = Math.max(1, naturalHeight * input.aspectRatio);
-  const horizontalPadding = input.display ? input.cell.width : Math.min(2, input.cell.width * 0.15);
+  const horizontalPadding = input.display ? input.cell.width : Math.min(1, input.cell.width * 0.1);
   // A display region is whitespace reserved by the TUI, even when the source
   // only spanned a single row. Use its full height so tall fractions keep the
   // same glyph scale as simple equations. Inline formulas retain padding for

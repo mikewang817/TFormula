@@ -57,6 +57,7 @@ export function parseMarkdown(source: string): Root {
     mdastExtensions: [gfmFromMarkdown(), mathFromMarkdown()]
   });
   root.children = promoteDisplayMath(root.children, normalized);
+  normalizeMathHtmlEntities(root);
   return root;
 }
 
@@ -132,13 +133,88 @@ function containsStrongTex(value: string): boolean {
     || /(?:=|\\neq|\\leq|\\geq).*(?:\\|[_^])/u.test(value);
 }
 
+function splitDisplayDollarBoundaries(line: string): string[] {
+  const output: string[] = [];
+  let segment = "";
+  let codeTicks = 0;
+  const flush = (): void => {
+    if (segment.trim().length > 0) output.push(segment.trimEnd());
+    segment = "";
+  };
+  for (let index = 0; index < line.length;) {
+    if (line[index] === "`") {
+      let end = index + 1;
+      while (line[end] === "`") end += 1;
+      const ticks = end - index;
+      if (codeTicks === 0) codeTicks = ticks;
+      else if (ticks === codeTicks) codeTicks = 0;
+      segment += line.slice(index, end);
+      index = end;
+      continue;
+    }
+    const unescaped = index === 0 || line[index - 1] !== "\\";
+    if (codeTicks === 0 && unescaped && line.startsWith("$$", index)) {
+      flush();
+      output.push("$$");
+      index += 2;
+      continue;
+    }
+    segment += line[index];
+    index += 1;
+  }
+  flush();
+  return output.length > 0 ? output : [line];
+}
+
 /**
  * Protect TeX delimiters which CommonMark otherwise treats as escaped
- * punctuation. Line count is intentionally preserved so heading and search
- * positions still correspond to the source document.
+ * punctuation. Normalization may add internal block-boundary lines, but never
+ * changes the source file; reader navigation anchors are built from the
+ * resulting semantic document rather than normalized source line numbers.
  */
-export function normalizeMarkdownMathDelimiters(source: string): string {
+function repairContaminatedDisplayClosers(source: string): string {
   const lines = source.split("\n");
+  const fenced = fencedCodeLines(lines);
+  const output: string[] = [];
+  let displayOpen = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (fenced[index]) {
+      output.push(line);
+      continue;
+    }
+    // PDF/OCR converters sometimes append a page header directly to a closing
+    // delimiter (`$$CN 123...`). CommonMark then leaves the display open and
+    // swallows the rest of the document as one math node. Split only when an
+    // earlier unmatched delimiter proves that this token is a closer; genuine
+    // one-line `$$formula$$` and `$$formula` openers remain unchanged.
+    const contaminatedClose = displayOpen
+      ? line.match(/^(\s*)\$\$(\S.*)$/u)
+      : undefined;
+    if (contaminatedClose && !contaminatedClose[2]!.includes("$$")) {
+      output.push(`${contaminatedClose[1]}$$`, `${contaminatedClose[1]}${contaminatedClose[2]}`);
+      displayOpen = false;
+      continue;
+    }
+    // The same converters attach a patent page header to a closing inline
+    // dollar (`$CN 115...`). Separate the header so a numbered standalone
+    // equation can be promoted and sized as display math.
+    const attachedPatentHeader = !displayOpen
+      ? line.match(/^(.*(?<!\\)\$)(CN\s+\d[\d\s]*[A-Z].*)$/u)
+      : undefined;
+    if (attachedPatentHeader) {
+      output.push(attachedPatentHeader[1]!, "", attachedPatentHeader[2]!);
+      continue;
+    }
+    output.push(line);
+    const delimiters = line.match(/(?<!\\)\$\$/gu)?.length ?? 0;
+    if (delimiters % 2 === 1) displayOpen = !displayOpen;
+  }
+  return output.join("\n");
+}
+
+export function normalizeMarkdownMathDelimiters(source: string): string {
+  const lines = repairContaminatedDisplayClosers(source).split("\n");
   const fenced = fencedCodeLines(lines);
   for (let index = 0; index < lines.length; index += 1) {
     if (fenced[index]) continue;
@@ -178,7 +254,12 @@ export function normalizeMarkdownMathDelimiters(source: string): string {
       break;
     }
   }
-  return lines.join("\n");
+  const blockSafeLines: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (fenced[index]) blockSafeLines.push(lines[index]!);
+    else blockSafeLines.push(...splitDisplayDollarBoundaries(lines[index]!));
+  }
+  return blockSafeLines.join("\n");
 }
 
 function isDoubleDollarMath(node: PhrasingContent, source: string): boolean {
@@ -191,6 +272,23 @@ function isDoubleDollarMath(node: PhrasingContent, source: string): boolean {
 }
 
 function splitDisplayMathParagraph(paragraph: Paragraph, source: string): RootContent[] {
+  const inlineMath = paragraph.children.filter((child) => child.type === "inlineMath");
+  const nonMathText = paragraph.children
+    .filter((child) => child.type !== "inlineMath")
+    .map((child) => child.type === "text" ? child.value : "\u0000")
+    .join("");
+  // Patent/PDF conversions commonly emit `[0026]  $long formula$`. It is a
+  // numbered display equation, not prose with a one-cell-high inline image.
+  // Restrict promotion to a pure four-digit paragraph label so ordinary lines
+  // containing inline math retain their authored semantics.
+  const patentNumberedDisplay = inlineMath.length === 1
+    && /^\s*\[\d{4}\]\s*$/u.test(nonMathText);
+  // Scientific PDF conversions also commonly use single-dollar math for an
+  // equation occupying the whole paragraph, optionally followed by `(4)`.
+  // Rendering these as one-cell-high inline assets makes long fractions and
+  // matrices unreadable even though their paragraph structure is unambiguous.
+  const standaloneEquation = inlineMath.length === 1
+    && /^\s*(?:\(\d+[a-z]?\))?\s*$/iu.test(nonMathText);
   const result: RootContent[] = [];
   let phrasing: PhrasingContent[] = [];
   const flush = (): void => {
@@ -199,7 +297,8 @@ function splitDisplayMathParagraph(paragraph: Paragraph, source: string): RootCo
     phrasing = [];
   };
   for (const child of paragraph.children) {
-    if (isDoubleDollarMath(child, source) && child.type === "inlineMath") {
+    if (child.type === "inlineMath"
+      && (isDoubleDollarMath(child, source) || patentNumberedDisplay || standaloneEquation)) {
       flush();
       result.push({ type: "math", value: child.value });
     } else {
@@ -253,6 +352,28 @@ function visit(node: Root | RootContent, callback: (node: Root | RootContent) =>
   callback(node);
   if (!("children" in node) || !Array.isArray(node.children)) return;
   for (const child of node.children) visit(child as RootContent, callback);
+}
+
+function decodeMathHtmlEntities(value: string): string {
+  return value
+    .replace(/&amp;/giu, "&")
+    .replace(/&lt;/giu, "<")
+    .replace(/&gt;/giu, ">")
+    .replace(/&quot;/giu, "\"")
+    .replace(/&apos;/giu, "'")
+    .replace(/&nbsp;/giu, " ")
+    .replace(/&#(\d+);/gu, (_, decimal: string) =>
+      String.fromCodePoint(Math.min(0x10ffff, Number(decimal))))
+    .replace(/&#x([0-9a-f]+);/giu, (_, hexadecimal: string) =>
+      String.fromCodePoint(Math.min(0x10ffff, Number.parseInt(hexadecimal, 16))));
+}
+
+function normalizeMathHtmlEntities(root: Root): void {
+  visit(root, (node) => {
+    if (node.type === "math" || node.type === "inlineMath") {
+      node.value = decodeMathHtmlEntities(node.value);
+    }
+  });
 }
 
 export function collectDocumentResources(root: Root): {

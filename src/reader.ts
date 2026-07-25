@@ -367,6 +367,7 @@ class TerminalReader {
   #renderTail = Promise.resolve();
   #renderPending = false;
   #renderRunning = false;
+  #mathDimensionsChanged = false;
   #reloadTail = Promise.resolve();
   #reloadPending = false;
   #reloadRunning = false;
@@ -634,8 +635,7 @@ class TerminalReader {
     if (resource && (!resource.aspectRatio || !resource.heightEx)) {
       resource.aspectRatio = rendered.naturalAspectRatio;
       resource.heightEx = rendered.naturalHeightEx;
-      // Keep the already-visible estimate stable, but ensure the next resize,
-      // raw-view toggle, or return navigation uses measured geometry.
+      this.#mathDimensionsChanged = true;
       this.#layoutCache.delete(this.#document);
     }
     const prepared = {
@@ -880,8 +880,21 @@ class TerminalReader {
       }
     }
     if (resourceFailed) {
+      this.#mathDimensionsChanged = false;
       this.#layoutCache.delete(this.#document);
       this.#relayout();
+      this.#requestRender();
+      return;
+    }
+    if (this.#mathDimensionsChanged) {
+      // Replace conservative placeholder widths as soon as MathJax reports the
+      // real glyph bounds. Preserve the semantic viewport anchor so shrinking
+      // an inline symbol does not make the document visibly jump.
+      const anchor = captureReaderScrollAnchor(this.#layout, this.#offset, this.viewportRows);
+      this.#mathDimensionsChanged = false;
+      this.#layoutCache.delete(this.#document);
+      this.#relayout();
+      this.#offset = restoreReaderScrollOffset(this.#layout, this.viewportRows, anchor);
       this.#requestRender();
       return;
     }

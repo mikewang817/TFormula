@@ -50,6 +50,113 @@ describe("reader document parsing", () => {
     expect(mathResourceKey("x", false)).not.toBe(mathResourceKey("x", true));
   });
 
+  it("repairs OCR page headers attached to display closers and decodes TeX entities", () => {
+    const root = parseMarkdown([
+      "$$",
+      "\\begin{array}{cc} a &amp; b \\\\ c &amp; d \\end{array}",
+      "$$CN 115689114 A",
+      "说明书 1/2 页",
+      "",
+      "# Restored heading",
+      "",
+      "![figure](figure.png)"
+    ].join("\n"));
+    const resources = collectDocumentResources(root);
+
+    expect(resources.formulas).toEqual([{
+      latex: "\\begin{array}{cc} a & b \\\\ c & d \\end{array}",
+      display: true
+    }]);
+    expect(resources.imageUrls).toEqual(["figure.png"]);
+    expect(root.children.map(({ type }) => type)).toEqual([
+      "math",
+      "paragraph",
+      "heading",
+      "paragraph"
+    ]);
+    expect(root.children).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "heading", depth: 1 })
+    ]));
+  });
+
+  it("promotes patent-numbered standalone equations out of one-row inline layout", () => {
+    const root = parseMarkdown([
+      "[0025] 判断矩阵为：",
+      "",
+      "[0026]  $C_1 = \\left[ \\begin{array}{cc}1 &amp; a \\\\ b &amp; 1 \\end{array} \\right]$",
+      "",
+      "[0027] 其中，$a$ 为系数。"
+    ].join("\n"));
+
+    expect(root.children.map(({ type }) => type)).toEqual([
+      "paragraph",
+      "paragraph",
+      "math",
+      "paragraph"
+    ]);
+    expect(root.children[2]).toMatchObject({
+      type: "math",
+      value: expect.stringContaining("\\begin{array}{cc}1 & a")
+    });
+    expect(collectDocumentResources(root).formulas).toEqual(expect.arrayContaining([
+      expect.objectContaining({ display: true, latex: expect.stringContaining("C_1") }),
+      { display: false, latex: "a" }
+    ]));
+  });
+
+  it("separates patent page headers attached to closing inline math", () => {
+    const root = parseMarkdown("[0036]  $X^{*} = X / X_{\\max}$CN 115689114 A\n说明书\n3/11 页");
+
+    expect(root.children.map(({ type }) => type)).toEqual([
+      "paragraph",
+      "math",
+      "paragraph"
+    ]);
+    expect(root.children[1]).toMatchObject({ type: "math", value: "X^{*} = X / X_{\\max}" });
+  });
+
+  it("makes embedded and adjacent display-dollar boundaries block safe", () => {
+    const root = parseMarkdown([
+      "Metrics: \\[ \\begin{split}a&=1\\\\",
+      "b&=2\\end{split} \\] (10)",
+      "",
+      "More:$$c=3$$$$d=4,$$ after.",
+      "",
+      "`$$not math$$` and a literal \\$\\$ pair.",
+      "",
+      "# Surviving heading"
+    ].join("\n"));
+    const formulas = collectDocumentResources(root).formulas;
+
+    expect(formulas).toHaveLength(3);
+    expect(formulas).toEqual(expect.arrayContaining([
+      { latex: " \\begin{split}a&=1\\\\\nb&=2\\end{split}", display: true },
+      { latex: "c=3", display: true },
+      { latex: "d=4,", display: true }
+    ]));
+    expect(root.children).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "heading", depth: 1 })
+    ]));
+  });
+
+  it("promotes standalone single-dollar scientific equations for readable sizing", () => {
+    const root = parseMarkdown([
+      "$\\hat{x}=\\sum_{i=1}^{N}x_i$",
+      "",
+      "$y=\\frac{a}{b}$ (4)"
+    ].join("\n"));
+
+    expect(root.children.map(({ type }) => type)).toEqual([
+      "math",
+      "math",
+      "paragraph"
+    ]);
+    expect(collectDocumentResources(root).formulas).toEqual([
+      { latex: "\\hat{x}=\\sum_{i=1}^{N}x_i", display: true },
+      { latex: "y=\\frac{a}{b}", display: true }
+    ]);
+  });
+
   it("recognizes implicit reader file types conservatively", () => {
     expect(readerFileKind("README.md")).toBe("markdown");
     expect(readerFileKind("notes.txt")).toBe("text");

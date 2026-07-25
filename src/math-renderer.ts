@@ -29,7 +29,7 @@ interface SvgDimensions {
 
 let mathJaxPromise: Promise<MathJaxApi> | undefined;
 const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-scientific-svg-v5";
-const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v3";
+const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v5";
 const CANONICAL_CONTAINER_WIDTH = 100_000;
 const MATHJAX_EX_PX = 8;
 
@@ -557,6 +557,10 @@ export class MathRenderer {
       cell: capabilities.cell,
       scale,
       display: horizontallySliced ? false : display,
+      // Keep inline glyphs close to preceding prose with a stable sub-cell
+      // bearing. The reader already removes adjacent source-space cells, so
+      // integer-column slack can safely remain on the trailing side without
+      // recreating the former doubled gap.
       leftAlign: !display || Boolean(plan.formula.compact)
     });
     const nestedX = geometry.offsetX

@@ -95,6 +95,118 @@ describe("reader layout", () => {
     );
   });
 
+  it("does not reserve a full extra cell around measured inline symbols", () => {
+    const inlineSource = "A $i$ B $c_{ij}$ C";
+    const inlineDocument: ReaderDocument = {
+      ...document(),
+      source: inlineSource,
+      root: parseMarkdown(inlineSource),
+      images: new Map(),
+      math: new Map([
+        [mathResourceKey("i", false), {
+          latex: "i",
+          display: false,
+          aspectRatio: 0.5138,
+          heightEx: 1.52
+        }],
+        [mathResourceKey("c_{ij}", false), {
+          latex: "c_{ij}",
+          display: false,
+          aspectRatio: 1.4265,
+          heightEx: 1.667
+        }]
+      ])
+    };
+    const layout = layoutReaderDocument(inlineDocument, options);
+    const inlineMath = layout.placements.filter(({ asset }) => asset.kind === "math");
+
+    expect(inlineMath.map(({ columns }) => columns)).toEqual([1, 3]);
+    expect(layout.lines[0]?.plain).toBe("  A B   C");
+  });
+
+  it("uses centered formula side bearings instead of stacking source spaces", () => {
+    const inlineSource = "其中， $X_{ij}$ 为数据";
+    const inlineDocument: ReaderDocument = {
+      ...document(),
+      source: inlineSource,
+      root: parseMarkdown(inlineSource),
+      images: new Map(),
+      math: new Map([[mathResourceKey("X_{ij}", false), {
+        latex: "X_{ij}",
+        display: false,
+        aspectRatio: 1.4785,
+        heightEx: 2.213
+      }]])
+    };
+    const layout = layoutReaderDocument(inlineDocument, options);
+
+    expect(layout.placements[0]?.columns).toBe(4);
+    expect(layout.lines[0]?.plain).toBe("  其中，    为数据");
+  });
+
+  it("keeps an inline formula with following CJK prose at a wrap boundary", () => {
+    const inlineSource = "1234567890 $w$ 为行均值，即所求权重；";
+    const inlineDocument: ReaderDocument = {
+      ...document(),
+      source: inlineSource,
+      root: parseMarkdown(inlineSource),
+      images: new Map(),
+      math: new Map([[mathResourceKey("w", false), {
+        latex: "w",
+        display: false,
+        aspectRatio: 1.5805,
+        heightEx: 1.025
+      }]])
+    };
+    const layout = layoutReaderDocument(inlineDocument, { ...options, columns: 14 });
+    const placement = layout.placements.find(({ asset }) => asset.kind === "math")!;
+    const suffix = layout.lines[placement.row]!.plain
+      .slice(placement.col + placement.columns)
+      .trimStart();
+
+    expect(placement.row).toBeGreaterThan(0);
+    expect(suffix).toMatch(/^为/u);
+    expect(layout.lines.every(({ plain }) => !/^\s*[，。；：！？、）》】”’]/u.test(plain))).toBe(true);
+  });
+
+  it("renders an image even when OCR text trails it in the same paragraph", () => {
+    const mixedSource = "![page](demo.png)CN 115689114 A\n";
+    const mixed: ReaderDocument = {
+      ...document(),
+      source: mixedSource,
+      root: parseMarkdown(mixedSource),
+      math: new Map()
+    };
+    const layout = layoutReaderDocument(mixed, options);
+
+    expect(layout.placements).toEqual([
+      expect.objectContaining({ asset: expect.objectContaining({ kind: "image" }) })
+    ]);
+    expect(layout.lines.map(({ plain }) => plain).join("\n")).toContain("CN 115689114 A");
+    expect(layout.lines.map(({ plain }) => plain).join("\n")).not.toContain("[image:");
+  });
+
+  it("wraps long table cells vertically instead of discarding their tails", () => {
+    const tableSource = [
+      "| 项目 | 内容 |",
+      "| --- | --- |",
+      "| A | 这是一段非常长的表格内容，缩窄终端时末尾文字也不能丢失 |"
+    ].join("\n");
+    const tableDocument: ReaderDocument = {
+      ...document(),
+      source: tableSource,
+      root: parseMarkdown(tableSource),
+      images: new Map(),
+      math: new Map()
+    };
+    const layout = layoutReaderDocument(tableDocument, { ...options, columns: 32 });
+    const text = layout.lines.map(({ plain }) => plain).join("\n");
+
+    const compact = text.replace(/[\s│]/gu, "");
+    expect(compact).toContain("这是一段非常长的表格内容，缩窄终端时末尾文字也不能丢失");
+    expect(text).not.toContain("…");
+  });
+
   it("falls back to readable formula and image text without graphics", () => {
     const layout = layoutReaderDocument(document(), { ...options, graphics: false });
     const text = layout.lines.map(({ plain }) => plain).join("\n");

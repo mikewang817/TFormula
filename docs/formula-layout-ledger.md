@@ -362,6 +362,9 @@ type FormulaIntent = "inline" | "display" | "embedded-display";
 | 2026-07-25 | P4 公式聚焦视图 | `npm run check`：29 files passed；460 passed；1 expected fail；`git diff --check` 通过；P4 DONE |
 | 2026-07-25 | P5.1/P5.2/P5.5/P5.7 语料框架与 golden | `npm run check`：30 files passed；463 passed；1 expected fail；`git diff --check` 通过；Claude/Gemini 明确 pending，P5 保持 PARTIAL |
 | 2026-07-25 | 集成 origin/main 公式历史与启动探针更新 | rebase 冲突按双功能合并；`npm run build` 通过；32 files passed；479 passed；1 expected fail；未强制推送 |
+| 2026-07-25 | PDF/OCR Markdown reader 兼容性 | 修复 contaminated `$$`/`$CN` close、math HTML entities、专利编号公式误作 inline、图片尾随文字和表格内容截断；真实 760 行专利文档恢复 8 headings/12 images/141 formulas，141/141 MathJax 可渲染；`npm run check`：32 files passed；484 passed；1 expected fail；`git diff --check` 通过 |
+| 2026-07-25 | 学术 PDF Markdown display 边界兼容性 | 将非代码区内嵌/相邻的 `$$`（含 `\\[...\\]`、`$$$text`、`$$$$`）正规化为独立块边界，并提升独立单美元公式；真实 HortiVQA 文件从 10 headings/5 images/1 table/16 formulas 恢复为 28 headings/11 images/6 tables/103 formulas，103/103 MathJax 可渲染；`npm run check`：32 files passed；486 passed；1 expected fail；`git diff --check` 通过 |
+| 2026-07-25 | Reader 行内公式字距与中英文换行 | 移除行内公式整列冗余预留、将边距收紧为亚字符单元，并在 MathJax 首次测量后保持语义锚点即时重排；统一移除紧邻源空格，行内画布采用固定约 1px 左侧 bearing，将不可避免的整数列余量留在不再叠加源空格的右侧；CJK token 使用剩余列，公式携带后续首字/标点，增加中文闭标点禁则；PNG cache 升至 v5；覆盖 `i`、`c_{ij}`、`X_{ij}` 实测列宽及公式/CJK 边界；`npm run check`：32 files passed；489 passed；1 expected fail；`git diff --check` 通过 |
 
 ---
 

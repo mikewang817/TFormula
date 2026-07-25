@@ -338,14 +338,22 @@ function wrapInline(atoms: InlineAtom[], width: number): WrappedLine[] {
     column += stringWidth(text);
   };
 
-  for (const atom of atoms) {
+  for (const [atomIndex, atom] of atoms.entries()) {
     if (atom.kind === "break") {
       nextLine();
       continue;
     }
     if (atom.kind === "math") {
       const columns = Math.min(safeWidth, Math.max(1, atom.columns));
-      if (column > 0 && column + columns > safeWidth) nextLine();
+      const following = atoms[atomIndex + 1];
+      let attachmentWidth = 0;
+      if (following?.kind === "text") {
+        const normalized = sanitizeText(following.text).replace(/[ \t\r\n]+/gu, " ");
+        const firstGlyph = graphemes(normalized.trimStart())[0];
+        attachmentWidth = firstGlyph ? stringWidth(firstGlyph) : 0;
+      }
+      const required = columns + attachmentWidth;
+      if (column > 0 && column + Math.min(safeWidth, required) > safeWidth) nextLine();
       line.placements.push({
         col: column,
         columns,
@@ -361,7 +369,12 @@ function wrapInline(atoms: InlineAtom[], width: number): WrappedLine[] {
       continue;
     }
 
-    const normalized = sanitizeText(atom.text).replace(/[ \t\r\n]+/gu, " ");
+    let normalized = sanitizeText(atom.text).replace(/[ \t\r\n]+/gu, " ");
+    // Inline math owns its typographic side bearings inside a centered image
+    // canvas. Keeping terminal-space cells immediately beside that canvas
+    // doubles and randomizes the visible gap according to column rounding.
+    if (atoms[atomIndex - 1]?.kind === "math") normalized = normalized.replace(/^ /u, "");
+    if (atoms[atomIndex + 1]?.kind === "math") normalized = normalized.replace(/ $/u, "");
     const tokens = normalized.match(/\s+|\S+/gu) ?? [];
     for (const token of tokens) {
       if (/^\s+$/u.test(token)) {
@@ -369,16 +382,27 @@ function wrapInline(atoms: InlineAtom[], width: number): WrappedLine[] {
         continue;
       }
       const tokenWidth = stringWidth(token);
-      if (tokenWidth <= safeWidth) {
+      const tokenGlyphs = graphemes(token);
+      const isCjkLike = tokenGlyphs.some((glyph) => stringWidth(glyph) > 1);
+      if (tokenWidth <= safeWidth && !isCjkLike) {
         if (column > 0 && column + tokenWidth > safeWidth) nextLine();
         addText(token, atom.style);
         continue;
       }
-      for (const chunk of splitByColumns(token, safeWidth)) {
-        const chunkWidth = stringWidth(chunk);
-        if (column > 0 && column + chunkWidth > safeWidth) nextLine();
-        addText(chunk, atom.style);
-        if (column >= safeWidth) nextLine();
+      // CJK prose often forms one non-whitespace token. Fill the current
+      // line's remaining cells glyph-by-glyph instead of moving the token (or
+      // a terminal-width chunk) wholesale and orphaning an inline formula.
+      for (const [glyphIndex, glyph] of tokenGlyphs.entries()) {
+        const glyphWidth = stringWidth(glyph);
+        const nextGlyph = tokenGlyphs[glyphIndex + 1];
+        const nextIsClosingPunctuation = nextGlyph !== undefined
+          && /^[，。；：！？、）》】”’…]$/u.test(nextGlyph);
+        if (column > 0 && (
+          column + glyphWidth > safeWidth
+          || (nextIsClosingPunctuation
+            && column + glyphWidth + stringWidth(nextGlyph) > safeWidth)
+        )) nextLine();
+        addText(glyph, atom.style);
       }
     }
   }
@@ -550,10 +574,17 @@ class LayoutBuilder {
             const heightPx = dimensions.heightEx * this.options.cell.height
               * 0.45 * this.options.scale;
             const widthPx = heightPx * dimensions.aspectRatio;
+            const horizontalPadding = Math.min(1, this.options.cell.width * 0.1);
+            const columns = Math.max(1, Math.ceil(
+              (widthPx + horizontalPadding * 2) / this.options.cell.width
+            ));
             atoms.push({
               kind: "math",
               latex: node.value,
-              columns: Math.max(1, Math.ceil(widthPx / this.options.cell.width) + 1),
+              // Reserve only the sub-cell padding used by formula geometry.
+              // A full extra terminal column made short symbols such as i and
+              // w look as though they had multiple spaces on either side.
+              columns,
               key
             });
             break;
@@ -580,24 +611,42 @@ class LayoutBuilder {
     marker = "",
     addBlank = true
   ): void {
-    if (node.children.length === 1 && node.children[0]?.type === "image") {
-      this.renderImage(node.children[0], context);
+    const resolveImage = (child: PhrasingContent): Extract<PhrasingContent, { type: "image" }> | undefined => {
+      if (child.type === "image") return child;
+      if (child.type !== "imageReference") return undefined;
+      const definition = this.definitions.get(child.identifier);
+      return definition ? {
+        type: "image",
+        url: definition.url,
+        title: definition.title,
+        alt: child.alt
+      } : undefined;
+    };
+    if (node.children.some((child) => resolveImage(child))) {
+      let pending: PhrasingContent[] = [];
+      let pendingMarker = marker;
+      const flushText = (): void => {
+        if (pending.length === 0) return;
+        this.appendWrapped(this.inlineAtoms(pending), context, pendingMarker, {
+          color: "accent",
+          bold: true
+        });
+        pendingMarker = "";
+        pending = [];
+      };
+      for (const child of node.children) {
+        const image = resolveImage(child);
+        if (!image) {
+          pending.push(child);
+          continue;
+        }
+        flushText();
+        this.renderImage(image, context);
+        this.blank();
+      }
+      flushText();
       if (addBlank) this.blank();
       return;
-    }
-    if (node.children.length === 1 && node.children[0]?.type === "imageReference") {
-      const reference = node.children[0];
-      const definition = this.definitions.get(reference.identifier);
-      if (definition) {
-        this.renderImage({
-          type: "image",
-          url: definition.url,
-          title: definition.title,
-          alt: reference.alt
-        }, context);
-        if (addBlank) this.blank();
-        return;
-      }
     }
     this.appendWrapped(this.inlineAtoms(node.children), context, marker, {
       color: "accent",
@@ -793,18 +842,26 @@ class LayoutBuilder {
     };
     border("┌", "┬", "┐");
     for (const [rowIndex, row] of rows.entries()) {
-      const spans = [...prefix];
-      appendSpan(spans, "│", { color: "muted", dim: true });
-      for (let column = 0; column < columnCount; column += 1) {
-        const alignment = node.align?.[column] ?? "left";
-        appendSpan(spans, padColumns(
-          row[column] ?? "",
-          widths[column]!,
-          alignment === "center" || alignment === "right" ? alignment : "left"
-        ), rowIndex === 0 ? { bold: true, color: "accent" } : undefined);
+      const cells = Array.from({ length: columnCount }, (_, column) => {
+        const value = row[column] ?? "";
+        const chunks = splitByColumns(value, widths[column]!);
+        return chunks.length > 0 ? chunks : [""];
+      });
+      const rowHeight = Math.max(...cells.map((cell) => cell.length));
+      for (let physicalRow = 0; physicalRow < rowHeight; physicalRow += 1) {
+        const spans = [...prefix];
         appendSpan(spans, "│", { color: "muted", dim: true });
+        for (let column = 0; column < columnCount; column += 1) {
+          const alignment = node.align?.[column] ?? "left";
+          appendSpan(spans, padColumns(
+            cells[column]?.[physicalRow] ?? "",
+            widths[column]!,
+            alignment === "center" || alignment === "right" ? alignment : "left"
+          ), rowIndex === 0 ? { bold: true, color: "accent" } : undefined);
+          appendSpan(spans, "│", { color: "muted", dim: true });
+        }
+        this.append(spans);
       }
-      this.append(spans);
       if (rowIndex === 0 && rows.length > 1) border("├", "┼", "┤");
     }
     border("└", "┴", "┘");
