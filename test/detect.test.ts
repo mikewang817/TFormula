@@ -257,6 +257,26 @@ describe("detectFormulas", () => {
     expect(regions[0]?.confidence).toBe("inferred");
   });
 
+  it("infers a bare bracket display inside a retained TUI quote gutter", () => {
+    const regions = detectFormulaRegions([
+      "│ [",
+      "│ \\lim_{n \\to \\infty} a_n = A \\quad \\Longleftrightarrow \\quad",
+      "│ \\forall \\varepsilon > 0,\\, \\exists N \\in \\mathbb{N}",
+      "│ ]"
+    ]);
+
+    expect(regions).toEqual([
+      expect.objectContaining({
+        startRow: 0,
+        endRow: 3,
+        startCol: 2,
+        display: true,
+        confidence: "inferred",
+        latex: expect.not.stringContaining("│")
+      })
+    ]);
+  });
+
   it("infers a short equation inside a bare bracket display block", () => {
     const [region] = detectFormulaRegions(["[", "E=mc^2", "]"]);
     expect(region).toMatchObject({ latex: "E=mc^2", display: true, confidence: "inferred" });
@@ -676,6 +696,48 @@ describe("detectFormulas", () => {
       "HTTP (status=ok)",
       "Run (FOO=bar)",
       "Use (a=b or c=d)"
+    ]);
+    expect(regions).toEqual([]);
+  });
+
+  it("recovers simple variables and function calls beside stronger parenthesized math", () => {
+    const regions = detectFormulaRegions([
+      "定义：给定 (\\varepsilon > 0)，存在正数 (M)，当 (x > M) 时成立",
+      "对于函数 (f(x)) 在 (x_0) 处讨论极限",
+      "ordinary choices (A) and (B)"
+    ]);
+
+    expect(regions.map(({ latex }) => latex)).toEqual([
+      "\\varepsilon > 0",
+      "M",
+      "x > M",
+      "f(x)",
+      "x_0"
+    ]);
+  });
+
+  it("recovers simple stripped inline delimiters from mathematical prose", () => {
+    const regions = detectFormulaRegions([
+      "当 (x) 越来越接近 (a) 时，(f(x)) 越来越接近某个常数 (L)，我们就说 (f(x)) 的极限是 (L)。",
+      "极限关心的是接近的过程，而不是在 (a) 这一点本身的值。",
+      "换句话说，数列最终会无限接近 (A)。",
+      "则称当 (x) 趋近于 (a) 时 (f(x)) 的极限为 (A)，记为",
+      "ordinary choices (A) and (B)",
+      "choose (A), (B), or (C)"
+    ]);
+
+    expect(regions.map(({ latex }) => latex)).toEqual([
+      "x", "a", "f(x)", "L", "f(x)", "L",
+      "a",
+      "A",
+      "x", "a", "f(x)", "A"
+    ]);
+  });
+
+  it("does not use inline code as parenthesized-math group evidence", () => {
+    const regions = detectFormulaRegions([
+      "plain `(\\varepsilon)` choices (A) and (B)",
+      "plain `limit` choices (A) and (B)"
     ]);
     expect(regions).toEqual([]);
   });

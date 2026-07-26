@@ -37,6 +37,10 @@ const INFERRED_MATH_WORDS = new Set([
   "arg", "cos", "cot", "csc", "deg", "det", "dim", "exp", "gcd", "hom", "inf",
   "ker", "lim", "ln", "log", "max", "min", "mod", "pr", "sec", "sin", "sup", "tan"
 ]);
+// A terminal Markdown renderer can consume the slashes from every `\(...\)`
+// on a line. In that case no individual `(x)` or `(A)` has enough syntax to
+// prove it is math, so use nearby mathematical discourse as group evidence.
+const STRIPPED_INLINE_MATH_CONTEXT_RE = /(?:极限|趋近|接近|收敛|发散|数列|函数|自变量|因变量|常数|变量|邻域|limit|converg|diverg|sequence|function|variable|constant|neighbou?rhood)/iu;
 const DISPLAY_ENVIRONMENTS = new Set([
   "align", "align*", "aligned", "alignedat", "alignat", "alignat*",
   "cases", "displaymath", "equation", "equation*", "flalign", "flalign*",
@@ -183,10 +187,41 @@ function isLikelyInferredUnicodeMath(value: string): boolean {
   return /^[A-Za-z0-9\s.,+*/=<>^_{}()[\]|\\-]*$/u.test(residue);
 }
 
-function inferredParenthesizedMath(line: string): ParenthesizedSegment[] {
-  return parenthesizedSegments(line)
-    .filter((segment) => isLikelyMath(segment.body)
-      || isLikelyInferredUnicodeMath(segment.body));
+function isContextualSimpleParenthesizedMath(value: string): boolean {
+  const trimmed = value.trim();
+  if (/^[A-Za-z]$/u.test(trimmed)) return true;
+  return /^[A-Za-z][A-Za-z0-9]*\s*\(\s*[A-Za-z](?:[_^](?:[A-Za-z0-9]|\{[A-Za-z0-9]+\}))?\s*\)$/u
+    .test(trimmed);
+}
+
+function inferredParenthesizedMath(
+  line: string,
+  codeRanges: InlineCodeRange[] = []
+): ParenthesizedSegment[] {
+  const segments = parenthesizedSegments(line)
+    .filter((segment) => !overlapsInlineCode(segment.start, segment.end, codeRanges));
+  const stronglyMathematical = segments.filter((segment) => isLikelyMath(segment.body)
+    || isLikelyInferredUnicodeMath(segment.body));
+  const simple = segments.filter((segment) => isContextualSimpleParenthesizedMath(segment.body));
+  let contextText = line;
+  if (codeRanges.length > 0) {
+    const prose: string[] = [];
+    let cursor = 0;
+    for (const range of codeRanges) {
+      prose.push(line.slice(cursor, range.start));
+      cursor = range.end;
+    }
+    prose.push(line.slice(cursor));
+    contextText = prose.join("");
+  }
+  const hasGroupEvidence = stronglyMathematical.length > 0
+    || STRIPPED_INLINE_MATH_CONTEXT_RE.test(contextText)
+    // Three authored variable-shaped groups are unlikely to be incidental.
+    // Exclude pure multiple-choice labels, which are common in ordinary prose.
+    || (simple.length >= 3 && simple.some((segment) => !/^[A-Z]$/u.test(segment.body.trim())));
+  if (!hasGroupEvidence) return stronglyMathematical;
+  const candidates = new Set([...stronglyMathematical, ...simple]);
+  return segments.filter((segment) => candidates.has(segment));
 }
 
 interface DefinitionItem {
@@ -1109,10 +1144,33 @@ function isStandaloneDisplayEnvironmentToken(value: string): boolean {
   return Boolean(match && DISPLAY_ENVIRONMENTS.has(match[1]!));
 }
 
+interface BareDisplayDelimiter {
+  prefix: string;
+  token: "[" | "]";
+}
+
+function bareDisplayDelimiter(value: string): BareDisplayDelimiter | undefined {
+  // Agent TUIs and Markdown block quotes can retain a visual gutter in the
+  // terminal text. Treat it as container chrome rather than part of TeX while
+  // preserving its physical columns for source mapping and placement.
+  const match = value.match(/^(\s*(?:(?:[│┃>]\s*)*))([\[\]])\s*$/u);
+  if (!match) return undefined;
+  return { prefix: match[1]!, token: match[2]! as "[" | "]" };
+}
+
+function stripContainerPrefix(value: string, prefix: string): string {
+  return prefix && value.startsWith(prefix) ? value.slice(prefix.length) : value;
+}
+
+function isStandaloneDelimiterLine(value: string): boolean {
+  if (bareDisplayDelimiter(value)) return true;
+  const withoutContainer = value.replace(/^(\s*(?:(?:[│┃>]\s*)*))/u, "").trim();
+  return /^(?:\\\[|\\\]|\$\$)$/u.test(withoutContainer);
+}
+
 function adjacentToStandaloneDelimiter(lines: string[], row: number): boolean {
-  const delimiter = /^(?:\\\[|\\\]|\$\$|\[|\])$/u;
-  return delimiter.test((lines[row - 1] ?? "").trim())
-    || delimiter.test((lines[row + 1] ?? "").trim());
+  return isStandaloneDelimiterLine(lines[row - 1] ?? "")
+    || isStandaloneDelimiterLine(lines[row + 1] ?? "");
 }
 
 /**
@@ -1144,18 +1202,22 @@ function pendingDisplayRows(
   // Bare brackets are the form left by several terminal Markdown renderers
   // after they consume the backslashes in `\[` and `\]`.
   for (let row = 0; row < lines.length; row += 1) {
-    if (contexts[row]?.inCodeFence || (lines[row] ?? "").trim() !== "[") continue;
+    const opening = bareDisplayDelimiter(lines[row] ?? "");
+    if (contexts[row]?.inCodeFence || opening?.token !== "[") continue;
     const body: string[] = [];
     const limit = Math.min(lines.length, row + MAX_DISPLAY_BLOCK_ROWS + 1);
     let endRow = -1;
     for (let candidate = row + 1; candidate < limit; candidate += 1) {
       if (contexts[candidate]?.inCodeFence) break;
-      const trimmed = (lines[candidate] ?? "").trim();
-      if (trimmed === "]" || trimmed === "\\]") {
+      const candidateLine = lines[candidate] ?? "";
+      const closing = bareDisplayDelimiter(candidateLine);
+      const stripped = stripContainerPrefix(candidateLine, opening.prefix).trim();
+      if ((closing?.token === "]" && closing.prefix === opening.prefix)
+        || stripped === "\\]") {
         endRow = candidate;
         break;
       }
-      body.push(lines[candidate] ?? "");
+      body.push(stripContainerPrefix(candidateLine, opening.prefix));
     }
     if (endRow >= 0) {
       row = endRow;
@@ -1367,7 +1429,8 @@ export function detectFormulas(lines: string[]): DetectedFormula[] {
     }
     const loneDefinition = definitionItem(line);
 
-    if (trimmed === "[") {
+    const bareOpening = bareDisplayDelimiter(line);
+    if (bareOpening?.token === "[") {
       const body: string[] = [];
       let endRow = -1;
 
@@ -1375,12 +1438,15 @@ export function detectFormulas(lines: string[]): DetectedFormula[] {
         candidate < Math.min(lines.length, row + MAX_DISPLAY_BLOCK_ROWS + 1);
         candidate += 1) {
         if (contexts[candidate]?.inCodeFence) break;
-        const candidateTrimmed = (lines[candidate] ?? "").trim();
-        if (candidateTrimmed === "]" || candidateTrimmed === "\\]") {
+        const candidateLine = lines[candidate] ?? "";
+        const closing = bareDisplayDelimiter(candidateLine);
+        const stripped = stripContainerPrefix(candidateLine, bareOpening.prefix).trim();
+        if ((closing?.token === "]" && closing.prefix === bareOpening.prefix)
+          || stripped === "\\]") {
           endRow = candidate;
           break;
         }
-        body.push(lines[candidate] ?? "");
+        body.push(stripContainerPrefix(candidateLine, bareOpening.prefix));
       }
 
       const latex = normalizeHardWrappedLatex(body);
@@ -1391,7 +1457,7 @@ export function detectFormulas(lines: string[]): DetectedFormula[] {
         regions.push({
           startRow: row,
           endRow,
-          startCol: 0,
+          startCol: stringWidth(bareOpening.prefix),
           endCol: Math.max(...lines.slice(row, endRow + 1).map((value) => stringWidth(value)), 1),
           latex,
           display: true,
@@ -1434,10 +1500,10 @@ export function detectFormulas(lines: string[]): DetectedFormula[] {
     }
 
     // Several terminal Markdown renderers consume the backslashes in \(...\)
-    // and leave forms such as `(\mathbf E)` or `(\rho)`. Only infer these
-    // when the body has strong TeX evidence, so ordinary prose parentheses
-    // remain untouched.
-    const inferredSegments = inferredParenthesizedMath(line);
+    // and leave forms such as `(\mathbf E)` or `(x)`. Infer simple variables
+    // only when the line has strong TeX, mathematical discourse, or repeated
+    // variable-shaped groups; ordinary prose parentheses remain untouched.
+    const inferredSegments = inferredParenthesizedMath(line, codeRanges);
     for (const segment of inferredSegments) {
       if (overlapsInlineCode(segment.start, segment.end, codeRanges)) continue;
       const [startCol, endCol] = visualEnd(line, segment.start, segment.end);

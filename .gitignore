@@ -3,3 +3,5 @@ dist/
 coverage/
 *.log
 .DS_Store
+# Pi session exports are local diagnostics, not project artifacts.
+pi-session-*.html

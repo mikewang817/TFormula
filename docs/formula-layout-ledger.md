@@ -368,6 +368,7 @@ type FormulaIntent = "inline" | "display" | "embedded-display";
 | 2026-07-25 | Reader 紧尺寸行内公式 | 已先提交 `fca2c33`；reader 单行公式改用透明紧尺寸 PNG 与 Kitty 自然像素 `X/Y` placement，列宽先按单行垂直 fit，再在 floor/ceil 间选择，额外缩小上限 8%，Agent/source-mask 路径保持单元格 placement；PNG cache v6；新增 geometry/Kitty/renderer/layout 回归。首次全量中的独立 file-watch 用例超时，单测与随后全量重跑均通过：32 files passed；493 passed；1 expected fail；build 与 `git diff --check` 通过 |
 | 2026-07-25 | README 双语同步 | 更新 `README.md`、`README.zh-CN.md`：PDF/OCR 数学边界恢复、HTML 实体、混合图片段落、表格换行、独立单美元公式、紧尺寸透明 PNG、Kitty `X/Y`、floor/ceil 8% 限制、CJK 换行、缓存及整数单元格限制；仅文档变更，双语内容对照检查，`git diff --check` 通过 |
 | 2026-07-25 | npm `0.2.1` 发布 | `npm run check`：32 files passed；493 passed；1 expected fail；`npm pack --dry-run`：87 files、230.6 kB、无意外文件；发布级浏览器二次验证后 registry 核验 `tformula@0.2.1`，`latest=0.2.1`，shasum `25c8bc5bbab5ec77a99426acdf83d7b27ce2b20d` |
+| 2026-07-25 | TUI 引用槽中的极限定义公式 | 按用户截图结构复现保留 `│`/`>` gutter 的裸 `[`/`]` 多行公式，检测时剥离容器前缀但保留物理列；同一行已有强数学证据、数学语境或多个非选项变量组时，恢复 `(M)`、`(x)`、`(f(x))` 等简单括号变量；内联代码不提供组证据，普通 `(A)/(B)` 选项保持文本；新增4项检测回归。首次全量中的独立 `reader-watch` 原子替换用例超时，隔离重跑及随后全量均通过：32 files passed；497 passed；1 expected fail；build 与 `git diff --check` 通过 |
 
 ---
 
