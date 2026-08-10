@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { FormulaScreen } from "../src/screen.js";
 import { OutputCheckpointSplitter } from "../src/output-checkpoints.js";
-import { MathRenderer } from "../src/math-renderer.js";
+import { MathRenderError, MathRenderer } from "../src/math-renderer.js";
 import { KittyImageTransmitter } from "../src/image-transmitter.js";
 import { TFORMULA_FOCUS_Z_INDEX } from "../src/kitty.js";
 import { TerminalOutputTransformer } from "../src/terminal-output.js";
@@ -84,6 +84,42 @@ class CapturingMathRenderer extends FastMathRenderer {
     ...args: Parameters<MathRenderer["renderPlacement"]>
   ): ReturnType<MathRenderer["renderPlacement"]> {
     this.arguments.push(args);
+    return super.renderPlacement(...args);
+  }
+}
+
+class CountingFailureMathRenderer extends FastMathRenderer {
+  calls = 0;
+
+  constructor(readonly failure: () => Error) {
+    super();
+  }
+
+  override async renderPlacement(
+    ..._args: Parameters<MathRenderer["renderPlacement"]>
+  ): ReturnType<MathRenderer["renderPlacement"]> {
+    this.calls += 1;
+    throw this.failure();
+  }
+}
+
+class SelectiveFailureMathRenderer extends FastMathRenderer {
+  failedCalls = 0;
+  renderedCalls = 0;
+
+  constructor(readonly failure: () => Error) {
+    super();
+  }
+
+  override async renderPlacement(
+    ...args: Parameters<MathRenderer["renderPlacement"]>
+  ): ReturnType<MathRenderer["renderPlacement"]> {
+    const [plan] = args;
+    if (plan.formula.latex.includes("BAD")) {
+      this.failedCalls += 1;
+      throw this.failure();
+    }
+    this.renderedCalls += 1;
     return super.renderPlacement(...args);
   }
 }
@@ -3136,6 +3172,133 @@ describe("FormulaScreen lifecycle", () => {
       }
     } finally {
       renderer.release?.();
+      screen.dispose();
+    }
+  });
+});
+
+describe("FormulaScreen unparseable formulas", () => {
+  const parseFailure = (): Error => new MathRenderError(
+    "tex-error",
+    "MathJax could not parse the formula: \\backslash is only supported in math mode"
+  );
+  const repaintAlternateFrame = async (screen: FormulaScreen): Promise<void> => {
+    await screen.write("\x1b[1S\x1b[H\x1b[2K\\[\r\n\x1b[2KE=mc^2\r\n\x1b[2K\\]");
+    await screen.flushScan();
+  };
+
+  it("attempts an unparseable formula once across alternate-screen repaints", async () => {
+    // A formula that renders keeps a placement on the alternate screen, which is
+    // what arms #markAlternateLayoutDirty: every scrolled repaint then drops the
+    // failing formula's retry entry, so its attempt counter restarts at 1 and
+    // never reaches the ceiling that would block it. Without a co-resident
+    // placement the ladder simply runs to its ceiling and this loop is bounded,
+    // which is why the failing formula has to share the frame with a good one.
+    const renderer = new SelectiveFailureMathRenderer(parseFailure);
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 12,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined
+    });
+    const frame = "\x1b[H\x1b[2K\\[\r\n\x1b[2Kx=1\r\n\x1b[2K\\]\r\n"
+      + "\x1b[2K\\[\r\n\x1b[2K\\BAD y\r\n\x1b[2K\\]";
+    try {
+      await screen.write(`\x1b[?1049h${frame}`);
+      await screen.flushScan();
+      expect(renderer.failedCalls).toBe(1);
+
+      for (let repaint = 0; repaint < 12; repaint += 1) {
+        await screen.write(`\x1b[1S${frame}`);
+        await screen.flushScan();
+      }
+      expect(renderer.failedCalls).toBe(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("still retries a rasterizer failure, which a later render can clear", async () => {
+    // raster-error reports a crashed or timed-out rasterizer process rather than
+    // a verdict on the source, so it must not enter the content-keyed set.
+    const renderer = new CountingFailureMathRenderer(() =>
+      new MathRenderError("raster-error", "formula rasterization failed: worker exited")
+    );
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      expect(renderer.calls).toBe(1);
+
+      for (let frame = 0; frame < 5; frame += 1) {
+        await repaintAlternateFrame(screen);
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+      await waitFor(() => renderer.calls > 1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("still retries a transient render failure across alternate-screen repaints", async () => {
+    const renderer = new CountingFailureMathRenderer(() =>
+      new Error("terminal rejected the graphics command")
+    );
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      expect(renderer.calls).toBe(1);
+
+      // Transient failures keep the exponential retry backoff, so wait for it
+      // rather than repainting inside the first quiet window.
+      for (let frame = 0; frame < 5; frame += 1) {
+        await repaintAlternateFrame(screen);
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+      await waitFor(() => renderer.calls > 1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("keeps an unparseable formula blocked across a resize and a scale change", async () => {
+    const renderer = new CountingFailureMathRenderer(parseFailure);
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined
+    });
+    try {
+      await screen.write("\x1b[2J\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      expect(renderer.calls).toBe(1);
+
+      screen.resize(60, 12);
+      await screen.flushScan();
+      screen.setScale(1.5);
+      await screen.flushScan();
+      expect(renderer.calls).toBe(1);
+    } finally {
       screen.dispose();
     }
   });
