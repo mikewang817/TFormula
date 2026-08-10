@@ -14,29 +14,6 @@ interface SemanticFormulaCandidate {
 }
 
 
-const COMMAND_RE = /\\(?:frac|dfrac|tfrac|binom|sum|prod|coprod|int|iint|iiint|oint|log|ln|exp|sqrt|lim|liminf|limsup|sin|cos|tan|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh|det|dim|gcd|hom|ker|max|min|sup|inf|Pr|mod|pmod|bmod|ce|pu|qty|dv|pdv|bra|ket|braket|begin|end|left|right|text|mathrm|mathbf|mathit|mathsf|mathtt|mathbb|mathcal|mathfrak|operatorname|overline|underline|widehat|widetilde|hat|bar|vec|dot|ddot|partial|nabla|ell|infty|forall|exists|neg|pm|mp|times|div|cdot|ast|star|circ|bullet|oplus|otimes|cap|cup|subset|supset|subseteq|supseteq|in|notin|ni|le|leq|ge|geq|neq|ne|approx|sim|simeq|cong|equiv|propto|to|mapsto|rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|Leftrightarrow|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|omicron|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega)(?![A-Za-z])/gu;
-
-const ANY_TEX_COMMAND_RE = /\\[A-Za-z]+/gu;
-const UPRIGHT_GREEK_COMMAND_RE = /^(?:up(?:alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|omicron|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega)|Up(?:gamma|delta|theta|lambda|xi|pi|sigma|upsilon|phi|psi|omega))$/u;
-const SCIENTIFIC_COMMANDS = new Set([
-  "SI", "si", "unit", "units", "unitfrac", "nicefrac",
-  "prescript", "centernot", "implies", "coloneqq", "xleftrightarrow", "xlongequal",
-  "cancel", "bcancel", "xcancel", "cancelto", "boldsymbol",
-  "degree", "celsius", "ohm", "micro",
-  "comm", "commutator", "acomm", "anticommutator",
-  "expval", "expectationvalue", "mel", "matrixelement",
-  "dd", "fdv", "functionalderivative"
-]);
-const UNICODE_MATH_RE = /[\p{Sm}\u00b2\u00b3\u00b9\u0370-\u03ff\u1f00-\u1fff\u2070-\u209f\u2100-\u214f\u{1d400}-\u{1d7ff}]/u;
-const PROSE_MATH_WORDS = new Set([
-  "and", "bar", "baz", "config", "else", "false", "foo", "for", "from", "if", "in",
-  "is", "mode", "of", "off", "ok", "on", "or", "set", "status", "the", "then", "to",
-  "true", "version", "with"
-]);
-const INFERRED_MATH_WORDS = new Set([
-  "arg", "cos", "cot", "csc", "deg", "det", "dim", "exp", "gcd", "hom", "inf",
-  "ker", "lim", "ln", "log", "max", "min", "mod", "pr", "sec", "sin", "sup", "tan"
-]);
 const DISPLAY_ENVIRONMENTS = new Set([
   "align", "align*", "aligned", "alignedat", "alignat", "alignat*",
   "cases", "displaymath", "equation", "equation*", "flalign", "flalign*",
@@ -67,22 +44,6 @@ export function containsFormulaTrigger(value: string): boolean {
   return FORMULA_TRIGGER_RE.test(value);
 }
 
-function mathScore(value: string): number {
-  let score = 0;
-  score += (value.match(COMMAND_RE)?.length ?? 0) * 3;
-  score += [...value.matchAll(ANY_TEX_COMMAND_RE)]
-    .filter((match) => {
-      const command = match[0]!.slice(1);
-      return SCIENTIFIC_COMMANDS.has(command) || UPRIGHT_GREEK_COMMAND_RE.test(command);
-    }).length * 3;
-  score += Math.min(3, value.match(/[\^_][{A-Za-z0-9(]/gu)?.length ?? 0);
-  score += Math.min(2, value.match(/\\[A-Za-z]+/gu)?.length ?? 0);
-  if (/\{[^{}]+\}/u.test(value)) score += 1;
-  if (/[=≈≠≤≥∑∫√∞]|\\(?:le|ge|neq|approx|cdot|times)/u.test(value)) score += 1;
-  if (/\b[A-Z]\s*\([^)]*\)/u.test(value)) score += 1;
-  return score;
-}
-
 function visualColumn(line: string, utf16Index: number): number {
   return stringWidth(line.slice(0, utf16Index));
 }
@@ -94,107 +55,6 @@ function visualEnd(line: string, start: number, end: number): [number, number] {
 
 function normalizeLatex(parts: string[]): string {
   return parts.map((part) => part.trim()).filter(Boolean).join("\n");
-}
-
-interface ParenthesizedSegment {
-  start: number;
-  end: number;
-  body: string;
-}
-
-function parenthesizedSegments(line: string): ParenthesizedSegment[] {
-  const openStack: number[] = [];
-  const matchingEndByStart = new Uint32Array(line.length);
-
-  // Pair every balanced parenthesis in one pass. Keeping the inner matches is
-  // important for recovery: when an outer opener is never closed, the former
-  // implementation retried at the next opener and could still return a
-  // balanced segment inside it.
-  for (let index = 0; index < line.length; index += 1) {
-    if (line[index - 1] === "\\") continue;
-    if (line[index] === "(") {
-      openStack.push(index);
-    } else if (line[index] === ")" && openStack.length > 0) {
-      matchingEndByStart[openStack.pop()!] = index + 1;
-    }
-  }
-
-  // Retaining the first matched opener and jumping to its closer reproduces
-  // the old left-to-right skip semantics. An unmatched ancestor has no end,
-  // so scanning continues and can still recover its balanced inner pairs.
-  const segments: ParenthesizedSegment[] = [];
-  for (let start = 0; start < line.length; start += 1) {
-    const end = matchingEndByStart[start]!;
-    if (end === 0) continue;
-    const body = line.slice(start + 1, end - 1).trim();
-    if (body) segments.push({ start, end, body });
-    start = end - 1;
-  }
-  return segments;
-}
-
-function looksLikeAsciiMath(value: string): boolean {
-  const compact = value.replace(/\\[ ,;:!]/gu, "").trim();
-  if (!/[A-Za-z0-9]/u.test(compact)) return false;
-  if (!/^[A-Za-z0-9\s.,+*/=<>^_{}()[\]|\\-]+$/u.test(compact)) return false;
-  const proseProbe = compact.replace(ANY_TEX_COMMAND_RE, "");
-  const words = proseProbe.match(/[A-Za-z]+/gu) ?? [];
-  const hasProseWord = words.some((word) => {
-    if (PROSE_MATH_WORDS.has(word.toLowerCase())) return true;
-    if (/^[A-Z]{3,}$/u.test(word)) return true;
-    return word.length >= 4;
-  });
-  if (hasProseWord) return false;
-  if (/[=<>]/u.test(compact)) return true;
-  if (/^[A-Za-z](?:[_^](?:[A-Za-z0-9]|\{[A-Za-z0-9]+\}))+$/u.test(compact)) return true;
-  if (/[_^]/u.test(compact)
-    && (/^[0-9]/u.test(compact)
-      || /[+*/-]/u.test(compact)
-      || /^[A-Za-z]{1,3}[_^]/u.test(compact))) return true;
-  const operand = String.raw`(?:\d+(?:\.\d+)?|[A-Za-z])`;
-  return new RegExp(`^${operand}(?:[+*/-]${operand})+$`, "u").test(compact.replace(/\s+/gu, ""));
-}
-
-function isLikelyMath(value: string): boolean {
-  return mathScore(value) >= 3 || looksLikeAsciiMath(value);
-}
-
-function hasStrongUnicodeMath(value: string): boolean {
-  return /[^\x00-\x7f]/u.test(value) && UNICODE_MATH_RE.test(value);
-}
-
-/** Strong enough for delimiter-free inference without swallowing prose. */
-function isLikelyInferredUnicodeMath(value: string): boolean {
-  const trimmed = value.trim();
-  if (!hasStrongUnicodeMath(trimmed)) return false;
-  const proseProbe = trimmed.replace(ANY_TEX_COMMAND_RE, "");
-  const residue = proseProbe.replace(
-    /[\p{Sm}\p{Mark}\u00b2\u00b3\u00b9\u0370-\u03ff\u1f00-\u1fff\u2070-\u209f\u2100-\u214f\u{1d400}-\u{1d7ff}]/gu,
-    ""
-  );
-  // Han and other non-mathematical scripts are prose evidence. ASCII words
-  // are allowed only when they still resemble short variable/function names.
-  if (/[^\x00-\x7f]/u.test(residue)) return false;
-  const words = residue.match(/[A-Za-z]+/gu) ?? [];
-  if (words.some((word) => word.length > 1
-    && !INFERRED_MATH_WORDS.has(word.toLowerCase()))) {
-    return false;
-  }
-  return /^[A-Za-z0-9\s.,+*/=<>^_{}()[\]|\\-]*$/u.test(residue);
-}
-
-function inferredParenthesizedMath(line: string): ParenthesizedSegment[] {
-  return parenthesizedSegments(line)
-    .filter((segment) => isLikelyMath(segment.body)
-      || isLikelyInferredUnicodeMath(segment.body));
-}
-
-interface DefinitionItem {
-  body: string;
-  descriptionLatex: string;
-  startCol: number;
-  endCol: number;
-  lineWidth: number;
 }
 
 export function escapeTexText(value: string): string {
@@ -211,70 +71,6 @@ export function escapeTexText(value: string): string {
     "~": "\\~{}"
   };
   return value.replace(/[\\{}$&#%_^~]/gu, (character) => replacements[character]!);
-}
-
-function descriptionToLatex(value: string): string {
-  const parts: string[] = [];
-  let cursor = 0;
-  for (const segment of parenthesizedSegments(value)) {
-    if (!isLikelyMath(segment.body) && !isLikelyInferredUnicodeMath(segment.body)) continue;
-    const prose = value.slice(cursor, segment.start);
-    if (prose) parts.push(`\\text{${escapeTexText(prose)}}`);
-    parts.push(segment.body);
-    cursor = segment.end;
-  }
-  const prose = value.slice(cursor);
-  if (prose) parts.push(`\\text{${escapeTexText(prose)}}`);
-  return parts.join("");
-}
-
-function isDefinitionSymbol(value: string): boolean {
-  return isLikelyMath(value)
-    || isLikelyInferredUnicodeMath(value)
-    || /^[A-Za-z](?:[_^](?:[A-Za-z0-9]|\{[A-Za-z0-9]+\}))?$/u.test(value);
-}
-
-function definitionItem(line: string): DefinitionItem | undefined {
-  for (const segment of parenthesizedSegments(line)) {
-    if (!isDefinitionSymbol(segment.body)) continue;
-    const prefix = line.slice(0, segment.start);
-    if (!/^\s*(?:[-*•]\s+|\d+[.)]\s+)$/u.test(prefix)) continue;
-    const suffix = line.slice(segment.end);
-    const description = suffix.match(/^\s*([：:]\s*\S.*)$/u)?.[1];
-    if (!description) continue;
-    return {
-      body: segment.body,
-      descriptionLatex: descriptionToLatex(description),
-      startCol: visualColumn(line, segment.start),
-      endCol: visualColumn(line, segment.end),
-      lineWidth: stringWidth(line)
-    };
-  }
-  return undefined;
-}
-
-function inferredDefinitionGroup(lines: string[], startRow: number): SemanticFormulaCandidate | undefined {
-  const items: DefinitionItem[] = [];
-  for (let row = startRow; row < lines.length; row += 1) {
-    const item = definitionItem(lines[row] ?? "");
-    if (!item || (items[0] && item.startCol !== items[0].startCol)) break;
-    items.push(item);
-  }
-  if (items.length < 2) return undefined;
-
-  const latexRows = items
-    .map((item) => `${item.body} & ${item.descriptionLatex}`)
-    .join("\\\\");
-  return {
-    startRow,
-    endRow: startRow + items.length - 1,
-    startCol: items[0]!.startCol,
-    endCol: Math.max(...items.map((item) => item.lineWidth)),
-    latex: `\\begin{array}{ll}${latexRows}\\end{array}`,
-    display: false,
-    confidence: "inferred",
-    compact: true
-  };
 }
 
 function isStandaloneDisplayLine(line: string): boolean {
@@ -501,18 +297,44 @@ function hasOddTrailingBackslash(value: string): boolean {
   return count % 2 === 1;
 }
 
+// Only concatenate a terminal hard row when its two letter runs make one of
+// the TeX control words TFormula supports. This repairs `\\varep` + `silon`
+// without corrupting an already-complete command such as `\\qquad` followed
+// by the next equation line.
+const TEX_CONTROL_WORDS = new Set([
+  "alpha", "beta", "gamma", "delta", "epsilon", "varepsilon", "zeta", "eta", "theta",
+  "vartheta", "iota", "kappa", "lambda", "mu", "nu", "xi", "pi", "varpi", "rho",
+  "varrho", "sigma", "varsigma", "tau", "upsilon", "phi", "varphi", "chi", "psi", "omega",
+  "Gamma", "Delta", "Theta", "Lambda", "Xi", "Pi", "Sigma", "Upsilon", "Phi", "Psi", "Omega",
+  "begin", "end", "frac", "dfrac", "tfrac", "binom", "dbinom", "tbinom", "sqrt",
+  "sum", "prod", "coprod", "int", "iint", "iiint", "oint", "lim", "sin", "cos", "tan",
+  "log", "ln", "exp", "min", "max", "sup", "inf", "det", "gcd", "text", "mathrm",
+  "mathbf", "mathit", "mathbb", "mathcal", "mathfrak", "mathsf", "mathtt", "operatorname",
+  "left", "right", "middle", "quad", "qquad", "enspace", "thinspace", "negthinspace",
+  "medspace", "thickspace", "displaystyle", "textstyle", "scriptstyle", "scriptscriptstyle",
+  "overline", "underline", "overbrace", "underbrace", "lVert", "rVert", "lvert", "rvert",
+  "cdot", "times", "div", "pm", "mp", "leq", "geq", "neq", "approx", "sim", "simeq",
+  "equiv", "propto", "partial", "nabla", "infty", "forall", "exists", "in", "notin",
+  "subset", "subseteq", "supset", "supseteq", "cup", "cap", "land", "lor", "neg", "to",
+  "rightarrow", "leftarrow", "leftrightarrow", "Rightarrow", "Leftarrow", "Leftrightarrow"
+]);
+
 function shouldJoinHardWrappedToken(left: string, right: string): boolean {
   if (!left || !right) return false;
+  // Soft-wrapped terminal rows are already reassembled before detection.
+  // Across genuine terminal lines, TeX treats the newline after a control
+  // word as its terminator. Joining an unrecognised word to the next line
+  // turns valid source such as `\qquad` followed by `y` into `\qquady`.
+  // The one unambiguous recovery case is a lone trailing slash, which can
+  // only be the first half of a control sequence at this boundary.
   if (hasOddTrailingBackslash(left)) return true;
-
   const command = left.match(/\\([A-Za-z]+)$/u)?.[1];
   const continuation = right.match(/^([A-Za-z]+)/u)?.[1];
   if (!command || !continuation) return false;
-  // A complete, known command at the end of a genuine TeX row needs the
-  // newline as its control-word terminator. An unknown prefix is much more
-  // likely to be a TUI hard-wrap in the middle of `\varepsilon`,
-  // `\operatorname`, and similar control words.
-  return mathScore(`\\${command}`) < 3;
+  const joined = command + continuation;
+  return Array.from(TEX_CONTROL_WORDS).some((word) =>
+    word.length > command.length && word.startsWith(command) && joined.startsWith(word)
+  );
 }
 
 interface RowEnvironmentState {
@@ -888,12 +710,42 @@ function environmentRegions(
   return regions;
 }
 
+/** A delimited outer display must not hide an incomplete nested environment. */
+function hasUnclosedDisplayEnvironment(latex: string): boolean {
+  const stack: string[] = [];
+  const pattern = /\\(begin|end)\{([A-Za-z]+\*?)\}/gu;
+  for (const match of latex.matchAll(pattern)) {
+    const name = match[2]!;
+    if (!DISPLAY_ENVIRONMENTS.has(name)) continue;
+    if (match[1] === "begin") {
+      stack.push(name);
+    } else if (stack.at(-1) === name) {
+      stack.pop();
+    } else {
+      return true;
+    }
+  }
+  return stack.length > 0;
+}
+
 interface DollarPair {
   start: DelimiterPosition;
   end: DelimiterPosition;
   latex: string;
   quality: number;
   span: number;
+}
+
+function isValidSingleDollarPair(
+  lines: string[],
+  start: DelimiterPosition,
+  end: DelimiterPosition
+): boolean {
+  const openingNext = (lines[start.row] ?? "")[start.index + 1];
+  const closingPrevious = (lines[end.row] ?? "")[end.index - 1];
+  return Boolean(openingNext && closingPrevious
+    && !/\s/u.test(openingNext)
+    && !/\s/u.test(closingPrevious));
 }
 
 function dollarDelimitedRegions(
@@ -918,17 +770,12 @@ function dollarDelimitedRegions(
     if (end.row - start.row > MAX_DISPLAY_BLOCK_ROWS
       || delimiterBodyCrossesCode(contexts, start, end, delimiter.length)) continue;
     const latex = bodyBetweenDelimiters(lines, start, end, delimiter.length);
-    if (!latex || (!display && !isLikelyInlineDollarMath(latex))) continue;
-    if (!display
-      && start.row !== end.row
-      && !(/\\[A-Za-z]+|[_^=<>+*/-]/u.test(latex)
-        || isLikelyInferredUnicodeMath(latex)
-        || /^[A-Za-z][A-Za-z0-9]*\s*\([^()]+\)$/su.test(latex))) continue;
+    if (!latex || (!display && !isValidSingleDollarPair(lines, start, end))) continue;
     candidates[index] = {
       start,
       end,
       latex,
-      quality: mathScore(latex) + (hasStrongUnicodeMath(latex) ? 3 : 0),
+      quality: latex.length,
       span: (end.row - start.row) * 10_000 + Math.max(1, end.index - start.index)
     };
   }
@@ -1054,208 +901,6 @@ function hardWrappedDollarDisplay(
   return undefined;
 }
 
-function isLikelyInlineDollarMath(value: string): boolean {
-  const trimmed = value.trim();
-  const evidence = trimmed.replace(/\\\$/gu, "1");
-  const compact = evidence.replace(/\s+/gu, "");
-  // Explicit `$...$` is stronger evidence than stripped parentheses, so allow
-  // the ubiquitous one-letter variable while still rejecting prices such as
-  // `$12.50$` and prose-like `$USD$`.
-  return /\\[A-Za-z]+/u.test(evidence)
-    || hasStrongUnicodeMath(evidence)
-    || isLikelyMath(evidence)
-    || /^[A-Za-z]$/u.test(trimmed)
-    || (/^[a-z]{2,3}$/u.test(trimmed) && !PROSE_MATH_WORDS.has(trimmed))
-    || /^[A-Za-z][A-Za-z0-9]*\s*\([^()]+\)$/u.test(trimmed)
-    || (/[_^]/u.test(compact)
-      && /[A-Za-z0-9]/u.test(compact)
-      && /^[A-Za-z0-9\\{}()[\].,+*/=<>|^_-]+$/u.test(compact));
-}
-
-function bareBracketSegments(line: string, codeRanges: InlineCodeRange[]): DelimitedSegment[] {
-  const segments: DelimitedSegment[] = [];
-  const stack: number[] = [];
-  for (let index = 0; index < line.length; index += 1) {
-    if (overlapsInlineCode(index, index + 1, codeRanges)) continue;
-    if (line[index] === "[" && line[index - 1] !== "\\") {
-      stack.push(index);
-      continue;
-    }
-    if (line[index] !== "]" || line[index - 1] === "\\" || stack.length === 0) continue;
-    const start = stack.pop()!;
-    if (stack.length > 0) continue;
-    const body = line.slice(start + 1, index).trim();
-    if (body && (isLikelyMath(body) || isLikelyInferredUnicodeMath(body))) {
-      segments.push({ start, end: index + 1, body });
-    }
-  }
-  return segments;
-}
-
-function isLikelyStandaloneMath(value: string): boolean {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > 160 || /[`$]/u.test(trimmed)) return false;
-  if (/\\(?:\[|\]|\(|\))/u.test(trimmed)) return false;
-  if (/\\[A-Za-z]+/u.test(trimmed)) return mathScore(trimmed) >= 3;
-  if (hasStrongUnicodeMath(trimmed)) {
-    return isLikelyInferredUnicodeMath(trimmed);
-  }
-  if (!looksLikeAsciiMath(trimmed)) return false;
-  return /[=<>^_+*/-]/u.test(trimmed);
-}
-
-function isStandaloneDisplayEnvironmentToken(value: string): boolean {
-  const match = value.trim().match(/^\\(?:begin|end)\{([A-Za-z]+\*?)\}$/u);
-  return Boolean(match && DISPLAY_ENVIRONMENTS.has(match[1]!));
-}
-
-function adjacentToStandaloneDelimiter(lines: string[], row: number): boolean {
-  const delimiter = /^(?:\\\[|\\\]|\$\$|\[|\])$/u;
-  return delimiter.test((lines[row - 1] ?? "").trim())
-    || delimiter.test((lines[row + 1] ?? "").trim());
-}
-
-/**
- * A terminal Markdown renderer can expose a display one physical line at a
- * time. Until the closing bare `]` arrives, its interior must not fall through
- * to the standalone/inline compatibility detectors: alignment tabs, half of a
- * `\left...\right` pair, and incomplete brace groups are not formulas on their
- * own. Rendering those prefixes both flashes MathJax errors and can consume the
- * retry budget of the completed display.
- */
-function pendingDisplayRows(
-  lines: string[],
-  contexts: DetectionLineContext[]
-): Uint8Array {
-  const pendingRows = new Uint8Array(lines.length);
-  const markPending = (startRow: number): void => {
-    pendingRows.fill(
-      1,
-      startRow,
-      Math.min(lines.length, startRow + MAX_DISPLAY_BLOCK_ROWS + 1)
-    );
-  };
-  const hasMathEvidence = (body: string[]): boolean => {
-    const probe = normalizeHardWrappedLatex(body);
-    return Boolean(probe && (isLikelyMath(probe)
-      || body.some((line) => isStandaloneDisplayEnvironmentToken(line.trim()))));
-  };
-
-  // Bare brackets are the form left by several terminal Markdown renderers
-  // after they consume the backslashes in `\[` and `\]`.
-  for (let row = 0; row < lines.length; row += 1) {
-    if (contexts[row]?.inCodeFence || (lines[row] ?? "").trim() !== "[") continue;
-    const body: string[] = [];
-    const limit = Math.min(lines.length, row + MAX_DISPLAY_BLOCK_ROWS + 1);
-    let endRow = -1;
-    for (let candidate = row + 1; candidate < limit; candidate += 1) {
-      if (contexts[candidate]?.inCodeFence) break;
-      const trimmed = (lines[candidate] ?? "").trim();
-      if (trimmed === "]" || trimmed === "\\]") {
-        endRow = candidate;
-        break;
-      }
-      body.push(lines[candidate] ?? "");
-    }
-    if (endRow >= 0) {
-      row = endRow;
-      continue;
-    }
-
-    // A lone literal `[` should not suppress unrelated output forever. Wait
-    // for positive TeX/math evidence before treating it as a streaming display.
-    if (!hasMathEvidence(body)) continue;
-    markPending(row);
-    row = limit - 1;
-  }
-
-  // Explicit display delimiters can stream in exactly the same shape. Their
-  // opening token may share a row with the first formula fragment.
-  let slashOpening: DelimiterPosition | undefined;
-  for (let row = 0; row < lines.length; row += 1) {
-    const context = contexts[row]!;
-    if (context.inCodeFence) {
-      slashOpening = undefined;
-      continue;
-    }
-    const events = [
-      ...unescapedTokenPositions(lines[row] ?? "", "\\[", context)
-        .filter((index) => !isStrippedRowSpacingAt(lines[row] ?? "", index))
-        .map((index) => ({ index, opening: true })),
-      ...unescapedTokenPositions(lines[row] ?? "", "\\]", context)
-        .map((index) => ({ index, opening: false }))
-    ].sort((left, right) => left.index - right.index);
-    for (const event of events) {
-      if (event.opening) slashOpening = { row, index: event.index };
-      else slashOpening = undefined;
-    }
-  }
-  if (slashOpening) {
-    const body = [
-      (lines[slashOpening.row] ?? "").slice(slashOpening.index + 2),
-      ...lines.slice(slashOpening.row + 1)
-    ];
-    if (hasMathEvidence(body)) markPending(slashOpening.row);
-  }
-
-  let dollarOpening: DelimiterPosition | undefined;
-  for (let row = 0; row < lines.length; row += 1) {
-    const context = contexts[row]!;
-    if (context.inCodeFence) {
-      dollarOpening = undefined;
-      continue;
-    }
-    for (const index of dollarDelimiterPositions(lines[row] ?? "", "$$")) {
-      if (positionInInlineCode(index, context)) continue;
-      dollarOpening = dollarOpening ? undefined : { row, index };
-    }
-  }
-  if (dollarOpening) {
-    const body = [
-      (lines[dollarOpening.row] ?? "").slice(dollarOpening.index + 2),
-      ...lines.slice(dollarOpening.row + 1)
-    ];
-    if (hasMathEvidence(body)) markPending(dollarOpening.row);
-  }
-
-  // An environment is unambiguously mathematical, so unlike a lone literal
-  // bracket it needs no heuristic evidence before its inner rows are hidden.
-  const environmentStack: EnvironmentToken[] = [];
-  const environmentPattern = /\\(begin|end)\{([A-Za-z]+\*?)\}/gu;
-  for (let row = 0; row < lines.length; row += 1) {
-    const line = lines[row] ?? "";
-    const context = contexts[row]!;
-    if (context.inCodeFence) {
-      environmentStack.length = 0;
-      continue;
-    }
-    for (const match of line.matchAll(environmentPattern)) {
-      if (match.index === undefined
-        || !DISPLAY_ENVIRONMENTS.has(match[2]!)
-        || isEscapedAt(line, match.index)
-        || overlapsInlineCode(match.index, match.index + match[0].length, context.codeRanges)) {
-        continue;
-      }
-      if (match[1] === "begin") {
-        environmentStack.push({
-          row,
-          index: match.index,
-          end: match.index + match[0].length,
-          action: "begin",
-          name: match[2]!
-        });
-      } else if (environmentStack.at(-1)?.name === match[2]) {
-        environmentStack.pop();
-      } else {
-        environmentStack.length = 0;
-      }
-    }
-  }
-  if (environmentStack[0]) markPending(environmentStack[0].row);
-
-  return pendingRows;
-}
-
 function trailingInlineRegion(
   lines: string[],
   row: number,
@@ -1311,177 +956,23 @@ export function classifyFormulaIntent(
   return ownsFirstLineStart && ownsLastLineEnd ? "display" : "embedded-display";
 }
 
-/**
- * Detect formulas in the post-ANSI terminal screen. Explicit TeX delimiters are
- * preferred. A conservative inferred form handles TUIs that turn `\[`/`\]`
- * into bare bracket lines while leaving the TeX body visible.
- */
+/** Detect explicit TeX formulas in the post-ANSI terminal screen. */
 export function detectFormulas(lines: string[]): DetectedFormula[] {
-  // Every supported explicit delimiter, TeX command, inferred ASCII form, and
-  // Unicode-math form contains at least one of these characters. Most TUI
-  // frames are plain status/log text, so avoid building code-range contexts
-  // and running every detector when a formula is structurally impossible.
   if (!lines.some(containsFormulaTrigger)) return [];
   const contexts = detectionLineContexts(lines);
-  const pendingRows = pendingDisplayRows(lines, contexts);
-  const rangeIntersectsPendingDisplay = (startRow: number, endRow: number): boolean => {
-    for (let row = startRow; row <= endRow; row += 1) {
-      if (pendingRows[row]) return true;
-    }
-    return false;
-  };
-  const intersectsPendingDisplay = (region: SemanticFormulaCandidate): boolean =>
-    rangeIntersectsPendingDisplay(region.startRow, region.endRow);
   const regions: SemanticFormulaCandidate[] = [
-    // A complete environment is self-delimiting and remains safe even when a
-    // Markdown renderer has emitted a bare `[` but never emits its matching
-    // `]`. Preserve that recovery path while suppressing incomplete interior
-    // rows and all weaker delimiter/inference candidates.
     ...environmentRegions(lines, contexts),
-    ...[
-      ...slashDelimitedRegions(lines, contexts, "\\[", "\\]", true),
-      ...slashDelimitedRegions(lines, contexts, "\\(", "\\)", false),
-      ...dollarDelimitedRegions(lines, contexts, "$$", true),
-      ...dollarDelimitedRegions(lines, contexts, "$", false)
-    ].filter((region) => !intersectsPendingDisplay(region))
-  ];
-
-  for (let row = 0; row < lines.length; row += 1) {
-    const line = lines[row] ?? "";
-    const trimmed = line.trim();
-    const context = contexts[row]!;
-    if (context.inCodeFence) continue;
-    if (pendingRows[row]) continue;
-    if (!trimmed) continue;
-    const codeRanges = context.codeRanges;
-
-    // Definition lists need group-level layout: the source TeX tokens have
-    // different character widths, so independently overlaying each token
-    // leaves the colons and descriptions staggered. A compact MathJax array
-    // aligns both columns without changing the child terminal's cell layout.
-    const definitionGroup = inferredDefinitionGroup(lines, row);
-    if (definitionGroup) {
-      regions.push(definitionGroup);
-      row = definitionGroup.endRow;
-      continue;
-    }
-    const loneDefinition = definitionItem(line);
-
-    if (trimmed === "[") {
-      const body: string[] = [];
-      let endRow = -1;
-
-      for (let candidate = row + 1;
-        candidate < Math.min(lines.length, row + MAX_DISPLAY_BLOCK_ROWS + 1);
-        candidate += 1) {
-        if (contexts[candidate]?.inCodeFence) break;
-        const candidateTrimmed = (lines[candidate] ?? "").trim();
-        if (candidateTrimmed === "]" || candidateTrimmed === "\\]") {
-          endRow = candidate;
-          break;
-        }
-        body.push(lines[candidate] ?? "");
-      }
-
-      const latex = normalizeHardWrappedLatex(body);
-      if (endRow > row
-        && latex
-        && isLikelyMath(latex)
-        && !rangeIntersectsPendingDisplay(row, endRow)) {
-        regions.push({
-          startRow: row,
-          endRow,
-          startCol: 0,
-          endCol: Math.max(...lines.slice(row, endRow + 1).map((value) => stringWidth(value)), 1),
-          latex,
-          display: true,
-          confidence: "inferred"
-        });
-      }
-      // Whether or not the body was valid math, the complete structural block
-      // owns these rows. Do not infer its fragments independently.
-      if (endRow > row) {
-        row = endRow;
-        continue;
-      }
-    }
-
-    for (const segment of bareBracketSegments(line, codeRanges)) {
-      const [startCol, endCol] = visualEnd(line, segment.start, segment.end);
-      regions.push({
-        startRow: row,
-        endRow: row,
-        startCol,
-        endCol,
-        latex: segment.body,
-        display: true,
-        confidence: "inferred"
-      });
-    }
-
-    // A single definition line is not eligible for the two-column array used
-    // above, but its parenthesized symbol still needs a human-friendly glyph.
-    if (loneDefinition) {
-      regions.push({
-        startRow: row,
-        endRow: row,
-        startCol: loneDefinition.startCol,
-        endCol: loneDefinition.endCol,
-        latex: loneDefinition.body,
-        display: false,
-        confidence: "inferred"
-      });
-    }
-
-    // Several terminal Markdown renderers consume the backslashes in \(...\)
-    // and leave forms such as `(\mathbf E)` or `(\rho)`. Only infer these
-    // when the body has strong TeX evidence, so ordinary prose parentheses
-    // remain untouched.
-    const inferredSegments = inferredParenthesizedMath(line);
-    for (const segment of inferredSegments) {
-      if (overlapsInlineCode(segment.start, segment.end, codeRanges)) continue;
-      const [startCol, endCol] = visualEnd(line, segment.start, segment.end);
-      if (loneDefinition
-        && startCol === loneDefinition.startCol
-        && endCol === loneDefinition.endCol) continue;
-      regions.push({
-        startRow: row,
-        endRow: row,
-        startCol,
-        endCol,
-        latex: segment.body,
-        display: false,
-        confidence: "inferred"
-      });
-    }
-
-    if (!loneDefinition
-      && inferredSegments.length === 0
-      && !adjacentToStandaloneDelimiter(lines, row)
-      && !isStandaloneDisplayEnvironmentToken(trimmed)
-      && isLikelyStandaloneMath(trimmed)) {
-      const start = line.indexOf(trimmed);
-      regions.push(trailingInlineRegion(
-        lines,
-        row,
-        line,
-        start,
-        start + trimmed.length,
-        trimmed,
-        "inferred"
-      ));
-    }
-  }
-
+    ...slashDelimitedRegions(lines, contexts, "\\[", "\\]", true),
+    ...slashDelimitedRegions(lines, contexts, "\\(", "\\)", false),
+    ...dollarDelimitedRegions(lines, contexts, "$$", true),
+    ...dollarDelimitedRegions(lines, contexts, "$", false)
+  ].filter((region) => !hasUnclosedDisplayEnvironment(region.latex));
   const contains = (container: SemanticFormulaCandidate, candidate: SemanticFormulaCandidate): boolean =>
     container.startRow <= candidate.startRow
     && container.endRow >= candidate.endRow
     && (container.startRow !== candidate.startRow || container.startCol <= candidate.startCol)
     && (container.endRow !== candidate.endRow || container.endCol >= candidate.endCol);
 
-  // Explicit multi-row regions are detected before the per-row compatibility
-  // pass. Remove only candidates genuinely inside them: formulas before an
-  // opener or after a closer on the same physical rows must remain visible.
   return regions
     .filter((candidate, index) => !regions.some((container, containerIndex) => {
       if (containerIndex === index || !contains(container, candidate)) return false;
@@ -1490,15 +981,11 @@ export function detectFormulas(lines: string[]): DetectedFormula[] {
         && container.startCol === candidate.startCol
         && container.endCol === candidate.endCol;
       if (sameBounds) {
-        if (container.display !== candidate.display) return container.display;
-        if (container.confidence !== candidate.confidence) {
-          return container.confidence === "explicit";
-        }
-        return container.latex === candidate.latex && containerIndex < index;
+        return container.display !== candidate.display
+          ? container.display
+          : container.latex === candidate.latex && containerIndex < index;
       }
-      if (container.compact && container.startRow < container.endRow) return true;
-      if (container.display) return true;
-      return container.confidence === "explicit" && candidate.confidence === "inferred";
+      return container.compact && container.startRow < container.endRow || container.display;
     }))
     .map((region) => ({
       source: {
@@ -1516,21 +1003,12 @@ export function detectFormulas(lines: string[]): DetectedFormula[] {
 
 export const detectorInternals = {
   classifyFormulaIntent,
-  descriptionToLatex,
-  definitionItem,
   dollarDelimiterPositions,
   dollarDelimitedSegments,
   escapeTexText,
-  inferredDefinitionGroup,
-  inferredParenthesizedMath,
   hardWrappedDollarDisplay,
   inlineCodeRanges,
-  isLikelyMath,
-  isLikelyInlineDollarMath,
   isStandaloneDisplayLine,
-  looksLikeAsciiMath,
-  mathScore,
-  parenthesizedSegments,
   trailingInlineRegion,
   visualColumn
 };

@@ -351,27 +351,14 @@ describe("soft-wrapped terminal formula detection", () => {
     expect(fourth?.startCol).toBe(0);
   });
 
-  it("renders a compact definition group whose prose soft-wraps", () => {
+  it("leaves an unwrapped definition group as terminal text", () => {
     const snapshot = detectScreenFormulaRegions([
       { row: 0, text: "- (E): a very long description", isWrapped: false },
       { row: 1, text: "continued here", isWrapped: true },
       { row: 2, text: "- (B): magnetic field", isWrapped: false }
     ], 30);
     expect(snapshot.deferred).toEqual([]);
-    expect(snapshot.regions).toEqual([expect.objectContaining({
-      startRow: 0,
-      endRow: 2,
-      startCol: 0,
-      endCol: 30,
-      compact: true,
-      latex: expect.stringContaining("\\begin{array}{ll}"),
-      displayRange: { startCol: 2, endCol: 30 },
-      wrapSegments: [
-        expect.objectContaining({ rowOffset: 0, startCol: 2 }),
-        expect.objectContaining({ rowOffset: 1, startCol: 0 }),
-        expect.objectContaining({ rowOffset: 2, startCol: 2 })
-      ]
-    })]);
+    expect(snapshot.regions).toEqual([]);
   });
 
   it("renders an explicit formula wholly contained in a viewport-edge continuation", () => {
