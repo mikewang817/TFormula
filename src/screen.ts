@@ -391,6 +391,12 @@ export class FormulaScreen {
    */
   readonly #detachedPlacements = new Map<string, PlacedFormula>();
   readonly #terminalImages = new Map<string, TerminalImage>();
+  /**
+   * Images whose only placements a relayout just dropped. They are protected
+   * from idle eviction until the scan that re-places them has reconciled the
+   * screen, so a scrolling TUI never re-uploads a formula it still shows.
+   */
+  readonly #relayoutPendingImageKeys = new Set<string>();
   readonly #allocatedImageIds = new Set<number>();
   readonly #blockedImageKeys = new Set<string>();
   readonly #imageRetries = new Map<string, { attempt: number; notBefore: number }>();
@@ -1270,6 +1276,7 @@ export class FormulaScreen {
     this.#placed.clear();
     this.#detachedPlacements.clear();
     this.#terminalImages.clear();
+    this.#relayoutPendingImageKeys.clear();
     this.#blockedImageKeys.clear();
     this.#imageRetries.clear();
     this.#blockedPlacementKeys.clear();
@@ -1465,6 +1472,7 @@ export class FormulaScreen {
     this.#placed.clear();
     this.#detachedPlacements.clear();
     this.#terminalImages.clear();
+    this.#relayoutPendingImageKeys.clear();
     this.#blockedImageKeys.clear();
     this.#imageRetries.clear();
     this.#blockedPlacementKeys.clear();
@@ -1487,6 +1495,9 @@ export class FormulaScreen {
     const prefix = `${bufferType}:`;
     for (const key of this.#terminalImages.keys()) {
       if (key.startsWith(prefix)) this.#terminalImages.delete(key);
+    }
+    for (const key of this.#relayoutPendingImageKeys) {
+      if (key.startsWith(prefix)) this.#relayoutPendingImageKeys.delete(key);
     }
     for (const key of this.#imageRetries.keys()) {
       if (key.startsWith(prefix)) this.#imageRetries.delete(key);
@@ -1526,6 +1537,7 @@ export class FormulaScreen {
       if (placement.bufferType !== "alternate") continue;
       commands.push(kittyDeletePlacement(placement.imageId, placement.placementId));
       this.#releasePlacement(placement);
+      this.#relayoutPendingImageKeys.add(placement.imageKey);
       this.#placed.delete(anchor);
     }
     for (const key of this.#placementRetries.keys()) {
@@ -1537,7 +1549,11 @@ export class FormulaScreen {
     this.#alternateLayoutDirty = false;
     this.#layoutVersion += 1;
     if (commands.length > 0) this.#writeGraphicsTransaction(commands.join(""));
-    this.#evictIdleTerminalImages();
+    // Deliberately no eviction here. The placements just released belong to
+    // images the very next scan re-places at their new rows, and for that one
+    // instant every on-screen alternate image looks idle. Evicting now is what
+    // forced a full PNG re-upload of visible formulas once #terminalImages
+    // reached its cap — the scan's own eviction runs after they are re-placed.
   }
 
   #forgetVisiblePlacementsRetainingImages(): void {
@@ -1737,7 +1753,12 @@ export class FormulaScreen {
       : this.#terminalImages.size - this.#maxTerminalImages;
     if (excess <= 0) return [];
     const idle = Array.from(this.#terminalImages.entries())
-      .filter(([, image]) => image.placements === 0)
+      .filter(([key, image]) => image.placements === 0
+        // A relayout drops the pins of images that are still covering the
+        // screen and that the running scan re-places within milliseconds.
+        // They are unreferenced, not idle; evicting them costs a full PNG
+        // re-upload, which is what stalls a slow SSH channel.
+        && (force || !this.#relayoutPendingImageKeys.has(key)))
       .sort((left, right) => left[1].lastUsed - right[1].lastUsed)
       .slice(0, excess);
     if (idle.length === 0) return [];
@@ -2591,9 +2612,20 @@ export class FormulaScreen {
         if (detachedAfterLayout > 0) {
           this.#debug(`detached ${detachedAfterLayout} off-screen resize placement(s)`);
         }
+        // The screen is reconciled: every image a relayout unpinned has either
+        // been re-placed or belongs to a formula that is genuinely gone, so
+        // lift the eviction reservation before the budget is enforced again.
+        this.#relayoutPendingImageKeys.clear();
         this.#evictIdleTerminalImages();
       }
     } finally {
+      // A scan that never reached its reconciliation — disposed, layout
+      // suspended, a render throwing — must not leave images reserved. Each
+      // aborted attempt would otherwise strand another generation of them
+      // outside the eviction budget and grow #terminalImages without bound.
+      // Dropping the reservation costs at most one re-upload of a formula
+      // whose scan was interrupted anyway; the budget is never negotiable.
+      this.#relayoutPendingImageKeys.clear();
       this.#scanning = false;
       for (const resolve of this.#scanWaiters.splice(0)) resolve();
       if (!this.#disposed && (this.#rescanRequested || version !== this.#scanVersion)) {

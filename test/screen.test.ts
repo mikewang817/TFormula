@@ -2958,6 +2958,81 @@ describe("FormulaScreen lifecycle", () => {
     }
   });
 
+  it("does not evict an on-screen image while a relayout re-places it", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 10,
+      capabilities,
+      scale: 1,
+      maxTerminalImages: 1,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\nE=mc^2\r\n\\]\r\n\\[\r\na^2+b^2\r\n\\]");
+      await screen.flushScan();
+      const uploaded = output.join("").match(/\x1b_Ga=t/gu);
+      expect(uploaded).toHaveLength(2);
+      expect(output.join("")).not.toContain("a=d,d=I");
+
+      output.length = 0;
+      // Both placements are dropped for one instant here. The image budget of
+      // one must not treat the images still covering the screen as idle: a
+      // re-upload of a large PNG is exactly what floods a slow SSH channel.
+      screen.resize(80, 10);
+      await screen.flushScan();
+      const rescrolled = output.join("");
+      expect(rescrolled.match(/a=p,i=/gu)).toHaveLength(2);
+      expect(rescrolled).not.toContain("\x1b_Ga=t");
+      expect(rescrolled).not.toContain("a=d,d=I");
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("still enforces the image budget when a relayout scan aborts mid-render", async () => {
+    const output: string[] = [];
+    const renderer = new DelayedMathRenderer();
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 10,
+      capabilities,
+      scale: 1,
+      renderer,
+      maxTerminalImages: 1,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\nE=mc^2\r\n\\]\r\n\\[\r\na^2+b^2\r\n\\]");
+      await screen.flushScan();
+      expect(output.join("").match(/\x1b_Ga=t/gu)).toHaveLength(2);
+
+      let renderStarted!: () => void;
+      const started = new Promise<void>((resolve) => { renderStarted = resolve; });
+      renderer.delay = true;
+      renderer.started = renderStarted;
+      output.length = 0;
+      screen.resize(80, 10);
+      const scan = screen.flushScan();
+      await started;
+      // The relayout has already unpinned both images and reserved them from
+      // eviction. Abandoning the scan here must release that reservation:
+      // otherwise every aborted relayout strands another generation of images
+      // outside the budget and #terminalImages grows without bound.
+      screen.invalidateLayout();
+      renderer.release?.();
+      await scan;
+
+      output.length = 0;
+      // Origin mode makes every later scan return before it can reconcile, so
+      // only the reservation decides whether the budget is enforced here.
+      await screen.write("\x1b[?6h");
+      expect(output.join("").match(/a=d,d=I/gu)).toHaveLength(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it("does not delete Ghostty-retained mode-47 placements on a pure re-entry", async () => {
     const output: string[] = [];
     const screen = new FormulaScreen({
