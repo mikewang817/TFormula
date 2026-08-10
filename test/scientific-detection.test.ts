@@ -5,12 +5,13 @@ import { SCIENTIFIC_TERMINAL_CORPUS } from "./scientific-formula-corpus.js";
 
 describe("scientific terminal formula detection corpus", () => {
   it.each(SCIENTIFIC_TERMINAL_CORPUS)(
-    "$domain/$id detects explicitly delimited agent output",
+    "$domain/$id recovers agent output after delimiter loss",
     ({ lines, expectedLatex, display = false }) => {
       const formulas = detectFormulas(lines);
-      const formula = formulas.find((candidate) => candidate.latex === expectedLatex
-        || candidate.latex === `${expectedLatex}\\text{.}`);
-      expect(formula).toBeDefined();
+      expect(formulas).toEqual(expect.arrayContaining([
+        expect.objectContaining({ latex: expectedLatex })
+      ]));
+      const formula = formulas.find((candidate) => candidate.latex === expectedLatex);
       expect(formula?.intent !== "inline").toBe(display);
     }
   );

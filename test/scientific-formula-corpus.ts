@@ -378,59 +378,59 @@ export const FULL_LATEX_BOUNDARY_CORPUS: ScientificFormulaCase[] = [
 /** Cases where a terminal Markdown renderer has removed normal TeX delimiters. */
 export const SCIENTIFIC_TERMINAL_CORPUS: ScientificTerminalCase[] = [
   {
-    id: "explicit-chemical-inline",
+    id: "stripped-chemical-inline",
     domain: "chemistry",
-    lines: ["The reaction is \\(\\ce{2 H2 + O2 -> 2 H2O}\\)."],
+    lines: ["The reaction is (\\ce{2 H2 + O2 -> 2 H2O})."],
     expectedLatex: "\\ce{2 H2 + O2 -> 2 H2O}"
   },
   {
-    id: "explicit-physics-derivative",
+    id: "stripped-physics-derivative",
     domain: "physics",
-    lines: ["Velocity is \\(\\dv{x}{t}\\)."],
+    lines: ["Velocity is (\\dv{x}{t})."],
     expectedLatex: "\\dv{x}{t}"
   },
   {
-    id: "explicit-upright-greek",
+    id: "stripped-upright-greek",
     domain: "physics",
-    lines: ["The prefix is \\(\\upmu\\)."],
+    lines: ["The prefix is (\\upmu)."],
     expectedLatex: "\\upmu"
   },
   {
-    id: "explicit-si-units",
+    id: "stripped-si-units",
     domain: "physics",
-    lines: ["Acceleration is \\(\\SI{9.81}{\\metre\\per\\second\\squared}\\)."],
+    lines: ["Acceleration is (\\SI{9.81}{\\metre\\per\\second\\squared})."],
     expectedLatex: "\\SI{9.81}{\\metre\\per\\second\\squared}"
   },
   {
-    id: "explicit-isotope-prescript",
+    id: "stripped-isotope-prescript",
     domain: "biology",
-    lines: ["The tracer is \\(\\prescript{32}{}{P}\\)."],
+    lines: ["The tracer is (\\prescript{32}{}{P})."],
     expectedLatex: "\\prescript{32}{}{P}"
   },
   {
-    id: "explicit-centered-negation",
+    id: "stripped-centered-negation",
     domain: "mathematics",
-    lines: ["The result is \\(A\\centernot\\implies B\\)."],
+    lines: ["The result is (A\\centernot\\implies B)."],
     expectedLatex: "A\\centernot\\implies B"
   },
   {
-    id: "explicit-multiline-display",
+    id: "stripped-multiline-display",
     domain: "biology",
     lines: [
-      "\\[",
+      "[",
       "\\begin{aligned}\\dv{x}{t}&=\\alpha x-\\beta xy\\",
       "\\dv{y}{t}&=\\delta xy-\\gamma y",
       "\\end{aligned}",
-      "\\]"
+      "]"
     ],
     expectedLatex: "\\begin{aligned}\\dv{x}{t}&=\\alpha x-\\beta xy\\\\\n"
       + "\\dv{y}{t}&=\\delta xy-\\gamma y\n\\end{aligned}",
     display: true
   },
   {
-    id: "single-line-explicit-display",
+    id: "single-line-bare-brackets",
     domain: "chemistry",
-    lines: ["\\[ \\Delta G^\\circ=-RT\\ln K \\]"],
+    lines: ["[ \\Delta G^\\circ=-RT\\ln K ]"],
     expectedLatex: "\\Delta G^\\circ=-RT\\ln K",
     display: true
   }

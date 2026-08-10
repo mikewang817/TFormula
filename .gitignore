@@ -3,4 +3,3 @@ dist/
 coverage/
 *.log
 .DS_Store
-SPEC.md

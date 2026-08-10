@@ -647,7 +647,7 @@ describe("FormulaScreen lifecycle", () => {
     }
   });
 
-  it("repairs truncated aligned rows inside an explicit display", async () => {
+  it("repairs Markdown-stripped aligned rows before rendering the block", async () => {
     const renderer = new CapturingMathRenderer();
     const output: string[] = [];
     const screen = new FormulaScreen({
@@ -661,13 +661,13 @@ describe("FormulaScreen lifecycle", () => {
     try {
       const strippedRowBreak = "\\";
       await screen.write([
-        "\\[",
+        "[",
         "\\begin{aligned}",
         `\\ce{H4Y <=> H+ + H3Y-} &\\quad K_{a1}${strippedRowBreak}`,
         `\\ce{H3Y- <=> H+ + H2Y^{2-}} &\\quad K_{a2}${strippedRowBreak}`,
         "\\ce{Ca^{2+} + Y^{4-} <=> CaY^{2-}} &\\quad K_f",
         "\\end{aligned}",
-        "\\]"
+        "]"
       ].join("\r\n"));
       await screen.flushScan();
 
@@ -706,7 +706,7 @@ describe("FormulaScreen lifecycle", () => {
     }
   });
 
-  it("leaves unwrapped inline math-like text untouched", async () => {
+  it("composes inferred inline formulas and literal text as one overlay", async () => {
     const output: string[] = [];
     const screen = new FormulaScreen({
       cols: 100,
@@ -722,8 +722,8 @@ describe("FormulaScreen lifecycle", () => {
       await screen.flushScan();
 
       const encoded = output.join("");
-      expect(encoded).not.toContain("\x1b_Ga=p");
-      expect(encoded).not.toContain("\x1b_Ga=t");
+      expect(encoded.match(/\x1b_Ga=p/gu)).toHaveLength(1);
+      expect(encoded.match(/\x1b_Ga=t/gu)).toHaveLength(1);
     } finally {
       screen.dispose();
     }
@@ -1419,13 +1419,13 @@ describe("FormulaScreen lifecycle", () => {
     });
     const frame = [
       "\x1b[H1. Electric",
-      "\\[",
+      "[",
       "\\nabla\\cdot\\mathbf{E}=\\frac{\\rho}{\\varepsilon_0}",
-      "\\]",
+      "]",
       "2. Magnetic",
-      "\\[",
+      "[",
       "\\nabla\\cdot\\mathbf{B}=0",
-      "\\]"
+      "]"
     ].join("\r\n");
     try {
       screen.write(`\x1b[2J${frame}`);
@@ -2509,7 +2509,7 @@ describe("FormulaScreen lifecycle", () => {
       debug: (message) => debug.push(message)
     });
     try {
-      screen.write("\x1b[2J\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      screen.write("\x1b[2J\x1b[H[\r\nE=mc^2\r\n]");
       await waitFor(() => debug.some((message) => message.startsWith("rendered ")));
       const firstImageId = output.join("").match(/a=t,[^;]*i=(\d+)/u)?.[1];
       expect(firstImageId).toBeTruthy();
@@ -2629,7 +2629,7 @@ describe("FormulaScreen lifecycle", () => {
       writeOuter: (data) => output.push(String(data))
     });
     try {
-      await screen.write("\x1b[2J\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.write("\x1b[2J\x1b[H[\r\nE=mc^2\r\n]");
       await screen.flushScan();
       const initial = output.join("");
       const imageId = initial.match(/a=t,[^;]*i=(\d+)/u)?.[1];
@@ -2659,7 +2659,7 @@ describe("FormulaScreen lifecycle", () => {
       writeOuter: (data) => output.push(String(data))
     });
     try {
-      await screen.write("\x1b[2J\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.write("\x1b[2J\x1b[H[\r\nE=mc^2\r\n]");
       await screen.flushScan();
       const initial = output.join("");
       const imageId = initial.match(/a=t,[^;]*i=(\d+)/u)?.[1];

@@ -10,7 +10,7 @@
     "columns": 80,
     "rows": 9
   },
-  "ansi": "\u001b[2J\u001b[HCodex response\r\n\\[\r\n\\begin{aligned}\r\nx&=\\frac{2C}{1+\\sqrt{1+4K_f'C}}\\\\\r\n\\mathrm{pCa}&=-\\log_{10}(x)=6.2504\r\n\\end{aligned}\r\n\\]\r\nstatus: complete",
+  "ansi": "\u001b[2J\u001b[HCodex response\r\n[\r\n\\begin{aligned}\r\nx&=\\frac{2C}{1+\\sqrt{1+4K_f'C}}\\\\\r\n\\mathrm{pCa}&=-\\log_{10}(x)=6.2504\r\n\\end{aligned}\r\n]\r\nstatus: complete",
   "expected": {
     "cells": [
       {
@@ -20,7 +20,7 @@
       },
       {
         "row": 1,
-        "text": "\\[",
+        "text": "[",
         "isWrapped": false
       },
       {
@@ -45,7 +45,7 @@
       },
       {
         "row": 6,
-        "text": "\\]",
+        "text": "]",
         "isWrapped": false
       },
       {
@@ -66,11 +66,11 @@
             "startRow": 1,
             "endRow": 6,
             "startCol": 0,
-            "endCol": 2
+            "endCol": 34
           },
           "latex": "\\begin{aligned}\nx&=\\frac{2C}{1+\\sqrt{1+4K_f'C}}\\\\\n\\mathrm{pCa}&=-\\log_{10}(x)=6.2504\n\\end{aligned}",
           "intent": "display",
-          "confidence": "explicit"
+          "confidence": "inferred"
         },
         "source": {
           "startRow": 1,
@@ -82,38 +82,38 @@
           {
             "rowOffset": 0,
             "startCol": 0,
-            "endCol": 2,
+            "endCol": 1,
             "logicalStartCol": 0
           },
           {
             "rowOffset": 1,
             "startCol": 0,
             "endCol": 15,
-            "logicalStartCol": 2
+            "logicalStartCol": 1
           },
           {
             "rowOffset": 2,
             "startCol": 0,
             "endCol": 33,
-            "logicalStartCol": 17
+            "logicalStartCol": 16
           },
           {
             "rowOffset": 3,
             "startCol": 0,
             "endCol": 34,
-            "logicalStartCol": 50
+            "logicalStartCol": 49
           },
           {
             "rowOffset": 4,
             "startCol": 0,
             "endCol": 13,
-            "logicalStartCol": 84
+            "logicalStartCol": 83
           },
           {
             "rowOffset": 5,
             "startCol": 0,
-            "endCol": 2,
-            "logicalStartCol": 97
+            "endCol": 1,
+            "logicalStartCol": 96
           }
         ],
         "formulaSlices": [],
@@ -128,11 +128,11 @@
             "startRow": 1,
             "endRow": 6,
             "startCol": 0,
-            "endCol": 2
+            "endCol": 34
           },
           "latex": "\\begin{aligned}\nx&=\\frac{2C}{1+\\sqrt{1+4K_f'C}}\\\\\n\\mathrm{pCa}&=-\\log_{10}(x)=6.2504\n\\end{aligned}",
           "intent": "display",
-          "confidence": "explicit"
+          "confidence": "inferred"
         },
         "canvas": {
           "startRow": 1,
@@ -144,38 +144,38 @@
           {
             "rowOffset": 0,
             "startCol": 0,
-            "endCol": 2,
+            "endCol": 1,
             "logicalStartCol": 0
           },
           {
             "rowOffset": 1,
             "startCol": 0,
             "endCol": 15,
-            "logicalStartCol": 2
+            "logicalStartCol": 1
           },
           {
             "rowOffset": 2,
             "startCol": 0,
             "endCol": 33,
-            "logicalStartCol": 17
+            "logicalStartCol": 16
           },
           {
             "rowOffset": 3,
             "startCol": 0,
             "endCol": 34,
-            "logicalStartCol": 50
+            "logicalStartCol": 49
           },
           {
             "rowOffset": 4,
             "startCol": 0,
             "endCol": 13,
-            "logicalStartCol": 84
+            "logicalStartCol": 83
           },
           {
             "rowOffset": 5,
             "startCol": 0,
-            "endCol": 2,
-            "logicalStartCol": 97
+            "endCol": 1,
+            "logicalStartCol": 96
           }
         ],
         "formulaSlices": [],
