@@ -286,6 +286,29 @@ function mutableXtermBufferCursor(
   return candidate as MutableXtermBufferCursor;
 }
 
+/**
+ * DECSTBM margins of the active buffer, in viewport rows.
+ *
+ * xterm keeps them private, and a scroll outside the region moves nothing, so
+ * a TUI that reserves a bottom pane never disturbs the rows above it. If the
+ * private shape ever changes, report no margins and let the caller fall back
+ * to treating the whole screen as scrolled — the old, conservative behaviour.
+ */
+function xtermScrollMargins(
+  terminal: XtermTerminal
+): { top: number; bottom: number } | undefined {
+  const buffer = (terminal as unknown as {
+    _core?: { _bufferService?: { buffer?: { scrollTop?: unknown; scrollBottom?: unknown } } };
+  })._core?._bufferService?.buffer;
+  const top = buffer?.scrollTop;
+  const bottom = buffer?.scrollBottom;
+  if (typeof top !== "number" || typeof bottom !== "number") return undefined;
+  if (!Number.isInteger(top) || !Number.isInteger(bottom) || top < 0 || bottom < top) {
+    return undefined;
+  }
+  return { top, bottom };
+}
+
 function rgbHex(value: number): string {
   return `#${value.toString(16).padStart(6, "0").slice(-6)}`;
 }
@@ -439,7 +462,13 @@ export class FormulaScreen {
   #layoutEpoch = 0;
   #layoutSuspended = false;
   readonly #layoutWaiters: Array<() => void> = [];
-  #alternateLayoutDirty = false;
+  /**
+   * Viewport rows an alternate-screen scroll may have moved, or undefined when
+   * the alternate layout is trusted. Ghostty moves a Kitty pin together with
+   * the cells it covers, so only pins inside this band lost their coordinates;
+   * a TUI repainting a bottom pane must not cost the transcript its images.
+   */
+  #alternateDirtyRows?: { start: number; end: number };
   #alternate47Restored = false;
   #pendingWrapHeldColumns?: number;
   #graphicsSynchronizedOutputOverride?: boolean;
@@ -542,17 +571,31 @@ export class FormulaScreen {
       // The alternate screen has no scrollback and xterm does not expose
       // markers there. Even though its viewportY stays zero, a bottom-margin
       // scroll changes every Kitty cell pin's row identity.
-      this.#markAlternateLayoutDirty();
+      this.#markAlternateLayoutDirty(false, this.#scrollRegionRows());
     });
-    for (const final of ["S", "T", "L", "M"]) {
+    for (const final of ["S", "T"]) {
       this.terminal.parser.registerCsiHandler({ final }, () => {
-        this.#markAlternateLayoutDirty();
+        this.#markAlternateLayoutDirty(false, this.#scrollRegionRows());
+        return false;
+      });
+    }
+    for (const final of ["L", "M"]) {
+      this.terminal.parser.registerCsiHandler({ final }, () => {
+        // Custom CSI handlers run before xterm's own, so the cursor is still at
+        // the insert/delete row. Those operations shift the rows from there to
+        // the bottom margin and cannot touch anything above the cursor, which
+        // is how a TUI redraws its input box without moving the transcript.
+        const region = this.#scrollRegionRows();
+        this.#markAlternateLayoutDirty(false, region && {
+          start: Math.max(region.start, this.terminal.buffer.active.cursorY),
+          end: region.end
+        });
         return false;
       });
     }
     for (const final of ["D", "E", "M"]) {
       this.terminal.parser.registerEscHandler({ final }, () => {
-        this.#markAlternateLayoutDirty();
+        this.#markAlternateLayoutDirty(false, this.#scrollRegionRows());
         return false;
       });
     }
@@ -1281,7 +1324,7 @@ export class FormulaScreen {
     this.#imageRetries.clear();
     this.#blockedPlacementKeys.clear();
     this.#placementRetries.clear();
-    this.#alternateLayoutDirty = false;
+    this.#alternateDirtyRows = undefined;
     this.#alternate47Restored = false;
   }
 
@@ -1477,7 +1520,7 @@ export class FormulaScreen {
     this.#imageRetries.clear();
     this.#blockedPlacementKeys.clear();
     this.#placementRetries.clear();
-    this.#alternateLayoutDirty = false;
+    this.#alternateDirtyRows = undefined;
     this.#alternate47Restored = false;
   }
 
@@ -1515,26 +1558,56 @@ export class FormulaScreen {
       if (key.startsWith(prefix)) this.#formulaStability.delete(key);
     }
     if (bufferType === "alternate") {
-      this.#alternateLayoutDirty = false;
+      this.#alternateDirtyRows = undefined;
       this.#alternate47Restored = false;
     }
   }
 
-  #markAlternateLayoutDirty(force = false): void {
+  /** Viewport rows a scroll can move, or undefined when they are unknowable. */
+  #scrollRegionRows(): { start: number; end: number } | undefined {
+    const margins = xtermScrollMargins(this.terminal);
+    if (!margins) return undefined;
+    return { start: margins.top, end: Math.min(margins.bottom, this.terminal.rows - 1) };
+  }
+
+  /**
+   * @param rows Viewport rows the operation may have moved. Undefined means
+   * "unknown", which is treated as the whole screen so an unrecognised xterm
+   * internal shape degrades to the conservative all-placements invalidation.
+   */
+  #markAlternateLayoutDirty(force = false, rows?: { start: number; end: number }): void {
     if ((!force && this.terminal.buffer.active.type !== "alternate")
       || !Array.from(this.#placed.values()).some((placement) =>
         placement.bufferType === "alternate"
       )) return;
-    this.#alternateLayoutDirty = true;
+    const dirty = rows ?? { start: 0, end: this.terminal.rows - 1 };
+    const previous = this.#alternateDirtyRows;
+    // Several scrolls can land between two scans, so accumulate their union
+    // rather than letting the last one narrow what an earlier one dirtied.
+    this.#alternateDirtyRows = previous
+      ? {
+        start: Math.min(previous.start, dirty.start),
+        end: Math.max(previous.end, dirty.end)
+      }
+      : dirty;
     this.#layoutVersion += 1;
     this.#scanVersion += 1;
     this.#rescanRequested = true;
   }
 
   #invalidateDirtyAlternatePlacements(): void {
+    const dirty = this.#alternateDirtyRows;
     const commands: string[] = [];
     for (const [anchor, placement] of this.#placed) {
       if (placement.bufferType !== "alternate") continue;
+      // A scroll moves the Ghostty pin with the cells it covers, so only pins
+      // overlapping the scrolled band lost their coordinates. Pins outside it
+      // are still exactly where they were; deleting them would make an Ink-style
+      // TUI re-place (and, once its image is evicted, re-upload) every formula
+      // on screen each time it redraws an unrelated pane.
+      if (dirty
+        && (placement.absoluteEndRow < dirty.start
+          || placement.absoluteStartRow > dirty.end)) continue;
       commands.push(kittyDeletePlacement(placement.imageId, placement.placementId));
       this.#releasePlacement(placement);
       this.#relayoutPendingImageKeys.add(placement.imageKey);
@@ -1546,7 +1619,7 @@ export class FormulaScreen {
     for (const key of this.#blockedPlacementKeys) {
       if (key.startsWith("alternate:")) this.#blockedPlacementKeys.delete(key);
     }
-    this.#alternateLayoutDirty = false;
+    this.#alternateDirtyRows = undefined;
     this.#layoutVersion += 1;
     if (commands.length > 0) this.#writeGraphicsTransaction(commands.join(""));
     // Deliberately no eviction here. The placements just released belong to
@@ -2198,11 +2271,11 @@ export class FormulaScreen {
 
     this.#scanning = true;
     this.#rescanRequested = false;
-    if (this.terminal.buffer.active.type === "alternate" && this.#alternateLayoutDirty) {
+    if (this.terminal.buffer.active.type === "alternate" && this.#alternateDirtyRows) {
       if (this.#alternate47Restored) {
         // Ghostty itself tracks the retained placement pins through scrolling;
         // the xterm mirror does not contain the retained rows to reconstruct.
-        this.#alternateLayoutDirty = false;
+        this.#alternateDirtyRows = undefined;
       } else {
         this.#invalidateDirtyAlternatePlacements();
       }

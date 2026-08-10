@@ -2958,6 +2958,144 @@ describe("FormulaScreen lifecycle", () => {
     }
   });
 
+  it("keeps alternate placements while a TUI repaints a pane below them", async () => {
+    const output: string[] = [];
+    const debug: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 10,
+      capabilities,
+      scale: 1,
+      writeOuter: (data) => output.push(String(data)),
+      debug: (message) => debug.push(message)
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      const placed = output.join("");
+      expect(placed.match(/a=p,i=/gu)).toHaveLength(1);
+
+      output.length = 0;
+      for (let frame = 0; frame < 5; frame += 1) {
+        // Insert/delete line at the input row only shifts rows at or below the
+        // cursor, so Ghostty never moves the pin three rows above it.
+        await screen.write(`\x1b[9;1H\x1b[1L\x1b[1Minput ${frame}`);
+        await screen.flushScan();
+      }
+      const repaints = output.join("");
+      expect(repaints).not.toContain("a=p,i=");
+      expect(repaints).not.toContain("a=d,d=i");
+      expect(repaints).not.toContain("\x1b_Ga=t");
+      expect(debug.filter((message) => message.startsWith("rendered "))).toHaveLength(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("keeps alternate placements outside a bottom DECSTBM scroll region", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 10,
+      capabilities,
+      scale: 1,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      expect(output.join("").match(/a=p,i=/gu)).toHaveLength(1);
+
+      output.length = 0;
+      // A scroll confined to rows 6-10 cannot move a pin on rows 1-3.
+      await screen.write("\x1b[6;10r\x1b[10;1Hpane\r\nnext");
+      await screen.flushScan();
+      expect(output.join("")).not.toContain("a=p,i=");
+      expect(output.join("")).not.toContain("a=d,d=i");
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("re-places an alternate placement when the scroll region contains it", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 10,
+      capabilities,
+      scale: 1,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[2;1H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      const first = output.join("").match(/a=p,i=(\d+),p=(\d+)/u);
+      expect(first).toBeTruthy();
+
+      output.length = 0;
+      // Scrolling rows 1-6 moves the pin with its cells; repainting the same
+      // formula at the same mirror rows would otherwise leave it one row high.
+      await screen.write("\x1b[1;6r\x1b[1S\x1b[2;1H\x1b[2K\\[\r\n\x1b[2KE=mc^2\r\n\x1b[2K\\]");
+      await screen.flushScan();
+      const rescrolled = output.join("");
+      expect(rescrolled).toContain(`a=d,d=i,i=${first![1]},p=${first![2]}`);
+      expect(rescrolled.match(/a=p,i=/gu)).toHaveLength(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("re-places an alternate formula that moves to another row", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 10,
+      capabilities,
+      scale: 1,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      const first = output.join("").match(/a=p,i=(\d+),p=(\d+)/u);
+      expect(first).toBeTruthy();
+
+      output.length = 0;
+      await screen.write("\x1b[H\x1b[J\x1b[5;1H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      const moved = output.join("");
+      expect(moved).toContain(`a=d,d=i,i=${first![1]},p=${first![2]}`);
+      expect(moved.match(/a=p,i=/gu)).toHaveLength(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("deletes an alternate placement whose formula disappears", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 10,
+      capabilities,
+      scale: 1,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      const first = output.join("").match(/a=p,i=(\d+),p=(\d+)/u);
+      expect(first).toBeTruthy();
+
+      output.length = 0;
+      await screen.write("\x1b[H\x1b[Jplain text only");
+      await screen.flushScan();
+      expect(output.join("")).toContain(`a=d,d=i,i=${first![1]},p=${first![2]}`);
+      expect(screen.hasTerminalPlacements).toBe(false);
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it("does not evict an on-screen image while a relayout re-places it", async () => {
     const output: string[] = [];
     const screen = new FormulaScreen({
