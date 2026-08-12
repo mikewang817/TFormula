@@ -2029,12 +2029,25 @@ export class FormulaScreen {
 
   #anchor(
     region: FormulaPlacementPlan,
-    columns: number,
-    rows: number,
     bufferType: string,
     viewportY: number
   ): string {
-    return `${bufferType}:${viewportY + region.canvas.startRow}:${region.canvas.startCol}:${columns}:${rows}`;
+    // An embedded display owns a full-width transparent canvas, so the canvas
+    // origin is not a formula identity. Two distinct `$$...$$` spans on one
+    // text row would otherwise receive the same key and the latter placement
+    // would delete the former. The first source mask is the formula's stable
+    // physical origin; unlike the canvas, it also remains constant when a
+    // neighboring blank row is borrowed or released.
+    const source = region.sourceMasks.reduce((first, candidate) => {
+      if (!first) return candidate;
+      return candidate.rowOffset < first.rowOffset
+        || (candidate.rowOffset === first.rowOffset && candidate.startCol < first.startCol)
+        ? candidate
+        : first;
+    }, undefined as FormulaPlacementPlan["sourceMasks"][number] | undefined);
+    const row = region.canvas.startRow + (source?.rowOffset ?? 0);
+    const column = region.canvas.startCol + (source?.startCol ?? 0);
+    return `${bufferType}:${viewportY + row}:${column}`;
   }
 
   #regionIdentity(region: FormulaPlacementPlan): string {
@@ -2192,7 +2205,7 @@ export class FormulaScreen {
         const rows = region.canvas.endRow - region.canvas.startRow + 1;
         const columns = region.canvas.endCol - region.canvas.startCol;
         const plan = region;
-        const anchor = this.#anchor(region, columns, rows, bufferType, viewportY);
+        const anchor = this.#anchor(region, bufferType, viewportY);
         return [{
           region,
           plan,

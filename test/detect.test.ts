@@ -143,6 +143,25 @@ describe("detectFormulas", () => {
     expect(region?.latex).toContain("d\\mathbf{A}");
   });
 
+  it("keeps a TeX line boundary after a spacing command", () => {
+    const [region] = detectFormulaRegions([
+      "$$",
+      "X\\in\\mathbb{R}^{n\\times d},\\qquad",
+      "y\\in\\mathbb{R}^{n\\times 1},\\qquad",
+      "w\\in\\mathbb{R}^{d\\times 1},\\qquad",
+      "L(w)=\\frac{1}{2n}\\lVert Xw-y\\rVert_2^2",
+      "$$"
+    ]);
+
+    expect(region?.latex).toBe([
+      "X\\in\\mathbb{R}^{n\\times d},\\qquad",
+      "y\\in\\mathbb{R}^{n\\times 1},\\qquad",
+      "w\\in\\mathbb{R}^{d\\times 1},\\qquad",
+      "L(w)=\\frac{1}{2n}\\lVert Xw-y\\rVert_2^2"
+    ].join("\n"));
+    expect(region?.latex).not.toContain("\\qquady");
+  });
+
   it("reassembles every explicit delimiter across TUI hard rows without losing suffix formulas", () => {
     const cases: Array<{ lines: string[]; latex: string; display: boolean }> = [
       {

@@ -123,6 +123,29 @@ describe("FormulaScreen lifecycle", () => {
     }
   });
 
+  it("keeps distinct embedded displays on the same row", async () => {
+    const output: string[] = [];
+    const renderer = new CapturingMathRenderer();
+    const screen = new FormulaScreen({
+      cols: 100,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("Before $$x=1$$, then $$y=2$$, after.");
+      await screen.flushScan();
+
+      expect(renderer.arguments.map(([plan]) => plan.formula.latex)).toEqual(["x=1", "y=2"]);
+      expect(output.join("").match(/\x1b_Ga=p/gu)).toHaveLength(2);
+      expect(output.join("")).not.toContain("a=d,d=i");
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it("enables checkpoint bypass only for a stable trigger-free viewport", async () => {
     const screen = new FormulaScreen({
       cols: 40,
