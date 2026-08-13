@@ -329,9 +329,23 @@ TFormula 不模拟完整的 LaTeX 发行版：TikZ、`chemfig` 和外部图片�
 属于明确的能力边界。遇到不支持的命令时，渲染器会指出该命令并保留原始 TeX，
 不会通过近似改写悄悄改变公式含义。
 
+专业记号和 Unicode 回退字体可以通过进程级环境变量配置：
+
+```sh
+TFORMULA_MATH_MACROS='{"RR":"\\mathbb{R}","vect":["\\mathbf{#1}",1]}' tformula codex
+TFORMULA_MATH_ENVIRONMENTS='{"braced":["\\left\\{","\\right\\}"]}' tformula claude
+TFORMULA_FONT_FILES='/path/math.ttf:/path/text.otf' tformula pi
+TFORMULA_SYSTEM_FONTS=false tformula codex
+```
+
+宏和环境采用 MathJax `configmacros` 定义，名称开头的反斜杠可省略；字体路径使用
+当前平台的路径分隔符（macOS/Linux 为 `:`）。TFormula 启动时会校验配置，仍然
+禁止可加载外部内容的危险命令，并把完整配置指纹写入 SVG/PNG 缓存键。
+
 ## 公式与阅读器图片缓存
 
-公式缓存采用内容寻址方式，并由当前用户启动的所有 TFormula Agent 进程共享：
+公式缓存采用内容寻址方式，并由当前用户启动的所有 TFormula Agent 进程共享。
+内存缓存同时受条目数和 64 MB 字节预算约束，持久缓存默认上限仍为 256 MB：
 
 - 同一个规范化公式只进行一次 MathJax SVG 排版。
 - 每一种精确的字号、颜色、终端单元格和显示区域只生成一次 PNG。
@@ -371,6 +385,13 @@ $XDG_CACHE_HOME/tformula
 TFORMULA_CACHE_DIR=/path/to/cache tformula codex
 TFORMULA_CACHE_MAX_MB=512 tformula claude
 TFORMULA_READER_MAX_IMAGES=128 tformula README.md
+```
+
+不启动 PTY 会话也可以检查或清空公式缓存：
+
+```sh
+tformula cache status
+tformula cache clear
 ```
 
 ## 可识别的公式
@@ -429,14 +450,22 @@ tformula -- opencode --continue
 ## 安全与降级行为
 
 - MathJax 和字体全部在本地运行，不使用 CDN。
-- 单个公式最长 8192 个字符。
+- 单个公式及 MathJax 内部输入缓冲区最长 20,000 个字符；宏/环境展开最多 1,000 次。
 - 禁止 `\require`、`\href`、`\url`、`\includegraphics`、`\input`、
   `\include`、`\usepackage`、`\documentclass` 以及 MathJax HTML/样式命令等
   可能加载外部内容的命令。
+- 生成的栅格最大为 4096 × 4096 像素，PNG 最大为 12 MB；空栅格会以结构化错误拒绝。
+  Resvg 在可重启的隔离进程中运行，因此原生栅格器 panic 不会终止 Agent 或 PTY 会话。
 - 解析或渲染失败时保留原始 LaTeX，不阻断 Agent。
+- 渲染遵循源码不变原则：TFormula 不会用图片替换子程序文本，公式图片是独立覆盖层；
+  因此终端缓冲区、scrollback、复制文本和 Agent 坐标都保留原始 TeX。检测器会把围栏
+  代码、行内代码、HTML `code`/`pre`、TeX `\verb` 片段和 TeX 注释尾部当作普通文本。
 - 终端不支持 Kitty 图形协议时，TFormula 会退化为透明 PTY 代理。
 - 阅读器中的 HTML 只作为文字处理，不会执行；首个版本只从本地文件加载图片。
 - 阅读器在无 Kitty 图形协议时仍保留 ANSI 文档排版，并以可读文本显示公式和图片。
+
+与 pi-math 的逐项完整对标及 PTY 架构边界记录在
+[`docs/pi-math-parity.md`](docs/pi-math-parity.md)。
 
 ## 开发
 

@@ -62,6 +62,20 @@ describe("soft-wrapped terminal formula detection", () => {
     expect(snapshot.regions[0]!.latex).toContain("x_11^2\\text{ term-11}");
   });
 
+  it("renders a numeric target in the same relation as its variable", () => {
+    const snapshot = detectScreenFormulaRegions([{
+      row: 0,
+      text: "当输入 $x$ 接近 $3$ 时，",
+      isWrapped: false,
+      uniformStyle: true
+    }], 80);
+
+    expect(snapshot.regions).toHaveLength(1);
+    expect(snapshot.regions[0]).toMatchObject({ composite: true });
+    expect(snapshot.regions[0]!.latex).toContain("x\\text{ 接近 }3");
+    expect(snapshot.regions[0]!.latex).not.toContain("\\$3\\$");
+  });
+
   it("reassembles a standalone display split across physical rows", () => {
     const snapshot = detectScreenFormulaRegions([
       { row: 0, text: "\\[\\nabla \\cdot \\mathbf{E}=", isWrapped: false },

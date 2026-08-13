@@ -119,6 +119,27 @@ describe("FormulaCache", () => {
     expect(producers).toBe(1);
   });
 
+  it("bounds fallback memory by retained bytes as well as entry count", async () => {
+    const root = await cacheRoot();
+    const rootFile = join(root, "not-a-directory");
+    await writeFile(rootFile, "occupied");
+    const cache = new FormulaCache({
+      root: rootFile,
+      memoryEntries: 10,
+      maxMemoryBytes: 40
+    });
+    let producers = 0;
+    const key = formulaCacheKey({ variant: "weighted-memory" });
+    const produce = async (): Promise<string> => {
+      producers += 1;
+      return `<svg width="1ex" height="1ex"><!--${"x".repeat(64)}--></svg>`;
+    };
+
+    await cache.getOrCreateSvg(key, produce);
+    await cache.getOrCreateSvg(key, produce);
+    expect(producers).toBe(2);
+  });
+
   it("deduplicates concurrent producers after falling back to memory", async () => {
     const root = await cacheRoot();
     const rootFile = join(root, "not-a-directory");

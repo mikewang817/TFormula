@@ -1,4 +1,3 @@
-import { renderAsync } from "@resvg/resvg-js";
 import type {
   CellMetrics,
   FormulaPlacementPlan,
@@ -8,6 +7,9 @@ import type {
 } from "./types.js";
 import { calculateFormulaGeometry } from "./geometry.js";
 import { FormulaCache, formulaCacheKey, sharedFormulaCache } from "./formula-cache.js";
+import { mathRendererConfig } from "./math-renderer-config.js";
+import { rasterizeSvgIsolated, RasterWorkerError } from "./resvg-client.js";
+import { WeightedLruCache } from "./weighted-lru-cache.js";
 
 interface MathJaxApi {
   init(config: Record<string, unknown>): Promise<MathJaxApi>;
@@ -27,11 +29,34 @@ interface SvgDimensions {
   depthEx: number;
 }
 
+export type MathRenderFailureCode =
+  | "input-too-long"
+  | "disabled-command"
+  | "tex-error"
+  | "invalid-svg"
+  | "raster-limit"
+  | "empty-raster"
+  | "png-limit"
+  | "raster-error";
+
+export class MathRenderError extends Error {
+  constructor(readonly code: MathRenderFailureCode, message: string) {
+    super(message);
+    this.name = "MathRenderError";
+  }
+}
+
 let mathJaxPromise: Promise<MathJaxApi> | undefined;
-const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-scientific-svg-v5";
-const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v6";
+const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-scientific-svg-v6";
+const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v7";
 const CANONICAL_CONTAINER_WIDTH = 100_000;
 const MATHJAX_EX_PX = 8;
+export const MAX_FORMULA_LENGTH = 20_000;
+const MAX_MACRO_SUBSTITUTIONS = 1_000;
+const MAX_RASTER_DIMENSION = 4_096;
+const MAX_PNG_BYTES = 12 * 1024 * 1024;
+const MAX_RENDERED_MEMORY_BYTES = 64 * 1024 * 1024;
+const renderFailureCache = new WeightedLruCache<MathRenderError>(256, 1024 * 1024);
 
 /**
  * A deterministic, local-only package profile for formulas emitted by
@@ -51,7 +76,8 @@ export const SCIENTIFIC_TEX_PACKAGES = [
   "cases",
   "extpfeil",
   "boldsymbol",
-  "enclose"
+  "enclose",
+  "configmacros"
 ] as const;
 
 /** A conservative subset of ubiquitous siunitx syntax used by CLI agents. */
@@ -130,6 +156,7 @@ function mathJaxCacheRequest(
     containerWidth: effectiveContainerWidth,
     svgKey: formulaCacheKey({
       version: MATHJAX_CACHE_VERSION,
+      config: mathRendererConfig.fingerprint,
       source,
       display,
       em: 16,
@@ -150,14 +177,20 @@ async function getMathJax(): Promise<MathJaxApi> {
         loader: {
           load: [
             "input/tex",
-            ...SCIENTIFIC_TEX_PACKAGES.map((name) => `[tex]/${name}`),
+            // input/tex preloads configmacros; asking the loader to fetch it
+            // again emits a spurious component-version warning in MathJax 4.
+            ...SCIENTIFIC_TEX_PACKAGES
+              .filter((name) => name !== "configmacros")
+              .map((name) => `[tex]/${name}`),
             "output/svg"
           ]
         },
         tex: {
-          maxBuffer: 8192,
+          maxBuffer: MAX_FORMULA_LENGTH,
+          maxMacros: MAX_MACRO_SUBSTITUTIONS,
           packages: { "[+]": [...SCIENTIFIC_TEX_PACKAGES] },
-          macros: SCIENTIFIC_TEX_MACROS
+          macros: { ...SCIENTIFIC_TEX_MACROS, ...mathRendererConfig.macros },
+          environments: mathRendererConfig.environments
         },
         svg: {
           fontCache: "local",
@@ -214,9 +247,14 @@ export function readSvgDimensions(svg: string): SvgDimensions {
 }
 
 function safeLatex(latex: string): string {
-  if (latex.length > 8192) throw new Error("formula exceeds the 8192 character limit");
+  if (latex.length > MAX_FORMULA_LENGTH) {
+    throw new MathRenderError(
+      "input-too-long",
+      `formula exceeds the ${MAX_FORMULA_LENGTH} character limit`
+    );
+  }
   if (/\\(?:require|href|url|html|class|cssId|style|includegraphics|input|include|usepackage|documentclass)\b/iu.test(latex)) {
-    throw new Error("formula contains a disabled command");
+    throw new MathRenderError("disabled-command", "formula contains a disabled command");
   }
   return latex;
 }
@@ -233,17 +271,20 @@ function assertValidMathJaxSvg(svg: string): void {
     svg.match(/\bdata-mjx-error\s*=\s*(["'])(.*?)\1/iu)?.[2]
   );
   if (parseError) {
-    throw new Error(`MathJax could not parse the formula: ${parseError}`);
+    throw new MathRenderError("tex-error", `MathJax could not parse the formula: ${parseError}`);
   }
   const redErrorTag = svg.match(redErrorText)?.[0];
   if (redErrorTag) {
     const command = decodeAttribute(
       redErrorTag.match(/\bdata-latex\s*=\s*(["'])(.*?)\1/iu)?.[2]
     );
-    throw new Error(`MathJax could not parse the formula${command ? `: unsupported ${command}` : ""}`);
+    throw new MathRenderError(
+      "tex-error",
+      `MathJax could not parse the formula${command ? `: unsupported ${command}` : ""}`
+    );
   }
   if (/\bdata-mml-node=["']merror["']|<merror\b/iu.test(svg)) {
-    throw new Error("MathJax could not parse the formula");
+    throw new MathRenderError("tex-error", "MathJax could not parse the formula");
   }
   const dimensions = readSvgDimensions(svg);
   if (!/^<svg\b/iu.test(svg)
@@ -255,7 +296,7 @@ function assertValidMathJaxSvg(svg: string): void {
     || dimensions.aspectRatio <= 0
     || !Number.isFinite(dimensions.heightEx)
     || dimensions.heightEx <= 0) {
-    throw new Error("MathJax produced an incomplete SVG");
+    throw new MathRenderError("invalid-svg", "MathJax produced an incomplete SVG");
   }
 }
 
@@ -414,12 +455,52 @@ function lruCacheGet<Key, Value>(cache: Map<Key, Value>, key: Key): Value | unde
   return value;
 }
 
-async function renderSvgToPng(svg: string, loadSystemFonts: boolean): Promise<Buffer> {
-  const rendered = await renderAsync(svg, {
-    fitTo: { mode: "original" },
-    font: { loadSystemFonts }
-  });
-  return rendered.asPng();
+interface FormulaInkBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+function alphaBounds(pixels: Buffer, width: number, height: number): FormulaInkBounds | undefined {
+  let left = width;
+  let top = height;
+  let right = -1;
+  let bottom = -1;
+  for (let offset = 3, pixel = 0; offset < pixels.length; offset += 4, pixel += 1) {
+    if (pixels[offset] === 0) continue;
+    const x = pixel % width;
+    const y = Math.floor(pixel / width);
+    left = Math.min(left, x);
+    top = Math.min(top, y);
+    right = Math.max(right, x);
+    bottom = Math.max(bottom, y);
+  }
+  return right < 0 ? undefined : { left, top, right: right + 1, bottom: bottom + 1 };
+}
+
+async function renderSvgToPng(
+  svg: string,
+  loadSystemFonts: boolean,
+  fontFiles = mathRendererConfig.fontFiles
+): Promise<Buffer> {
+  try {
+    return await rasterizeSvgIsolated({
+      svg,
+      loadSystemFonts,
+      ...(fontFiles ? { fontFiles } : {}),
+      maxDimension: MAX_RASTER_DIMENSION,
+      maxPngBytes: MAX_PNG_BYTES
+    });
+  } catch (error) {
+    if (error instanceof RasterWorkerError) {
+      throw new MathRenderError(error.code, error.message);
+    }
+    throw new MathRenderError(
+      "raster-error",
+      `formula rasterization failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }
 
 export async function renderMathJaxSvg(
@@ -429,35 +510,54 @@ export async function renderMathJaxSvg(
   cache: FormulaCache = sharedFormulaCache
 ): Promise<string> {
   const request = mathJaxCacheRequest(latex, display, containerWidth);
+  const failed = renderFailureCache.get(request.svgKey);
+  if (failed) throw new MathRenderError(failed.code, failed.message);
+
   const create = async (): Promise<string> => {
-    const mathJax = await getMathJax();
-    const node = await mathJax.tex2svgPromise(request.source, {
-      display,
-      em: 16,
-      ex: 8,
-      containerWidth: request.containerWidth
-    });
-    const adaptor = mathJax.startup.adaptor;
-    const svgNode = adaptor.tags(node, "svg")[0];
-    if (!svgNode) throw new Error("MathJax produced no SVG");
-    const serialized = adaptor.serializeXML(svgNode);
-    assertValidMathJaxSvg(serialized);
-    return serialized;
+    try {
+      const mathJax = await getMathJax();
+      const node = await mathJax.tex2svgPromise(request.source, {
+        display,
+        em: 16,
+        ex: 8,
+        containerWidth: request.containerWidth
+      });
+      const adaptor = mathJax.startup.adaptor;
+      const svgNode = adaptor.tags(node, "svg")[0];
+      if (!svgNode) throw new MathRenderError("invalid-svg", "MathJax produced no SVG");
+      const serialized = adaptor.serializeXML(svgNode);
+      assertValidMathJaxSvg(serialized);
+      return serialized;
+    } catch (error) {
+      if (error instanceof MathRenderError) throw error;
+      throw new MathRenderError(
+        "tex-error",
+        `MathJax could not parse the formula: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   };
-  const svg = await cache.getOrCreateSvg(request.svgKey, create);
-  // Validate cache hits too. MathJax also represents unknown commands as red
-  // mtext rather than merror. Incomplete but well-formed SVG roots must not
-  // persist as blank formula images either. Since newly-created output was
-  // already checked above, a failure here is necessarily a stale cache hit;
-  // delete it and repair the request immediately.
+
   try {
-    assertValidMathJaxSvg(svg);
-    return svg;
-  } catch {
-    await cache.deleteSvg(request.svgKey);
-    const repaired = await cache.getOrCreateSvg(request.svgKey, create);
-    assertValidMathJaxSvg(repaired);
-    return repaired;
+    const svg = await cache.getOrCreateSvg(request.svgKey, create);
+    // Validate cache hits too. MathJax also represents unknown commands as red
+    // mtext rather than merror. Incomplete but well-formed SVG roots must not
+    // persist as blank formula images either. Since newly-created output was
+    // already checked above, a failure here is necessarily a stale cache hit;
+    // delete it and repair the request immediately.
+    try {
+      assertValidMathJaxSvg(svg);
+      return svg;
+    } catch {
+      await cache.deleteSvg(request.svgKey);
+      const repaired = await cache.getOrCreateSvg(request.svgKey, create);
+      assertValidMathJaxSvg(repaired);
+      return repaired;
+    }
+  } catch (error) {
+    if (error instanceof MathRenderError) {
+      renderFailureCache.set(request.svgKey, error, error.message.length * 2 + 64);
+    }
+    throw error;
   }
 }
 
@@ -477,7 +577,10 @@ export async function renderMathJaxMathMl(
 }
 
 export class MathRenderer {
-  readonly #cache = new Map<string, RenderedFormula>();
+  readonly #cache = new WeightedLruCache<RenderedFormula>(
+    256,
+    MAX_RENDERED_MEMORY_BYTES
+  );
 
   constructor(readonly persistentCache: FormulaCache = sharedFormulaCache) {}
 
@@ -545,7 +648,7 @@ export class MathRenderer {
       foreground,
       background
     });
-    const cached = lruCacheGet(this.#cache, cacheKey);
+    const cached = this.#cache.get(cacheKey);
     if (cached) return cached;
 
     const formulaSvg = await renderMathJaxSvg(
@@ -613,7 +716,11 @@ export class MathRenderer {
           "</svg>"
         ].join("");
     const png = await this.persistentCache.getOrCreatePng(cacheKey, () =>
-      renderSvgToPng(wrapper, svgNeedsSystemFonts(formulaSvg))
+      renderSvgToPng(
+        wrapper,
+        mathRendererConfig.loadSystemFonts && svgNeedsSystemFonts(formulaSvg),
+        mathRendererConfig.fontFiles
+      )
     );
     const rendered: RenderedFormula = {
       png,
@@ -632,17 +739,18 @@ export class MathRenderer {
       naturalAspectRatio: dimensions.aspectRatio,
       naturalHeightEx: dimensions.heightEx
     };
-    this.#cache.set(cacheKey, rendered);
-    if (this.#cache.size > 256) this.#cache.delete(this.#cache.keys().next().value!);
+    this.#cache.set(cacheKey, rendered, png.byteLength + 256);
     return rendered;
   }
 
   clear(): void {
     this.#cache.clear();
+    renderFailureCache.clear();
   }
 }
 
 export const mathRendererInternals = {
+  alphaBounds,
   buildHorizontallySlicedSvg,
   buildSourceMaskedSvg,
   lruCacheGet,

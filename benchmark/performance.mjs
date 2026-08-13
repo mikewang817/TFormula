@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import { detectFormulaRegions } from "../dist/detect.js";
+import { detectFormulas } from "../dist/detect.js";
 import { OutputCheckpointSplitter } from "../dist/output-checkpoints.js";
 import { FormulaScreen } from "../dist/screen.js";
 import { detectScreenFormulaRegions } from "../dist/screen-text.js";
@@ -75,7 +75,7 @@ const readerLayout = layoutReaderDocument(readerDocument, readerOptions);
 const directPayload = Buffer.alloc(1024 * 1024, 0xa5);
 
 const results = [
-  timed("detect: 200 plain rows", 1_000, () => detectFormulaRegions(plainLines)),
+  timed("detect: 200 plain rows", 1_000, () => detectFormulas(plainLines)),
   timed("screen-map: 60 plain rows", 2_000, () =>
     detectScreenFormulaRegions(physicalLines, 120)),
   timed("screen-map: 384 inline formulas", 100, () =>

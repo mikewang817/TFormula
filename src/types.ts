@@ -138,6 +138,12 @@ export interface CliOptions {
   cellOverride?: { width: number; height: number };
 }
 
+export interface CacheCliOptions {
+  mode: "cache";
+  action: "status" | "clear";
+  debug: boolean;
+}
+
 export interface HistoryCliOptions {
   mode: "history";
   limit: number;
@@ -195,6 +201,7 @@ export interface ReaderCliOptions {
 export type TFormulaOptions =
   | CliOptions
   | ReaderCliOptions
+  | CacheCliOptions
   | HistoryCliOptions
   | ExportCliOptions
   | CopyCliOptions;

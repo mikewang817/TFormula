@@ -369,6 +369,8 @@ type FormulaIntent = "inline" | "display" | "embedded-display";
 | 2026-07-25 | README 双语同步 | 更新 `README.md`、`README.zh-CN.md`：PDF/OCR 数学边界恢复、HTML 实体、混合图片段落、表格换行、独立单美元公式、紧尺寸透明 PNG、Kitty `X/Y`、floor/ceil 8% 限制、CJK 换行、缓存及整数单元格限制；仅文档变更，双语内容对照检查，`git diff --check` 通过 |
 | 2026-07-25 | npm `0.2.1` 发布 | `npm run check`：32 files passed；493 passed；1 expected fail；`npm pack --dry-run`：87 files、230.6 kB、无意外文件；发布级浏览器二次验证后 registry 核验 `tformula@0.2.1`，`latest=0.2.1`，shasum `25c8bc5bbab5ec77a99426acdf83d7b27ce2b20d` |
 | 2026-07-25 | TUI 引用槽中的极限定义公式 | 按用户截图结构复现保留 `│`/`>` gutter 的裸 `[`/`]` 多行公式，检测时剥离容器前缀但保留物理列；同一行已有强数学证据、数学语境或多个非选项变量组时，恢复 `(M)`、`(x)`、`(f(x))` 等简单括号变量；内联代码不提供组证据，普通 `(A)/(B)` 选项保持文本；新增4项检测回归。首次全量中的独立 `reader-watch` 原子替换用例超时，隔离重跑及随后全量均通过：32 files passed；497 passed；1 expected fail；build 与 `git diff --check` 通过 |
+| 2026-07-25 | pi-math 完整对标 | 以 `Fadouse/pi-math@0.2.0`/`733182b` 建立逐项矩阵；检测器新增 quoted fence、HTML `code`/`pre`/注释、TeX `\\verb` 与 `%` 注释保护及嵌套环境回归；确认 overlay 后终端源码单元格不变；新增受控宏/环境/字体配置及配置指纹缓存键、20,000 字符/1,000 次展开边界、4096²/12 MB/空栅格限制、结构化失败与负缓存、按字节 LRU、`cache status/clear`；修复失效 benchmark API。`npm run check`：34 files passed；511 passed；1 expected fail；`npm run benchmark` 全部完成；`npm pack --dry-run` 包含新增运行时模块；`git diff --check` 通过 |
+| 2026-08-04 | Resvg 原生 panic 隔离 | 根据真实 `tformula pi` 截图定位 `resvg/src/geom.rs:27` 的不可捕获 Rust panic；将 Resvg 移入按 TFormula 进程复用、空闲不阻止退出且崩溃后可重启的隔离 worker。用可稳定触发同一 `Option::unwrap()`/SIGABRT 的越界 SVG 建立回归，确认 worker 失败被转换为 `raster-error`，随后合法 PNG 可由新 worker 正常生成，Agent/PTY 主进程不再退出；同时按截图恢复 `$x$ 接近 $3$` 中与变量存在明确关系或独占一行的纯数字公式，普通价格仍不渲染。`npm run check`：34 files passed；514 passed；1 expected fail；`git diff --check` 通过 |
 
 ---
 

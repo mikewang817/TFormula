@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { WeightedLruCache } from "./weighted-lru-cache.js";
 
 type CacheKind = "svg" | "png";
 
@@ -32,13 +33,23 @@ interface LockSnapshot {
   token?: string;
 }
 
+export interface FormulaCacheStats {
+  root: string;
+  files: number;
+  bytes: number;
+  memoryEntries: number;
+  memoryBytes: number;
+}
+
 export interface FormulaCacheOptions {
   root?: string;
   memoryEntries?: number;
+  maxMemoryBytes?: number;
   maxDiskBytes?: number;
 }
 
 const CACHE_SCHEMA = "v1";
+const DEFAULT_MAX_MEMORY_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_DISK_BYTES = 256 * 1024 * 1024;
 const LOCK_STALE_MS = 30_000;
 const LOCK_HEARTBEAT_MS = Math.max(1_000, Math.floor(LOCK_STALE_MS / 3));
@@ -275,9 +286,8 @@ async function openNewLock(
 
 export class FormulaCache {
   readonly root: string;
-  readonly #memoryEntries: number;
   readonly #maxDiskBytes: number;
-  readonly #memory = new Map<string, Buffer>();
+  readonly #memory: WeightedLruCache<Buffer>;
   readonly #inFlight = new Map<string, Promise<Buffer>>();
   #diskDisabled = false;
   #cleanupRunning = false;
@@ -286,7 +296,10 @@ export class FormulaCache {
 
   constructor(options: FormulaCacheOptions = {}) {
     this.root = join(options.root ?? defaultCacheRoot(), CACHE_SCHEMA);
-    this.#memoryEntries = Math.max(1, options.memoryEntries ?? 256);
+    this.#memory = new WeightedLruCache(
+      Math.max(1, options.memoryEntries ?? 256),
+      Math.max(0, options.maxMemoryBytes ?? DEFAULT_MAX_MEMORY_BYTES)
+    );
     this.#maxDiskBytes = Math.max(0, options.maxDiskBytes ?? configuredMaxDiskBytes());
   }
 
@@ -328,6 +341,36 @@ export class FormulaCache {
     await rm(this.root, { force: true, recursive: true });
   }
 
+  async stats(): Promise<FormulaCacheStats> {
+    let files = 0;
+    let bytes = 0;
+    const visit = async (directory: string): Promise<void> => {
+      let children;
+      try {
+        children = await readdir(directory, { withFileTypes: true });
+      } catch (error) {
+        if (isCode(error, "ENOENT")) return;
+        throw error;
+      }
+      await Promise.all(children.map(async (child) => {
+        const path = join(directory, child.name);
+        if (child.isDirectory()) return visit(path);
+        if (child.name.endsWith(".lock") || child.name.endsWith(".tmp")) return;
+        const info = await stat(path);
+        files += 1;
+        bytes += info.size;
+      }));
+    };
+    await visit(this.root);
+    return {
+      root: this.root,
+      files,
+      bytes,
+      memoryEntries: this.#memory.size,
+      memoryBytes: this.#memory.bytes
+    };
+  }
+
   #memoryKey(kind: CacheKind, key: string): string {
     return `${kind}:${key}`;
   }
@@ -338,12 +381,7 @@ export class FormulaCache {
   }
 
   #remember(kind: CacheKind, key: string, data: Buffer): Buffer {
-    const memoryKey = this.#memoryKey(kind, key);
-    this.#memory.delete(memoryKey);
-    this.#memory.set(memoryKey, data);
-    while (this.#memory.size > this.#memoryEntries) {
-      this.#memory.delete(this.#memory.keys().next().value!);
-    }
+    this.#memory.set(this.#memoryKey(kind, key), data, data.byteLength);
     return data;
   }
 

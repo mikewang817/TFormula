@@ -19,7 +19,7 @@ const HISTORY_VERSION = 1;
 const DEFAULT_HISTORY_LIMIT = 20;
 const MAX_HISTORY_LIMIT = 1_000;
 const MAX_FORMULAS_PER_SESSION = 1_000;
-const MAX_LATEX_LENGTH = 8_192;
+const MAX_LATEX_LENGTH = 20_000;
 
 export interface FormulaHistoryEntry {
   version: 1;

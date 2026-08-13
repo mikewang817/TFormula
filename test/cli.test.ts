@@ -60,6 +60,18 @@ describe("CLI arguments", () => {
     });
   });
 
+  it("parses formula cache utilities without starting a proxy", () => {
+    expect(parseArgs(["cache"])).toMatchObject({
+      mode: "cache",
+      action: "status"
+    });
+    expect(parseArgs(["cache", "clear", "--debug"])).toMatchObject({
+      mode: "cache",
+      action: "clear",
+      debug: true
+    });
+  });
+
   it("parses formula history utilities without starting a proxy", () => {
     expect(parseArgs(["history"])).toMatchObject({
       mode: "history",
@@ -189,6 +201,31 @@ describe("CLI arguments", () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/u);
+  });
+
+  it("reports and clears the content-addressed formula cache", () => {
+    const root = mkdtempSync(join(tmpdir(), "tformula-cli-cache-"));
+    try {
+      const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
+      const environment = { ...process.env, TFORMULA_CACHE_DIR: root };
+      const status = spawnSync(tsx, ["src/cli.ts", "cache", "status"], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: environment
+      });
+      expect(status.status).toBe(0);
+      expect(status.stdout).toContain("disk: 0 files, 0 bytes");
+
+      const cleared = spawnSync(tsx, ["src/cli.ts", "cache", "clear"], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: environment
+      });
+      expect(cleared.status).toBe(0);
+      expect(cleared.stdout).toContain("cache cleared");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("lists and exports history without nesting another terminal proxy", () => {

@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 import { FormulaCache } from "../src/formula-cache.js";
 import {
   mathRendererInternals,
+  MathRenderError,
   MathRenderer,
+  MAX_FORMULA_LENGTH,
   normalizeLatexForRendering,
   readSvgDimensions,
   renderMathJaxSvg
@@ -178,9 +180,45 @@ describe("MathRenderer", () => {
     expect(svg.match(/id="formula-content"/gu)).toHaveLength(1);
   });
 
-  it("propagates asynchronous Resvg parse failures", async () => {
+  it("contains native Resvg panics and restarts the isolated rasterizer", async () => {
+    const resvgPanic = [
+      '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">',
+      '<g opacity="0.5" transform="translate(100 100)">',
+      '<rect width="5" height="5"/>',
+      "</g></svg>"
+    ].join("");
+    await expect(mathRendererInternals.renderSvgToPng(resvgPanic, false))
+      .rejects.toMatchObject({ code: "raster-error" });
+    await expect(mathRendererInternals.renderSvgToPng(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2"/></svg>',
+      false
+    )).resolves.toBeInstanceOf(Buffer);
+  });
+
+  it("reports structured raster failures and enforces raster boundaries", async () => {
     await expect(mathRendererInternals.renderSvgToPng("<svg><broken>", false))
-      .rejects.toThrow();
+      .rejects.toMatchObject({ code: "raster-error" });
+    await expect(mathRendererInternals.renderSvgToPng(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="4097" height="1"><rect width="1" height="1"/></svg>',
+      false
+    )).rejects.toMatchObject({ code: "raster-limit" });
+    await expect(mathRendererInternals.renderSvgToPng(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>',
+      false
+    )).rejects.toMatchObject({ code: "empty-raster" });
+  });
+
+  it("computes exact half-open alpha bounds", () => {
+    const pixels = Buffer.alloc(4 * 4 * 4);
+    pixels[(1 * 4 + 2) * 4 + 3] = 255;
+    pixels[(2 * 4 + 3) * 4 + 3] = 1;
+    expect(mathRendererInternals.alphaBounds(pixels, 4, 4)).toEqual({
+      left: 2,
+      top: 1,
+      right: 4,
+      bottom: 3
+    });
+    expect(mathRendererInternals.alphaBounds(Buffer.alloc(16), 2, 2)).toBeUndefined();
   });
 
   it("refreshes a rendered formula on an in-memory cache hit", () => {
@@ -228,9 +266,18 @@ describe("MathRenderer", () => {
     expect(readSvgDimensions(narrow).heightEx).toBeGreaterThan(readSvgDimensions(wide).heightEx);
   });
 
-  it("rejects MathJax error boxes instead of caching them as formula images", async () => {
-    await expect(renderMathJaxSvg("\\frac{1}", false, 160))
-      .rejects.toThrow("MathJax could not parse the formula");
+  it("enforces the shared 20,000-character input boundary", async () => {
+    expect(MAX_FORMULA_LENGTH).toBe(20_000);
+    await expect(renderMathJaxSvg("x".repeat(MAX_FORMULA_LENGTH + 1), false, 160))
+      .rejects.toMatchObject({ code: "input-too-long" });
+  });
+
+  it("rejects MathJax error boxes with structured diagnostics", async () => {
+    const error = await renderMathJaxSvg("\\frac{1}", false, 160)
+      .then(() => undefined, (failure: unknown) => failure);
+    expect(error).toBeInstanceOf(MathRenderError);
+    expect(error).toMatchObject({ code: "tex-error" });
+    expect(error).toHaveProperty("message", expect.stringContaining("MathJax could not parse"));
   });
 
   it("rejects unknown commands that MathJax otherwise paints as red source text", async () => {

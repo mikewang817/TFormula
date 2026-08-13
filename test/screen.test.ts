@@ -146,6 +146,26 @@ describe("FormulaScreen lifecycle", () => {
     }
   });
 
+  it("preserves the exact TeX source cells after rendering an overlay", async () => {
+    const source = "prefix \\(x_i^2\\) suffix";
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      renderer: new FastMathRenderer(),
+      writeOuter: () => undefined
+    });
+    try {
+      await screen.write(source);
+      await screen.flushScan();
+
+      expect(screen.terminal.buffer.active.getLine(0)?.translateToString(true)).toBe(source);
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it("enables checkpoint bypass only for a stable trigger-free viewport", async () => {
     const screen = new FormulaScreen({
       cols: 40,

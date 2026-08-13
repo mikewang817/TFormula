@@ -398,6 +398,22 @@ TikZ, `chemfig`, and external images are an explicit boundary. If a command is
 unsupported, the renderer reports that command and leaves the original TeX
 visible instead of silently changing its meaning.
 
+Optional process-local customization is available for specialist notation and
+Unicode fallback fonts:
+
+```sh
+TFORMULA_MATH_MACROS='{"RR":"\\mathbb{R}","vect":["\\mathbf{#1}",1]}' tformula codex
+TFORMULA_MATH_ENVIRONMENTS='{"braced":["\\left\\{","\\right\\}"]}' tformula claude
+TFORMULA_FONT_FILES='/path/math.ttf:/path/text.otf' tformula pi
+TFORMULA_SYSTEM_FONTS=false tformula codex
+```
+
+Macro and environment values are MathJax `configmacros` definitions. Leading
+backslashes in names are optional. Font paths use the platform path delimiter
+(`:` on macOS/Linux). Configuration is validated when TFormula starts,
+dangerous external-content commands remain disabled, and the complete
+configuration fingerprint participates in SVG/PNG cache keys.
+
 ## Formula and reader image cache
 
 Math rendering is content-addressed and shared by every TFormula-wrapped Agent
@@ -417,8 +433,10 @@ a new entry. Reader-side terminal images also use an LRU budget so navigating
 through many documents does not grow terminal image storage without bound.
 
 Cache writes use per-item cross-process locks and atomic renames, so concurrent
-Agents can safely request the same formula. In a live terminal session, one PNG
-is uploaded once and reused by independent Kitty placements wherever the same
+Agents can safely request the same formula. In-memory entries are bounded by
+both count and a 64 MB byte budget; the persistent cache retains its separate
+256 MB default budget. In a live terminal session, one PNG is uploaded once
+and reused by independent Kitty placements wherever the same
 variant appears. The original TeX text remains in terminal scrollback.
 
 On macOS the disk cache defaults to `~/Library/Caches/TFormula`; on Linux it
@@ -429,6 +447,13 @@ the default 256 MB limit with:
 TFORMULA_CACHE_DIR=/path/to/cache tformula codex
 TFORMULA_CACHE_MAX_MB=512 tformula claude
 TFORMULA_READER_MAX_IMAGES=128 tformula README.md
+```
+
+Inspect or clear the formula cache without starting a PTY session:
+
+```sh
+tformula cache status
+tformula cache clear
 ```
 
 ## Detection
@@ -503,16 +528,29 @@ tformula -- claude --resume
 ## Safety and fallback behavior
 
 - MathJax and fonts are installed locally; rendering does not use a CDN.
-- Formula length is limited to 8192 characters.
+- Formula length and MathJax's internal input buffer are limited to 20,000 characters;
+  macro/environment expansion is limited to 1,000 substitutions.
 - Commands that can load or embed external content, including `\require`,
   `\href`, `\url`, `\includegraphics`, `\input`, `\include`, `\usepackage`,
   `\documentclass`, and MathJax HTML/style commands, are rejected.
+- Generated rasters are limited to 4096 × 4096 pixels and 12 MB PNG payloads;
+  empty rasters are rejected with structured diagnostics. Resvg runs in a
+  restartable isolated process, so a native rasterizer panic cannot terminate
+  the Agent or PTY session.
 - A parse or render failure leaves the original LaTeX visible.
+- Rendering is source-preserving: TFormula never replaces child text with a
+  raster. Formula images are independent overlays, so the terminal buffer,
+  scrollback, copied text, and Agent-visible coordinates retain the original
+  TeX. The detector treats fenced/inline code, HTML `code`/`pre` spans, TeX
+  `\verb` spans, and TeX comment tails as literal text.
 - On terminals without Kitty graphics support, TFormula remains a transparent
   PTY proxy. The document reader retains its ANSI text layout and uses readable
   formula and image placeholders.
 - Reader HTML is treated as text; it is not executed. Reader images are loaded
   only from local files in this release.
+
+The full feature-by-feature comparison with pi-math, including deliberate PTY
+architecture boundaries, is recorded in [`docs/pi-math-parity.md`](docs/pi-math-parity.md).
 
 ## Development
 

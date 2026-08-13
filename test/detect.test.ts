@@ -444,6 +444,14 @@ describe("detectFormulas", () => {
     expect(detectFormulaRegions(["value is $x_i^2$ today"])).toHaveLength(1);
   });
 
+  it("accepts numeric dollar math beside a variable or on its own", () => {
+    expect(detectFormulaRegions(["when $x$ approaches $3$"])
+      .map((region) => region.latex)).toEqual(["x", "3"]);
+    expect(detectFormulaRegions(["$3$"])
+      .map((region) => region.latex)).toEqual(["3"]);
+    expect(detectFormulaRegions(["price is $12.50$ today"])).toEqual([]);
+  });
+
   it("supports ordinary one-letter and scripted single-dollar math", () => {
     const regions = detectFormulaRegions([
       "variables $x$, $c^2$, $E_0$, $f(t)$, and $\\rho$; not prose $USD$ or price $12.50$"
@@ -473,6 +481,64 @@ describe("detectFormulas", () => {
       "afterwards $p^2$"
     ]);
     expect(regions.map((region) => region.latex)).toEqual(["x^2", "p^2"]);
+  });
+
+  it("excludes quoted fences, HTML verbatim spans, TeX verbatim commands, and comment delimiters", () => {
+    const lines = [
+      "> ```latex",
+      "> $x^2$",
+      "> ```",
+      "<code>\\(y^2\\) and $$z^2$$</code>",
+      "<!-- $ignored^2$ and \\(alsoIgnored\\) -->",
+      "<pre>",
+      "\\begin{align} a&=b \\end{align}",
+      "</pre>",
+      String.raw`literal \verb|$m^2$ and \(n\)|, but $p^2$ remains math`,
+      "comment $q^2$ % $r^2$ and \\(s^2\\)",
+      "\\begin{align} % \\end{align}",
+      "a&=b",
+      "\\end{align}"
+    ];
+    const before = [...lines];
+    const regions = detectFormulaRegions(lines);
+
+    expect(regions.map((region) => region.latex)).toEqual([
+      "\\begin{align} % \\end{align}\na&=b\n\\end{align}",
+      "p^2",
+      "q^2"
+    ]);
+    // Detection is read-only: ignored syntax is never rewritten in the source
+    // snapshot that later drives terminal placement and scrollback copying.
+    expect(lines).toEqual(before);
+  });
+
+  it("ignores apparent dollar and environment closers inside TeX comments", () => {
+    const regions = detectFormulaRegions([
+      "$$a % $$ ignored",
+      "+ b$$",
+      "\\begin{aligned}",
+      "a&=b % \\end{aligned} ignored",
+      "\\end{aligned}"
+    ]);
+
+    expect(regions.map(({ latex }) => latex)).toEqual([
+      "\\begin{aligned}\na&=b % \\end{aligned} ignored\n\\end{aligned}",
+      "a % $$ ignored\n+ b"
+    ]);
+  });
+
+  it("balances nested display environments before accepting their outer closer", () => {
+    const [region] = detectFormulaRegions([
+      "\\begin{align}",
+      "a&=\\begin{aligned} b&=c\\\\ d&=e \\end{aligned}",
+      "\\end{align}"
+    ]);
+
+    expect(region).toMatchObject({
+      latex: "\\begin{align}\na&=\\begin{aligned} b&=c\\\\ d&=e \\end{aligned}\n\\end{align}",
+      display: true,
+      confidence: "explicit"
+    });
   });
 
   it("only closes a Markdown fence with the same marker and sufficient length", () => {

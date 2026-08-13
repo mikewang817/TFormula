@@ -28,6 +28,7 @@ Usage:
   tformula --read <document>
   tformula --shell
   tformula history [--limit <count>] [--json]
+  tformula cache [status|clear]
   tformula copy [<id>] [latex|markdown|mathml|html|svg|png|tiff]
   tformula save [<id>] <path> [formula export options]
   tformula export [<id>|--last] [--format <format>] [-o <path>]
@@ -40,6 +41,7 @@ Examples:
   tformula README.md
   tformula assets/diagram.png
   tformula history
+  tformula cache status
   tformula copy mathml
   tformula save formula.png
   tformula save 2f83a1 formula.svg --color navy --padding 12
@@ -87,6 +89,21 @@ export function parseFocusKey(raw: string): string {
 
 export function isTFormulaActive(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.TFORMULA_ACTIVE === "1";
+}
+
+function parseCacheArgs(argv: string[]): TFormulaOptions {
+  let action: "status" | "clear" = "status";
+  let sawAction = false;
+  let debug = false;
+  for (const value of argv) {
+    if (value === "status" || value === "clear") {
+      if (sawAction) fail("cache accepts only one action");
+      action = value;
+      sawAction = true;
+    } else if (value === "--debug") debug = true;
+    else fail(`unknown cache action or option ${value}`);
+  }
+  return { mode: "cache", action, debug };
 }
 
 function parseHistoryArgs(argv: string[]): TFormulaOptions {
@@ -275,6 +292,7 @@ function parseCopyArgs(argv: string[]): TFormulaOptions {
 
 export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" {
   if (argv[0] === "history") return parseHistoryArgs(argv.slice(1));
+  if (argv[0] === "cache") return parseCacheArgs(argv.slice(1));
   if (argv[0] === "export") return parseExportArgs(argv.slice(1));
   if (argv[0] === "save") return parseExportArgs(argv.slice(1), true);
   if (argv[0] === "copy") return parseCopyArgs(argv.slice(1));
@@ -382,13 +400,28 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (parsed.mode === "history" || parsed.mode === "export" || parsed.mode === "copy") {
+  if (parsed.mode === "history" || parsed.mode === "cache"
+    || parsed.mode === "export" || parsed.mode === "copy") {
     const debug = (message: string): void => {
       if (parsed.debug) process.stderr.write(`[tformula] ${message}\n`);
     };
     if (parsed.mode === "history") {
       const history = await import("./formula-history.js");
       process.exitCode = await history.runHistoryCommand(parsed, debug);
+    } else if (parsed.mode === "cache") {
+      const { sharedFormulaCache } = await import("./formula-cache.js");
+      if (parsed.action === "clear") {
+        await sharedFormulaCache.clearDisk();
+        process.stdout.write("TFormula formula cache cleared\n");
+      } else {
+        const stats = await sharedFormulaCache.stats();
+        process.stdout.write([
+          `path: ${stats.root}`,
+          `disk: ${stats.files} files, ${stats.bytes} bytes`,
+          `memory: ${stats.memoryEntries} entries, ${stats.memoryBytes} bytes`
+        ].join("\n") + "\n");
+      }
+      process.exitCode = 0;
     } else {
       const exporter = await import("./formula-export.js");
       process.exitCode = parsed.mode === "export"

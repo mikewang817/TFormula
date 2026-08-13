@@ -196,18 +196,18 @@ function isContextualSimpleParenthesizedMath(value: string): boolean {
 
 function inferredParenthesizedMath(
   line: string,
-  codeRanges: InlineCodeRange[] = []
+  protectedRanges: InlineCodeRange[] = []
 ): ParenthesizedSegment[] {
   const segments = parenthesizedSegments(line)
-    .filter((segment) => !overlapsInlineCode(segment.start, segment.end, codeRanges));
+    .filter((segment) => !overlapsProtected(segment.start, segment.end, protectedRanges));
   const stronglyMathematical = segments.filter((segment) => isLikelyMath(segment.body)
     || isLikelyInferredUnicodeMath(segment.body));
   const simple = segments.filter((segment) => isContextualSimpleParenthesizedMath(segment.body));
   let contextText = line;
-  if (codeRanges.length > 0) {
+  if (protectedRanges.length > 0) {
     const prose: string[] = [];
     let cursor = 0;
-    for (const range of codeRanges) {
+    for (const range of protectedRanges) {
       prose.push(line.slice(cursor, range.start));
       cursor = range.end;
     }
@@ -359,8 +359,13 @@ interface BacktickRun {
 
 interface DetectionLineContext {
   inCodeFence: boolean;
-  codeRanges: InlineCodeRange[];
+  /** Markdown/HTML/TeX verbatim spans that must never contribute delimiters. */
+  protectedRanges: InlineCodeRange[];
+  /** First unescaped TeX comment marker outside a protected span. */
+  commentStart?: number;
 }
+
+type HtmlVerbatimKind = "code" | "pre" | "comment";
 
 interface DelimiterPosition {
   row: number;
@@ -460,7 +465,7 @@ function inlineCodeRanges(line: string): InlineCodeRange[] {
   return ranges;
 }
 
-function overlapsInlineCode(start: number, end: number, ranges: InlineCodeRange[]): boolean {
+function overlapsProtected(start: number, end: number, ranges: InlineCodeRange[]): boolean {
   let low = 0;
   let high = ranges.length;
   while (low < high) {
@@ -472,35 +477,144 @@ function overlapsInlineCode(start: number, end: number, ranges: InlineCodeRange[
   return range !== undefined && start < range.end && end > range.start;
 }
 
+function mergeProtectedRanges(ranges: InlineCodeRange[]): InlineCodeRange[] {
+  if (ranges.length < 2) return ranges;
+  const sorted = [...ranges]
+    .filter((range) => range.end > range.start)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const merged: InlineCodeRange[] = [];
+  for (const range of sorted) {
+    const previous = merged.at(-1);
+    if (previous && range.start <= previous.end) previous.end = Math.max(previous.end, range.end);
+    else merged.push({ ...range });
+  }
+  return merged;
+}
+
+function htmlVerbatimRanges(
+  line: string,
+  active: HtmlVerbatimKind | undefined,
+  inlineRanges: InlineCodeRange[]
+): { ranges: InlineCodeRange[]; active?: HtmlVerbatimKind } {
+  const ranges: InlineCodeRange[] = [];
+  let cursor = 0;
+  let open = active;
+  while (cursor < line.length) {
+    if (open) {
+      const close = open === "comment"
+        ? /-->/u.exec(line.slice(cursor))
+        : new RegExp(`</${open}\\s*>`, "iu").exec(line.slice(cursor));
+      if (!close || close.index === undefined) {
+        ranges.push({ start: cursor, end: line.length });
+        return { ranges, active: open };
+      }
+      const end = cursor + close.index + close[0].length;
+      ranges.push({ start: cursor, end });
+      cursor = end;
+      open = undefined;
+      continue;
+    }
+
+    const opening = /<!--|<(code|pre)(?:\s[^>]*)?>/iu.exec(line.slice(cursor));
+    if (!opening || opening.index === undefined) break;
+    const start = cursor + opening.index;
+    const end = start + opening[0].length;
+    if (overlapsProtected(start, end, inlineRanges)) {
+      cursor = end;
+      continue;
+    }
+    ranges.push({ start, end });
+    open = opening[0]!.startsWith("<!--") ? "comment" : opening[1]!.toLowerCase() as HtmlVerbatimKind;
+    cursor = end;
+  }
+  return { ranges, ...(open ? { active: open } : {}) };
+}
+
+function texVerbRanges(line: string, blocked: InlineCodeRange[]): InlineCodeRange[] {
+  const ranges: InlineCodeRange[] = [];
+  for (let index = 0; index < line.length; index += 1) {
+    if (!line.startsWith("\\verb", index)
+      || isEscapedAt(line, index)
+      || overlapsProtected(index, index + 5, blocked)
+      || /[A-Za-z]/u.test(line[index + 5] ?? "")) continue;
+    let cursor = index + 5;
+    if (line[cursor] === "*") cursor += 1;
+    const delimiter = line[cursor];
+    if (!delimiter || /[A-Za-z0-9\s]/u.test(delimiter)) continue;
+    const closing = line.indexOf(delimiter, cursor + 1);
+    ranges.push({ start: index, end: closing < 0 ? line.length : closing + 1 });
+    index = closing < 0 ? line.length : closing;
+  }
+  return ranges;
+}
+
+function texCommentStart(line: string, protectedRanges: InlineCodeRange[]): number | undefined {
+  for (let index = 0; index < line.length; index += 1) {
+    if (line[index] === "%" && !isEscapedAt(line, index)
+      && !overlapsProtected(index, index + 1, protectedRanges)) return index;
+  }
+  return undefined;
+}
+
+function markdownFence(line: string): { marker: "`" | "~"; length: number; closing: boolean } | undefined {
+  const match = line.match(/^(?:(?:[ \t]*>[ \t]?)*[ \t]*)(`{3,}|~{3,})(.*)$/u);
+  if (!match) return undefined;
+  const run = match[1]!;
+  return {
+    marker: run[0]! as "`" | "~",
+    length: run.length,
+    closing: !match[2]!.trim()
+  };
+}
+
 function detectionLineContexts(lines: string[]): DetectionLineContext[] {
   const contexts: DetectionLineContext[] = [];
   let codeFence: { marker: "`" | "~"; length: number } | undefined;
+  let htmlVerbatim: HtmlVerbatimKind | undefined;
 
   for (const line of lines) {
-    const trimmed = line.trim();
-    const fenceRun = trimmed.match(/^(`+|~+)/u)?.[1];
-    if (!codeFence && fenceRun && fenceRun.length >= 3) {
-      contexts.push({ inCodeFence: true, codeRanges: [] });
-      codeFence = { marker: fenceRun[0] as "`" | "~", length: fenceRun.length };
+    const fence = markdownFence(line);
+    if (!codeFence && fence) {
+      contexts.push({ inCodeFence: true, protectedRanges: [] });
+      codeFence = { marker: fence.marker, length: fence.length };
       continue;
     }
     if (codeFence) {
-      contexts.push({ inCodeFence: true, codeRanges: [] });
-      if (fenceRun
-        && fenceRun[0] === codeFence.marker
-        && fenceRun.length >= codeFence.length
-        && !trimmed.slice(fenceRun.length).trim()) {
-        codeFence = undefined;
-      }
+      contexts.push({ inCodeFence: true, protectedRanges: [] });
+      if (fence
+        && fence.marker === codeFence.marker
+        && fence.length >= codeFence.length
+        && fence.closing) codeFence = undefined;
       continue;
     }
-    contexts.push({ inCodeFence: false, codeRanges: inlineCodeRanges(line) });
+
+    const inlineRanges = inlineCodeRanges(line);
+    const html = htmlVerbatimRanges(line, htmlVerbatim, inlineRanges);
+    htmlVerbatim = html.active;
+    const protectedRanges = mergeProtectedRanges([
+      ...inlineRanges,
+      ...html.ranges,
+      ...texVerbRanges(line, mergeProtectedRanges([...inlineRanges, ...html.ranges]))
+    ]);
+    const commentStart = texCommentStart(line, protectedRanges);
+    contexts.push({
+      inCodeFence: false,
+      protectedRanges,
+      ...(commentStart === undefined ? {} : { commentStart })
+    });
   }
   return contexts;
 }
 
-function positionInInlineCode(index: number, context: DetectionLineContext): boolean {
-  return overlapsInlineCode(index, index + 1, context.codeRanges);
+function positionIsIgnored(index: number, width: number, context: DetectionLineContext): boolean {
+  return (context.commentStart !== undefined && index + width > context.commentStart)
+    || overlapsProtected(index, index + width, context.protectedRanges);
+}
+
+function rangesIncludingComment(line: string, context: DetectionLineContext): InlineCodeRange[] {
+  return context.commentStart === undefined
+    ? context.protectedRanges
+    : [...context.protectedRanges, { start: context.commentStart, end: line.length }];
 }
 
 function dollarDelimiterPositions(line: string, delimiter: "$" | "$$"): number[] {
@@ -744,9 +858,9 @@ function delimiterBodyCrossesCode(
     if (!context || context.inCodeFence) return true;
     const rangeStart = row === start.row ? start.index + openingLength : 0;
     const rangeEnd = row === end.row ? end.index : Number.POSITIVE_INFINITY;
-    if (context.codeRanges.some((range) => range.start < rangeEnd && range.end > rangeStart)) {
-      return true;
-    }
+    // A TeX `%` comment remains part of a valid formula body; only verbatim
+    // Markdown/HTML spans make its delimiters structurally unsafe.
+    if (overlapsProtected(rangeStart, rangeEnd, context.protectedRanges)) return true;
   }
   return false;
 }
@@ -761,7 +875,7 @@ function unescapedTokenPositions(
   for (let index = 0; index <= line.length - token.length; index += 1) {
     if (!line.startsWith(token, index)
       || isEscapedAt(line, index)
-      || overlapsInlineCode(index, index + token.length, context.codeRanges)) continue;
+      || positionIsIgnored(index, token.length, context)) continue;
     positions.push(index);
     index += token.length - 1;
   }
@@ -867,7 +981,7 @@ function environmentRegions(
       if (match.index === undefined
         || !DISPLAY_ENVIRONMENTS.has(match[2]!)
         || isEscapedAt(line, match.index)
-        || overlapsInlineCode(match.index, match.index + match[0].length, context.codeRanges)) {
+        || positionIsIgnored(match.index, match[0].length, context)) {
         continue;
       }
       tokens.push({
@@ -929,6 +1043,7 @@ interface DollarPair {
   latex: string;
   quality: number;
   span: number;
+  numericOnly: boolean;
 }
 
 function dollarDelimitedRegions(
@@ -942,7 +1057,7 @@ function dollarDelimitedRegions(
     const context = contexts[row]!;
     if (context.inCodeFence) continue;
     for (const index of dollarDelimiterPositions(lines[row] ?? "", delimiter)) {
-      if (!positionInInlineCode(index, context)) positions.push({ row, index });
+      if (!positionIsIgnored(index, delimiter.length, context)) positions.push({ row, index });
     }
   }
 
@@ -953,7 +1068,8 @@ function dollarDelimitedRegions(
     if (end.row - start.row > MAX_DISPLAY_BLOCK_ROWS
       || delimiterBodyCrossesCode(contexts, start, end, delimiter.length)) continue;
     const latex = bodyBetweenDelimiters(lines, start, end, delimiter.length);
-    if (!latex || (!display && !isLikelyInlineDollarMath(latex))) continue;
+    const numericOnly = !display && /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/u.test(latex.trim());
+    if (!latex || (!display && !numericOnly && !isLikelyInlineDollarMath(latex))) continue;
     if (!display
       && start.row !== end.row
       && !(/\\[A-Za-z]+|[_^=<>+*/-]/u.test(latex)
@@ -964,7 +1080,8 @@ function dollarDelimitedRegions(
       end,
       latex,
       quality: mathScore(latex) + (hasStrongUnicodeMath(latex) ? 3 : 0),
-      span: (end.row - start.row) * 10_000 + Math.max(1, end.index - start.index)
+      span: (end.row - start.row) * 10_000 + Math.max(1, end.index - start.index),
+      numericOnly
     };
   }
 
@@ -1018,7 +1135,27 @@ function dollarDelimitedRegions(
     }
   }
 
-  return pairs.map(({ start, end, latex }) => {
+  const usablePairs = display ? pairs : pairs.filter((pair) => {
+    if (!pair.numericOnly) return true;
+    const line = lines[pair.start.row] ?? "";
+    const standalone = pair.start.row === pair.end.row
+      && !line.slice(0, pair.start.index).trim()
+      && !line.slice(pair.end.index + delimiter.length).trim();
+    const hasRelatedMathSibling = pairs.some((other) => {
+      if (other === pair || other.numericOnly
+        || other.start.row !== pair.start.row || other.end.row !== pair.end.row) return false;
+      const between = other.end.index < pair.start.index
+        ? line.slice(other.end.index + delimiter.length, pair.start.index)
+        : pair.end.index < other.start.index
+          ? line.slice(pair.end.index + delimiter.length, other.start.index)
+          : "";
+      return /(?:approach(?:es|ing)?|tends?\s+to|equals?|near|towards?|接近|趋近|等于|为|到)/iu
+        .test(between);
+    });
+    return standalone || hasRelatedMathSibling;
+  });
+
+  return usablePairs.map(({ start, end, latex }) => {
     if (start.row === end.row && !display) {
       return trailingInlineRegion(
         lines,
@@ -1052,11 +1189,11 @@ function dollarDelimitedRegions(
 function hardWrappedDollarDisplay(
   lines: string[],
   startRow: number,
-  codeRanges: InlineCodeRange[]
+  protectedRanges: InlineCodeRange[]
 ): SemanticFormulaCandidate | undefined {
   const line = lines[startRow] ?? "";
   const openings = dollarDelimiterPositions(line, "$$")
-    .filter((position) => !overlapsInlineCode(position, position + 2, codeRanges));
+    .filter((position) => !overlapsProtected(position, position + 2, protectedRanges));
   if (openings.length % 2 === 0) return undefined;
   const start = openings.at(-1)!;
   const body = [line.slice(start + 2)];
@@ -1065,9 +1202,9 @@ function hardWrappedDollarDisplay(
     row < Math.min(lines.length, startRow + MAX_DISPLAY_BLOCK_ROWS + 1);
     row += 1) {
     const candidate = lines[row] ?? "";
-    const candidateCodeRanges = inlineCodeRanges(candidate);
+    const candidateProtectedRanges = inlineCodeRanges(candidate);
     const closings = dollarDelimiterPositions(candidate, "$$")
-      .filter((position) => !overlapsInlineCode(position, position + 2, candidateCodeRanges));
+      .filter((position) => !overlapsProtected(position, position + 2, candidateProtectedRanges));
     if (closings.length === 0) {
       body.push(candidate);
       continue;
@@ -1107,11 +1244,11 @@ function isLikelyInlineDollarMath(value: string): boolean {
       && /^[A-Za-z0-9\\{}()[\].,+*/=<>|^_-]+$/u.test(compact));
 }
 
-function bareBracketSegments(line: string, codeRanges: InlineCodeRange[]): DelimitedSegment[] {
+function bareBracketSegments(line: string, protectedRanges: InlineCodeRange[]): DelimitedSegment[] {
   const segments: DelimitedSegment[] = [];
   const stack: number[] = [];
   for (let index = 0; index < line.length; index += 1) {
-    if (overlapsInlineCode(index, index + 1, codeRanges)) continue;
+    if (overlapsProtected(index, index + 1, protectedRanges)) continue;
     if (line[index] === "[" && line[index - 1] !== "\\") {
       stack.push(index);
       continue;
@@ -1268,7 +1405,7 @@ function pendingDisplayRows(
       continue;
     }
     for (const index of dollarDelimiterPositions(lines[row] ?? "", "$$")) {
-      if (positionInInlineCode(index, context)) continue;
+      if (positionIsIgnored(index, 2, context)) continue;
       dollarOpening = dollarOpening ? undefined : { row, index };
     }
   }
@@ -1295,7 +1432,7 @@ function pendingDisplayRows(
       if (match.index === undefined
         || !DISPLAY_ENVIRONMENTS.has(match[2]!)
         || isEscapedAt(line, match.index)
-        || overlapsInlineCode(match.index, match.index + match[0].length, context.codeRanges)) {
+        || positionIsIgnored(match.index, match[0].length, context)) {
         continue;
       }
       if (match[1] === "begin") {
@@ -1415,7 +1552,10 @@ export function detectFormulas(lines: string[]): DetectedFormula[] {
     if (context.inCodeFence) continue;
     if (pendingRows[row]) continue;
     if (!trimmed) continue;
-    const codeRanges = context.codeRanges;
+    // A full HTML/verbatim line has no remaining terminal prose that can form
+    // a standalone or compatibility formula after delimiter scanning.
+    if (overlapsProtected(0, line.length, context.protectedRanges)) continue;
+    const protectedRanges = rangesIncludingComment(line, context);
 
     // Definition lists need group-level layout: the source TeX tokens have
     // different character widths, so independently overlaying each token
@@ -1472,7 +1612,7 @@ export function detectFormulas(lines: string[]): DetectedFormula[] {
       }
     }
 
-    for (const segment of bareBracketSegments(line, codeRanges)) {
+    for (const segment of bareBracketSegments(line, protectedRanges)) {
       const [startCol, endCol] = visualEnd(line, segment.start, segment.end);
       regions.push({
         startRow: row,
@@ -1503,9 +1643,9 @@ export function detectFormulas(lines: string[]): DetectedFormula[] {
     // and leave forms such as `(\mathbf E)` or `(x)`. Infer simple variables
     // only when the line has strong TeX, mathematical discourse, or repeated
     // variable-shaped groups; ordinary prose parentheses remain untouched.
-    const inferredSegments = inferredParenthesizedMath(line, codeRanges);
+    const inferredSegments = inferredParenthesizedMath(line, protectedRanges);
     for (const segment of inferredSegments) {
-      if (overlapsInlineCode(segment.start, segment.end, codeRanges)) continue;
+      if (overlapsProtected(segment.start, segment.end, protectedRanges)) continue;
       const [startCol, endCol] = visualEnd(line, segment.start, segment.end);
       if (loneDefinition
         && startCol === loneDefinition.startCol
