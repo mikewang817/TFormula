@@ -314,6 +314,19 @@ tformula --focus-key ctrl-f codex
 TFORMULA_FOCUS_KEY=none tformula claude
 ```
 
+## Agent 提示词模板
+
+TFormula 不需要任何 Agent 侧配置。如果你还希望 Agent 输出最容易被识别的公式
+形式——显式的 `\(...\)` 与 `\[...\]` 定界符、正文留在数学模式之外、只输出不含
+导言区的 TeX 片段——可以使用一份可选的提示词模板：
+
+[`docs/agent-prompt-template.zh-CN.md`](docs/agent-prompt-template.zh-CN.md)
+（[English](docs/agent-prompt-template.md)）
+
+把它复制到 `AGENTS.md`、`CLAUDE.md`、`GEMINI.md` 或 Agent 的自定义指令中即可。
+该模板由 [@CHENyiru3](https://github.com/CHENyiru3) 提供，来自其日常配合
+TFormula 使用的指令集。
+
 ## 科学 LaTeX 兼容性
 
 TFormula 使用一套固定、完全本地的 MathJax 科学公式配置，面向 CLI Agent

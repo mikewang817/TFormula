@@ -380,6 +380,21 @@ tformula --focus-key ctrl-f codex
 TFORMULA_FOCUS_KEY=none tformula claude
 ```
 
+## Agent prompt template
+
+TFormula needs no agent-side configuration. If you also want the agent to emit
+math in the form that is easiest to detect—explicit `\(...\)` and `\[...\]`
+delimiters, prose kept outside math mode, TeX fragments without a preamble—an
+optional prompt template is available:
+
+[`docs/agent-prompt-template.md`](docs/agent-prompt-template.md)
+([简体中文](docs/agent-prompt-template.zh-CN.md))
+
+Copy it into `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, or your agent's custom
+instructions. The template was contributed by
+[@CHENyiru3](https://github.com/CHENyiru3) from an instruction set already in
+daily use with TFormula.
+
 ## Scientific LaTeX compatibility
 
 TFormula uses a fixed, local MathJax profile aimed at formulas emitted by
