@@ -1613,11 +1613,16 @@ export class FormulaScreen {
       this.#relayoutPendingImageKeys.add(placement.imageKey);
       this.#placed.delete(anchor);
     }
+    // Retry and block state is keyed by anchor, so it obeys the same band. A
+    // formula that keeps failing outside the scrolled rows had its attempt
+    // counter reset by every frame of an animating TUI and therefore never
+    // reached the ceiling that turns a hopeless render into a block: one of the
+    // two mechanisms behind the unbounded retry loop of issue #4.
     for (const key of this.#placementRetries.keys()) {
-      if (key.startsWith("alternate:")) this.#placementRetries.delete(key);
+      if (this.#alternateKeyWasMoved(key, dirty)) this.#placementRetries.delete(key);
     }
     for (const key of this.#blockedPlacementKeys) {
-      if (key.startsWith("alternate:")) this.#blockedPlacementKeys.delete(key);
+      if (this.#alternateKeyWasMoved(key, dirty)) this.#blockedPlacementKeys.delete(key);
     }
     this.#alternateDirtyRows = undefined;
     this.#layoutVersion += 1;
@@ -2142,6 +2147,30 @@ export class FormulaScreen {
     const row = region.canvas.startRow + (source?.rowOffset ?? 0);
     const column = region.canvas.startCol + (source?.startCol ?? 0);
     return `${bufferType}:${viewportY + row}:${column}`;
+  }
+
+  /**
+   * Whether a `${anchor}|${fingerprint}` retry/block key names an alternate row
+   * a scroll could have moved. Kept beside #anchor() on purpose: the row is read
+   * straight back out of the string the method above writes, and a parallel copy
+   * carried in the map and the set would be a second source of truth that can
+   * only ever drift from the anchor the key is built from. An unrecognised shape
+   * counts as moved, which is the old, conservative all-keys clearing.
+   *
+   * The anchor's row is the topmost-leftmost source mask, not the canvas origin,
+   * so a canvas may reach rows this test ignores. That is not a gap: the canvas
+   * is part of the fingerprint, so a scroll that changes which blank rows a
+   * formula may borrow produces a different key and therefore a fresh ladder
+   * without any clearing here. A key that survives a scroll unchanged describes
+   * a formula whose source text and canvas both stayed put, and whose failure is
+   * reproducible — exactly the case that must keep counting toward the ceiling.
+   */
+  #alternateKeyWasMoved(key: string, dirty?: { start: number; end: number }): boolean {
+    if (!key.startsWith("alternate:")) return false;
+    if (!dirty) return true;
+    const row = Number(key.split(":", 3)[1]);
+    if (!Number.isInteger(row)) return true;
+    return row >= dirty.start && row <= dirty.end;
   }
 
   #regionIdentity(region: FormulaPlacementPlan): string {

@@ -96,6 +96,36 @@ class UnreadableMathRenderer extends FastMathRenderer {
   }
 }
 
+/** Degrade one formula while a co-resident one keeps rendering successfully. */
+class SelectiveUnreadableMathRenderer extends FastMathRenderer {
+  readonly attempts: string[] = [];
+  latex = "";
+
+  override async renderPlacement(
+    ...args: Parameters<MathRenderer["renderPlacement"]>
+  ): ReturnType<MathRenderer["renderPlacement"]> {
+    const [plan] = args;
+    this.attempts.push(plan.formula.latex);
+    const rendered = await super.renderPlacement(...args);
+    return plan.formula.latex === this.latex ? { ...rendered, fitScale: 0.2 } : rendered;
+  }
+}
+
+/** Fail one formula while a co-resident one keeps rendering successfully. */
+class SelectiveFailingMathRenderer extends FastMathRenderer {
+  readonly attempts: string[] = [];
+  latex = "";
+
+  override async renderPlacement(
+    ...args: Parameters<MathRenderer["renderPlacement"]>
+  ): ReturnType<MathRenderer["renderPlacement"]> {
+    const [plan] = args;
+    this.attempts.push(plan.formula.latex);
+    if (plan.formula.latex === this.latex) throw new Error("intentional render failure");
+    return super.renderPlacement(...args);
+  }
+}
+
 describe("FormulaScreen lifecycle", () => {
   it("reports a formula once after its first successful placement", async () => {
     const rendered: Array<{ latex: string; display: boolean; confidence: string }> = [];
@@ -2987,6 +3017,71 @@ describe("FormulaScreen lifecycle", () => {
       expect(repaints).not.toContain("a=d,d=i");
       expect(repaints).not.toContain("\x1b_Ga=t");
       expect(debug.filter((message) => message.startsWith("rendered "))).toHaveLength(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("keeps a blocked alternate formula blocked while a TUI repaints below it", async () => {
+    const debug: string[] = [];
+    const renderer = new SelectiveUnreadableMathRenderer();
+    renderer.latex = "b_1=2";
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 12,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined,
+      debug: (message) => debug.push(message)
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\nE=mc^2\r\n\\]\r\n\\[\r\nb_1=2\r\n\\]");
+      await screen.flushScan();
+      expect(debug.filter((message) => message.startsWith("kept raw TeX"))).toHaveLength(1);
+
+      renderer.attempts.length = 0;
+      for (let frame = 0; frame < 5; frame += 1) {
+        // The band an insert/delete-line pair dirties ends at the input row, so
+        // neither formula moved and the unreadable one is still unreadable.
+        await screen.write(`\x1b[11;1H\x1b[1L\x1b[1Minput ${frame}`);
+        await screen.flushScan();
+      }
+      expect(renderer.attempts).toEqual([]);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("lets an alternate retry ladder reach its ceiling outside the scrolled band", async () => {
+    const debug: string[] = [];
+    const renderer = new SelectiveFailingMathRenderer();
+    renderer.latex = "b_1=2";
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 12,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined,
+      debug: (message) => debug.push(message)
+    });
+    try {
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\nE=mc^2\r\n\\]\r\n\\[\r\nb_1=2\r\n\\]");
+      await screen.flushScan();
+
+      // Waiting out each 50/100/200/400/800 ms backoff between frames is what
+      // makes this the reported unbounded loop: an animating TUI keeps arriving
+      // while the ladder climbs. If a repaint below the formula resets its
+      // attempt counter, the sixth attempt never happens and this renderer is
+      // called forever at ~20 Hz for a formula that can never succeed.
+      for (let frame = 0; frame < 6; frame += 1) {
+        await screen.write(`\x1b[11;1H\x1b[1L\x1b[1Minput ${frame}`);
+        await screen.flushScan();
+        if (frame < 5) await new Promise((resolve) => setTimeout(resolve, 60 * 2 ** frame));
+      }
+      expect(debug).toContain("formula variant at alternate:3:0 exceeded the render retry limit");
+      expect(renderer.attempts.filter((latex) => latex === "b_1=2")).toHaveLength(6);
     } finally {
       screen.dispose();
     }
