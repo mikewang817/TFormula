@@ -576,7 +576,11 @@ export async function renderMathJaxSvg(
       }
     }
   } catch (error) {
-    if (error instanceof MathRenderError) {
+    // renderer-unavailable means typesetting never reached a verdict on the
+    // source. Caching it would answer every later attempt from the cache
+    // without running the engine, so the retry ladder it was deliberately
+    // left on could never reach the engine again for this key.
+    if (error instanceof MathRenderError && error.code !== "renderer-unavailable") {
       renderFailureCache.set(request.svgKey, error, error.message.length * 2 + 64);
     }
     throw error;
