@@ -1825,10 +1825,32 @@ export class FormulaScreen {
     if (placement.endMarker !== placement.startMarker) placement.endMarker?.dispose();
   }
 
+  /**
+   * Terminal images the budget can meaningfully be measured against.
+   *
+   * A relayout reservation says an image's fate is undecided until the running
+   * scan reconciles: it is either re-placed, and then a legitimate occupant, or
+   * gone, and then evicted on the spot. Counting it in the meantime makes the
+   * budget unreachable rather than merely exceeded, and #pruneDetachedPlacements
+   * answers an unreachable budget by shedding historical Ghostty pins in its
+   * while loop until it runs out of them — irreversibly, for a number that no
+   * eviction it is permitted to make can move. Deferring the count instead
+   * costs a few milliseconds over the cap.
+   */
+  #budgetedTerminalImages(): number {
+    let reservedIdle = 0;
+    for (const key of this.#relayoutPendingImageKeys) {
+      // A forced eviction ignores the reservation, so a reserved key can outlive
+      // its image; and an image re-placed by the running scan is already decided.
+      if (this.#terminalImages.get(key)?.placements === 0) reservedIdle += 1;
+    }
+    return this.#terminalImages.size - reservedIdle;
+  }
+
   #takeIdleTerminalImageEvictions(force = false): string[] {
     const excess = force
       ? this.#terminalImages.size
-      : this.#terminalImages.size - this.#maxTerminalImages;
+      : this.#budgetedTerminalImages() - this.#maxTerminalImages;
     if (excess <= 0) return [];
     const idle = Array.from(this.#terminalImages.entries())
       .filter(([key, image]) => image.placements === 0
@@ -1863,7 +1885,8 @@ export class FormulaScreen {
     enforceImageBudget = false
   ): number {
     if (this.#detachedPlacements.size <= targetSize
-      && (!enforceImageBudget || this.#terminalImages.size <= this.#maxTerminalImages)) return 0;
+      && (!enforceImageBudget
+        || this.#budgetedTerminalImages() <= this.#maxTerminalImages)) return 0;
 
     // Map insertion order is detach order. Delete the oldest Ghostty pins one
     // at a time, decrementing shared image references exactly once. Under the
@@ -1874,7 +1897,7 @@ export class FormulaScreen {
     let removed = 0;
     let removedImages = 0;
     while (this.#detachedPlacements.size > targetSize
-      || (enforceImageBudget && this.#terminalImages.size > this.#maxTerminalImages)) {
+      || (enforceImageBudget && this.#budgetedTerminalImages() > this.#maxTerminalImages)) {
       const placement = this.#detachedPlacements.values().next().value as
         | PlacedFormula
         | undefined;
@@ -2717,8 +2740,17 @@ export class FormulaScreen {
         // The screen is reconciled: every image a relayout unpinned has either
         // been re-placed or belongs to a formula that is genuinely gone, so
         // lift the eviction reservation before the budget is enforced again.
+        const reserved = this.#relayoutPendingImageKeys.size > 0;
         this.#relayoutPendingImageKeys.clear();
         this.#evictIdleTerminalImages();
+        // Detached pins are weighed against the budget only when a placement
+        // detaches, and one that detached during the reservation was weighed
+        // against a deferred count that nothing else would revisit. Run it after
+        // the idle sweep, never before: an unpinned upload is reclaimable, a
+        // historical Ghostty pin is the last copy of a formula in scrollback.
+        if (reserved && this.#detachedPlacements.size > 0) {
+          this.#pruneDetachedPlacements(this.#maxDetachedPlacements, false, true);
+        }
       }
     } finally {
       // A scan that never reached its reconciliation — disposed, layout
@@ -2735,7 +2767,12 @@ export class FormulaScreen {
         // the reservation is not enough on its own: without a sweep here,
         // nothing would enforce the image budget again until the output pauses
         // long enough for a scan to complete.
-        if (!this.#disposed) this.#evictIdleTerminalImages();
+        if (!this.#disposed) {
+          this.#evictIdleTerminalImages();
+          if (this.#detachedPlacements.size > 0) {
+            this.#pruneDetachedPlacements(this.#maxDetachedPlacements, false, true);
+          }
+        }
       }
       this.#scanning = false;
       for (const resolve of this.#scanWaiters.splice(0)) resolve();

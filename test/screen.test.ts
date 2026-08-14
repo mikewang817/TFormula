@@ -3191,6 +3191,55 @@ describe("FormulaScreen lifecycle", () => {
     }
   });
 
+  it("does not shed a scrollback pin for a budget a relayout reservation defers", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 20,
+      rows: 10,
+      capabilities,
+      scale: 1,
+      renderer: new FastMathRenderer(),
+      maxTerminalImages: 2,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      // A soft-wrapped formula: widening merges its row away and xterm disposes
+      // the markers, which is what later detaches it into a Ghostty-owned pin.
+      await screen.write("abcdefghijklmnopqrstuvwxyz0123$$E=mc^2$$\r\n");
+      await screen.flushScan();
+      const history = output.join("").match(/a=p,i=(\d+),p=(\d+)/u);
+      expect(history).toBeTruthy();
+
+      output.length = 0;
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\na^2+b^2\r\n\\]\r\n\\[\r\nc^3+d^3\r\n\\]");
+      await screen.flushScan();
+      expect(output.join("").match(/a=p,i=/gu)).toHaveLength(2);
+
+      output.length = 0;
+      // One scan now holds a relayout reservation over both alternate images and
+      // detaches the reflowed scrollback placement. While that reservation is
+      // held the budget of two cannot be reached by any eviction the sweep is
+      // allowed to make, and chasing it would delete the last copy of a formula
+      // the user can still scroll back to — moments before the two alternate
+      // formulas turn out to be gone and free their slots anyway.
+      screen.resize(80, 10);
+      await screen.write("\x1b[H\x1b[2Kplain\r\n\x1b[2K\r\n\x1b[2K\r\n\x1b[2K\r\n\x1b[2K\r\n\x1b[2K");
+      await screen.flushScan();
+      const relayout = output.join("");
+      expect(relayout).not.toContain(`a=d,d=i,i=${history![1]},p=${history![2]}`);
+      expect(relayout).not.toContain(`a=d,d=I,i=${history![1]}`);
+      expect(screen.markTerminalPlacementAccepted(
+        Number(history![1]),
+        Number(history![2])
+      )).toBe(true);
+      // Deferred, not abandoned: the reconciliation sweep still brings the
+      // budget back, using an upload no formula references any more.
+      expect(relayout.match(/a=d,d=I/gu)).toHaveLength(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it("does not evict an on-screen image while a relayout re-places it", async () => {
     const output: string[] = [];
     const screen = new FormulaScreen({
