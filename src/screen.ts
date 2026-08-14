@@ -2311,19 +2311,6 @@ export class FormulaScreen {
             background: currentPresentation.background
           };
         }
-        const fingerprint = createHash("sha1").update(JSON.stringify({
-          formula: plan.formula,
-          canvas: plan.canvas,
-          mode: plan.mode,
-          estimatedQuality: plan.estimatedQuality,
-          displayRange: plan.displayRange,
-          composite: plan.composite,
-          sourceMasks: plan.sourceMasks,
-          formulaSlices: plan.formulaSlices,
-          colors: renderColors,
-          cell: this.#capabilities.cell,
-          scale: this.#scale
-        })).digest("hex");
         let replacement = this.#replacementForRegion(
           anchor,
           region,
@@ -2354,6 +2341,29 @@ export class FormulaScreen {
           claimedReplacementAnchors.add(replacement.anchor);
           retainedReplacementAnchors.add(replacement.anchor);
         }
+        // Only the retention bookkeeping above has to precede this test. A
+        // source blocked at some other geometry can still own a correct image
+        // here, and the sweep at the end of the scan deletes every placement
+        // that was not retained; past that point a blocked source needs
+        // nothing else from this iteration. Leaving before the plan
+        // fingerprint is what keeps a repainting TUI from hashing the full
+        // source, masks and slices of a formula it has already given up on,
+        // once per frame.
+        const unparseableKey = this.#unparseableFormulaKey(plan);
+        if (this.#unparseableFormulaKeys.has(unparseableKey)) continue;
+        const fingerprint = createHash("sha1").update(JSON.stringify({
+          formula: plan.formula,
+          canvas: plan.canvas,
+          mode: plan.mode,
+          estimatedQuality: plan.estimatedQuality,
+          displayRange: plan.displayRange,
+          composite: plan.composite,
+          sourceMasks: plan.sourceMasks,
+          formulaSlices: plan.formulaSlices,
+          colors: renderColors,
+          cell: this.#capabilities.cell,
+          scale: this.#scale
+        })).digest("hex");
         if (replacement?.anchor === anchor
           && existing?.fingerprint === fingerprint
           && existing.resizeGeneration === this.#resizeGeneration
@@ -2367,8 +2377,6 @@ export class FormulaScreen {
         }
         const placementRetryKey = `${anchor}|${fingerprint}`;
         if (this.#blockedPlacementKeys.has(placementRetryKey)) continue;
-        const unparseableKey = this.#unparseableFormulaKey(plan);
-        if (this.#unparseableFormulaKeys.has(unparseableKey)) continue;
         const stabilityKey = this.#formulaStabilityKey(region, viewportY, bufferType);
         if (!existing) {
           observedStabilityKeys.add(stabilityKey);

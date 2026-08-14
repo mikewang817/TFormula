@@ -3220,6 +3220,49 @@ describe("FormulaScreen unparseable formulas", () => {
     }
   });
 
+  it("stops fingerprinting the plan of a formula it has already blocked", async () => {
+    // Skipping the render is only half of what the blocklist is for: the scan
+    // also has to stop hashing the full source, masks and slices of a formula
+    // it has given up on, at the TUI's repaint rate. The fingerprint is the
+    // only place a placement plan is serialized, so counting those
+    // serializations measures exactly that.
+    const renderer = new CountingFailureMathRenderer(parseFailure);
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined
+    });
+    const stringify = JSON.stringify;
+    let planFingerprints = 0;
+    JSON.stringify = ((value: unknown, ...rest: unknown[]): string => {
+      if (value && typeof value === "object" && "estimatedQuality" in value) {
+        planFingerprints += 1;
+      }
+      return (stringify as (...args: unknown[]) => string)(value, ...rest);
+    }) as typeof JSON.stringify;
+    try {
+      await screen.write("\x1b[?1049h\x1b[H\\[\r\nE=mc^2\r\n\\]");
+      await screen.flushScan();
+      expect(renderer.calls).toBe(1);
+      // The first attempt has to fingerprint: nothing is known about the
+      // source until its render fails.
+      const afterFirstScan = planFingerprints;
+      expect(afterFirstScan).toBeGreaterThan(0);
+
+      for (let repaint = 0; repaint < 5; repaint += 1) {
+        await repaintAlternateFrame(screen);
+      }
+      expect(renderer.calls).toBe(1);
+      expect(planFingerprints).toBe(afterFirstScan);
+    } finally {
+      JSON.stringify = stringify;
+      screen.dispose();
+    }
+  });
+
   it("still retries a rasterizer failure, which a later render can clear", async () => {
     // raster-error reports a crashed or timed-out rasterizer process rather than
     // a verdict on the source, so it must not enter the content-keyed set.
