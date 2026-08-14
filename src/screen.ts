@@ -2698,7 +2698,16 @@ export class FormulaScreen {
       // outside the eviction budget and grow #terminalImages without bound.
       // Dropping the reservation costs at most one re-upload of a formula
       // whose scan was interrupted anyway; the budget is never negotiable.
-      this.#relayoutPendingImageKeys.clear();
+      if (this.#relayoutPendingImageKeys.size > 0) {
+        this.#relayoutPendingImageKeys.clear();
+        // A continuously redrawing TUI bumps #layoutVersion every frame, which
+        // breaks the placement loop at its top guard before either the
+        // per-placement evictions or the reconciliation sweep can run. Lifting
+        // the reservation is not enough on its own: without a sweep here,
+        // nothing would enforce the image budget again until the output pauses
+        // long enough for a scan to complete.
+        if (!this.#disposed) this.#evictIdleTerminalImages();
+      }
       this.#scanning = false;
       for (const resolve of this.#scanWaiters.splice(0)) resolve();
       if (!this.#disposed && (this.#rescanRequested || version !== this.#scanVersion)) {

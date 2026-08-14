@@ -3160,12 +3160,16 @@ describe("FormulaScreen lifecycle", () => {
       screen.invalidateLayout();
       renderer.release?.();
       await scan;
+      // Releasing the reservation is not enough: an Ink-style TUI bumps the
+      // layout version every frame, so no later scan reaches its reconciliation
+      // sweep either. The aborted scan has to enforce the budget itself.
+      expect(output.join("").match(/a=d,d=I/gu)).toHaveLength(1);
 
       output.length = 0;
-      // Origin mode makes every later scan return before it can reconcile, so
-      // only the reservation decides whether the budget is enforced here.
+      // Origin mode makes every later scan return before it can reconcile, and
+      // there is nothing over the budget left for one to shed.
       await screen.write("\x1b[?6h");
-      expect(output.join("").match(/a=d,d=I/gu)).toHaveLength(1);
+      expect(output.join("")).not.toContain("a=d,d=I");
     } finally {
       screen.dispose();
     }
