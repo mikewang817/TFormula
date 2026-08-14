@@ -3278,7 +3278,38 @@ describe("FormulaScreen unparseable formulas", () => {
     }
   });
 
-  it("keeps an unparseable formula blocked across a resize and a scale change", async () => {
+  it("keeps a canonical-width formula blocked across a resize and a scale change", async () => {
+    // An inline formula is always typeset at the canonical container width, so
+    // neither geometry nor scale can change what MathJax makes of it.
+    const renderer = new CountingFailureMathRenderer(parseFailure);
+    const screen = new FormulaScreen({
+      cols: 80,
+      rows: 8,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined
+    });
+    try {
+      await screen.write("\x1b[2J\x1b[Hbefore $E=mc^2$ after");
+      await screen.flushScan();
+      expect(renderer.calls).toBe(1);
+
+      screen.resize(60, 12);
+      await screen.flushScan();
+      screen.setScale(1.5);
+      await screen.flushScan();
+      expect(renderer.calls).toBe(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("retries a linebroken display formula at a container width it has not failed at", async () => {
+    // A multi-row display formula is linebroken to its region, so its width is
+    // one of MathJax's inputs: a source that fails only because it could not be
+    // broken into a narrow pane has to be attempted again when the pane widens.
+    // Repaints at an unchanged geometry must still cost nothing.
     const renderer = new CountingFailureMathRenderer(parseFailure);
     const screen = new FormulaScreen({
       cols: 80,
@@ -3293,11 +3324,22 @@ describe("FormulaScreen unparseable formulas", () => {
       await screen.flushScan();
       expect(renderer.calls).toBe(1);
 
+      for (let repaint = 0; repaint < 5; repaint += 1) {
+        await screen.write("\x1b[2J\x1b[H\\[\r\nE=mc^2\r\n\\]");
+        await screen.flushScan();
+      }
+      expect(renderer.calls).toBe(1);
+
       screen.resize(60, 12);
       await screen.flushScan();
-      screen.setScale(1.5);
-      await screen.flushScan();
-      expect(renderer.calls).toBe(1);
+      expect(renderer.calls).toBe(2);
+
+      // ...and the new width is blocked in its turn.
+      for (let repaint = 0; repaint < 5; repaint += 1) {
+        await screen.write("\x1b[2J\x1b[H\\[\r\nE=mc^2\r\n\\]");
+        await screen.flushScan();
+      }
+      expect(renderer.calls).toBe(2);
     } finally {
       screen.dispose();
     }

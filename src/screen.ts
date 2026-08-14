@@ -9,7 +9,12 @@ import type {
 } from "@xterm/headless";
 import { containsFormulaTrigger, MAX_DISPLAY_BLOCK_ROWS } from "./detect.js";
 import { planFormulaPlacements } from "./formula-layout.js";
-import { MathRenderError, MathRenderer, type MathRenderFailureCode } from "./math-renderer.js";
+import {
+  mathJaxContainerWidthForPlacement,
+  MathRenderError,
+  MathRenderer,
+  type MathRenderFailureCode
+} from "./math-renderer.js";
 import {
   cursorPosition,
   kittyDeleteByZIndex,
@@ -2090,13 +2095,22 @@ export class FormulaScreen {
   }
 
   /**
-   * Identify a formula by everything MathJax parsing depends on: the source
-   * text and whether it is typeset in display mode. Geometry, colours and scale
-   * are deliberately excluded, unlike the placement fingerprint, so a repainted
-   * TUI frame reuses the key instead of minting a new one.
+   * Identify a formula by everything MathJax typesetting depends on: the source
+   * text, whether it is typeset in display mode, and the container width. The
+   * width is canonical for everything except a multi-row, non-sliced display
+   * formula, which MathJax linebreaks to the region — a source that fails only
+   * because it could not be broken into a narrow pane must be retried when the
+   * pane widens, rather than staying raw for the rest of the session. Colours
+   * and the exact anchor are excluded, unlike the placement fingerprint, so a
+   * repainted TUI frame reuses the key instead of minting a new one.
    */
   #unparseableFormulaKey(region: FormulaPlacementPlan): string {
-    return `${region.formula.intent !== "inline" ? "display" : "inline"}|${
+    const containerWidth = mathJaxContainerWidthForPlacement(
+      region,
+      this.#capabilities,
+      this.#scale
+    );
+    return `${region.formula.intent !== "inline" ? "display" : "inline"}|${containerWidth}|${
       createHash("sha1").update(region.formula.latex).digest("hex")
     }`;
   }

@@ -576,6 +576,75 @@ export async function renderMathJaxMathMl(
   return mathml;
 }
 
+interface PlacementGeometry {
+  columns: number;
+  rows: number;
+  display: boolean;
+  wrapSegments: FormulaPlacementPlan["formulaSlices"] | undefined;
+  logicalColumns: number;
+  horizontallySliced: boolean;
+  tightInline: boolean;
+}
+
+function placementGeometry(plan: FormulaPlacementPlan): PlacementGeometry {
+  const columns = Math.max(1, plan.canvas.endCol - plan.canvas.startCol);
+  const rows = Math.max(1, plan.canvas.endRow - plan.canvas.startRow + 1);
+  const display = plan.formula.intent !== "inline";
+  const wrapSegments = plan.formulaSlices.length ? plan.formulaSlices : undefined;
+  const segmentLogicalColumns = wrapSegments
+    ? Math.max(...wrapSegments.map((segment) =>
+      segment.logicalStartCol + segment.endCol - segment.startCol
+    ))
+    : 0;
+  const logicalColumns = plan.displayRange
+    ? Math.max(1, plan.displayRange.endCol - plan.displayRange.startCol)
+    : wrapSegments
+    ? Math.max(1, segmentLogicalColumns)
+    : columns;
+  return {
+    columns,
+    rows,
+    display,
+    wrapSegments,
+    logicalColumns,
+    horizontallySliced: Boolean(wrapSegments),
+    tightInline: !display
+      && rows === 1
+      && plan.mode === "compact"
+      && plan.sourceMasks.length === 0
+      && !wrapSegments
+      && !plan.displayRange
+  };
+}
+
+/**
+ * The MathJax container width a placement is typeset at, normalized exactly as
+ * the SVG cache key normalizes it. Display formulas that wrap derive it from
+ * the region geometry and scale, so callers that identify a render by its
+ * MathJax inputs need this alongside the source and the display flag.
+ */
+export function mathJaxContainerWidthForPlacement(
+  plan: FormulaPlacementPlan,
+  capabilities: TerminalCapabilities,
+  scale: number
+): number {
+  const { display, rows, horizontallySliced, logicalColumns } = placementGeometry(plan);
+  // A one-row TUI region has no vertical space for MathJax's line boxes and
+  // can become less legible when several lines are compressed back into it.
+  // Multi-row, non-segmented displays can use their reserved height safely.
+  const linebreakDisplay = display && !horizontallySliced && rows > 1;
+  if (!linebreakDisplay) return CANONICAL_CONTAINER_WIDTH;
+  const availableWidthPx = Math.max(
+    1,
+    logicalColumns * capabilities.cell.width - capabilities.cell.width * 2
+  );
+  const targetExPx = capabilities.cell.height * 0.45 * scale;
+  return normalizedContainerWidth(
+    display,
+    Math.max(1, availableWidthPx * MATHJAX_EX_PX / targetExPx)
+  );
+}
+
 export class MathRenderer {
   readonly #cache = new WeightedLruCache<RenderedFormula>(
     256,
@@ -591,39 +660,20 @@ export class MathRenderer {
     foreground = capabilities.foreground,
     background = capabilities.background
   ): Promise<RenderedFormula> {
-    const columns = Math.max(1, plan.canvas.endCol - plan.canvas.startCol);
-    const rows = Math.max(1, plan.canvas.endRow - plan.canvas.startRow + 1);
-    const display = plan.formula.intent !== "inline";
-    const wrapSegments = plan.formulaSlices.length ? plan.formulaSlices : undefined;
-    const segmentLogicalColumns = wrapSegments
-      ? Math.max(...wrapSegments.map((segment) =>
-        segment.logicalStartCol + segment.endCol - segment.startCol
-      ))
-      : 0;
-    const logicalColumns = plan.displayRange
-      ? Math.max(1, plan.displayRange.endCol - plan.displayRange.startCol)
-      : wrapSegments
-      ? Math.max(1, segmentLogicalColumns)
-      : columns;
-    const horizontallySliced = Boolean(wrapSegments);
-    const tightInline = !display
-      && rows === 1
-      && plan.mode === "compact"
-      && plan.sourceMasks.length === 0
-      && !wrapSegments
-      && !plan.displayRange;
-    // A one-row TUI region has no vertical space for MathJax's line boxes and
-    // can become less legible when several lines are compressed back into it.
-    // Multi-row, non-segmented displays can use their reserved height safely.
-    const linebreakDisplay = display && !horizontallySliced && rows > 1;
-    const availableWidthPx = Math.max(
-      1,
-      logicalColumns * capabilities.cell.width - capabilities.cell.width * 2
+    const {
+      columns,
+      rows,
+      display,
+      wrapSegments,
+      logicalColumns,
+      horizontallySliced,
+      tightInline
+    } = placementGeometry(plan);
+    const mathJaxContainerWidth = mathJaxContainerWidthForPlacement(
+      plan,
+      capabilities,
+      scale
     );
-    const targetExPx = capabilities.cell.height * 0.45 * scale;
-    const mathJaxContainerWidth = linebreakDisplay
-      ? Math.max(1, availableWidthPx * MATHJAX_EX_PX / targetExPx)
-      : CANONICAL_CONTAINER_WIDTH;
     const { svgKey } = mathJaxCacheRequest(
       plan.formula.latex,
       display,
