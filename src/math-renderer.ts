@@ -34,6 +34,10 @@ export type MathRenderFailureCode =
   | "disabled-command"
   | "tex-error"
   | "invalid-svg"
+  // Typesetting never reached a verdict on the source: the MathJax module
+  // failed to load, or the engine itself threw. Kept distinct from tex-error
+  // so callers can treat that code as a property of the LaTeX alone.
+  | "renderer-unavailable"
   | "raster-limit"
   | "empty-raster"
   | "png-limit"
@@ -530,9 +534,16 @@ export async function renderMathJaxSvg(
       return serialized;
     } catch (error) {
       if (error instanceof MathRenderError) throw error;
+      // Everything the source can be blamed for is already a MathRenderError
+      // by this point: safeLatex() classifies the input and
+      // assertValidMathJaxSvg() classifies the output. What is left is the
+      // engine failing to run at all — a rejected `import("@mathjax/src")`, or
+      // a RangeError out of tex2svgPromise under memory pressure. Those say
+      // nothing about the formula and can succeed on the next attempt, so they
+      // must not carry a source verdict's code.
       throw new MathRenderError(
-        "tex-error",
-        `MathJax could not parse the formula: ${error instanceof Error ? error.message : String(error)}`
+        "renderer-unavailable",
+        `the MathJax renderer failed: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   };
@@ -550,8 +561,19 @@ export async function renderMathJaxSvg(
     } catch {
       await cache.deleteSvg(request.svgKey);
       const repaired = await cache.getOrCreateSvg(request.svgKey, create);
-      assertValidMathJaxSvg(repaired);
-      return repaired;
+      try {
+        assertValidMathJaxSvg(repaired);
+        return repaired;
+      } catch {
+        // create() validates before it returns, so a value that fails here
+        // cannot have come from it: the disk cache is shared between
+        // processes, and a peer restored the same bad entry between the delete
+        // and the read. That is a cache-coherence fault, not a verdict on the
+        // source, and reporting it as one would retire a formula that typesets
+        // perfectly well. Typeset directly instead, letting create() throw the
+        // true failure code if the source really is at fault.
+        return await create();
+      }
     }
   } catch (error) {
     if (error instanceof MathRenderError) {

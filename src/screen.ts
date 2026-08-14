@@ -95,7 +95,11 @@ const MAX_UNPARSEABLE_FORMULAS = 4_096;
  * deliberately absent: raster-limit, empty-raster and png-limit depend on the
  * canvas geometry, cell metrics and scale rather than the source, and
  * raster-error reports a crashed or timed-out rasterizer process, which a
- * retry can legitimately clear.
+ * retry can legitimately clear. renderer-unavailable is absent for the same
+ * reason: it reports MathJax failing to run rather than failing on the input,
+ * so it must keep its place on the retry ladder. Membership here is permanent
+ * for the session, so a code only belongs if it is reproducible from the
+ * source; anything a second attempt could clear must stay out.
  */
 const SOURCE_DETERMINED_RENDER_FAILURES = new Set<MathRenderFailureCode>([
   "input-too-long",
