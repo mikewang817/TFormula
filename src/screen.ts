@@ -2191,8 +2191,15 @@ export class FormulaScreen {
   #alternateKeyWasMoved(key: string, dirty?: { start: number; end: number }): boolean {
     if (!key.startsWith("alternate:")) return false;
     if (!dirty) return true;
-    const row = Number(key.split(":", 3)[1]);
-    if (!Number.isInteger(row)) return true;
+    // Digits rather than Number.isInteger: Number("") and Number(" ") are 0, so
+    // a degenerate "alternate:" key read as row 0 and was cleared only when the
+    // band happened to start there, instead of taking the conservative branch
+    // this guard exists to provide. "1e3" and "0x10" pass isInteger too. What
+    // #anchor() writes is `${nonNegativeInteger}`, which never takes any of
+    // those forms, so no key a scan can produce changes branch here.
+    const rowText = key.split(":", 3)[1];
+    if (!/^\d+$/.test(rowText)) return true;
+    const row = Number(rowText);
     return row >= dirty.start && row <= dirty.end;
   }
 
