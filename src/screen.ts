@@ -2690,6 +2690,16 @@ export class FormulaScreen {
           // MathJax or terminal-graphics failure.
           const attempt = (this.#placementRetries.get(placementRetryKey)?.attempt ?? 0) + 1;
           if (attempt > 5) {
+            // Row-precise relayout clearing is what makes this ceiling
+            // reachable on the alternate screen. Every scroll used to reset the
+            // ladder of every alternate key, so a repainting TUI holding at
+            // least one placed formula retried a failing one without bound. A
+            // formula the dirty band does not cover now keeps its count, and
+            // its five attempts become a real budget: spending them leaves raw
+            // source at that position until a later scroll does cover the row
+            // -- an unrecognisable scroll shape still dirties every row -- or
+            // until resize(), DECSET 1049 re-entering the alternate screen,
+            // DECRST 1047 leaving it, or a clear/ED-2.
             this.#placementRetries.delete(placementRetryKey);
             this.#blockedPlacementKeys.add(placementRetryKey);
             this.#debug(`formula variant at ${anchor} exceeded the render retry limit`);
