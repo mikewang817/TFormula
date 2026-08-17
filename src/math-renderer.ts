@@ -528,7 +528,17 @@ export async function renderMathJaxSvg(
       });
       const adaptor = mathJax.startup.adaptor;
       const svgNode = adaptor.tags(node, "svg")[0];
-      if (!svgNode) throw new MathRenderError("invalid-svg", "MathJax produced no SVG");
+      // A typeset that returns no <svg> root is a misbuilt engine, not a
+      // miswritten formula: output/svg missing from the loader, or an adaptor
+      // that does not match the output jax. Raise it as a plain Error so the
+      // catch below classifies it with the other engine faults. Naming it
+      // invalid-svg would put it on SOURCE_DETERMINED_RENDER_FAILURES, which
+      // retires the LaTeX for the whole session on the first occurrence.
+      if (!svgNode) {
+        throw new Error(
+          "the engine returned a node with no <svg> root; output/svg may be missing or the adaptor mismatched"
+        );
+      }
       const serialized = adaptor.serializeXML(svgNode);
       assertValidMathJaxSvg(serialized);
       return serialized;
@@ -537,10 +547,11 @@ export async function renderMathJaxSvg(
       // Everything the source can be blamed for is already a MathRenderError
       // by this point: safeLatex() classifies the input and
       // assertValidMathJaxSvg() classifies the output. What is left is the
-      // engine failing to run at all — a rejected `import("@mathjax/src")`, or
-      // a RangeError out of tex2svgPromise under memory pressure. Those say
-      // nothing about the formula and can succeed on the next attempt, so they
-      // must not carry a source verdict's code.
+      // engine failing to run at all — a rejected `import("@mathjax/src")`, a
+      // RangeError out of tex2svgPromise under memory pressure, or a typeset
+      // that hands back no <svg> root. Those say nothing about the formula and
+      // can succeed on the next attempt, so they must not carry a source
+      // verdict's code.
       throw new MathRenderError(
         "renderer-unavailable",
         `the MathJax renderer failed: ${error instanceof Error ? error.message : String(error)}`
