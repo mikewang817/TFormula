@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as pty from "node-pty";
 import { describe, expect, it } from "vitest";
+import { ptyEnvironment } from "./pty-environment.js";
 
 const ESC = "\x1b";
 const ST = `${ESC}\\`;
@@ -14,11 +15,9 @@ describe("reader pseudo-terminal integration", () => {
     const document = join(directory, "live.md");
     const staged = join(directory, ".live.md.tmp");
     await writeFile(document, "# Initial live document\n\nFirst body.\n");
-    const environment = {
-      ...process.env,
+    const environment = ptyEnvironment({
       TERM: "xterm-256color"
-    } as Record<string, string>;
-    delete environment.TFORMULA_ACTIVE;
+    });
 
     let transcript = "";
     let replacementStarted = false;
@@ -76,12 +75,10 @@ describe("reader pseudo-terminal integration", () => {
     const directory = await mkdtemp(join(tmpdir(), "tformula-reader-e2e-"));
     const image = join(directory, "image.png");
     await copyFile(join(process.cwd(), "assets", "tformula-maxwell.png"), image);
-    const environment = {
-      ...process.env,
+    const environment = ptyEnvironment({
       TERM: "xterm-ghostty",
       TERM_PROGRAM: "ghostty"
-    } as Record<string, string>;
-    delete environment.TFORMULA_ACTIVE;
+    });
 
     let transcript = "";
     let handshakeSent = false;
