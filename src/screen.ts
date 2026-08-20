@@ -1649,11 +1649,16 @@ export class FormulaScreen {
       this.#relayoutPendingImageKeys.add(placement.imageKey);
       this.#placed.delete(anchor);
     }
+    // Retry and block state is keyed by anchor, so it obeys the same band. A
+    // formula that keeps failing outside the scrolled rows had its attempt
+    // counter reset by every frame of an animating TUI and therefore never
+    // reached the ceiling that turns a hopeless render into a block: one of the
+    // two mechanisms behind the unbounded retry loop of issue #4.
     for (const key of this.#placementRetries.keys()) {
-      if (key.startsWith("alternate:")) this.#placementRetries.delete(key);
+      if (this.#alternateKeyWasMoved(key, dirty)) this.#placementRetries.delete(key);
     }
     for (const key of this.#blockedPlacementKeys) {
-      if (key.startsWith("alternate:")) this.#blockedPlacementKeys.delete(key);
+      if (this.#alternateKeyWasMoved(key, dirty)) this.#blockedPlacementKeys.delete(key);
     }
     this.#alternateDirtyRows = undefined;
     this.#layoutVersion += 1;
@@ -1856,10 +1861,32 @@ export class FormulaScreen {
     if (placement.endMarker !== placement.startMarker) placement.endMarker?.dispose();
   }
 
+  /**
+   * Terminal images the budget can meaningfully be measured against.
+   *
+   * A relayout reservation says an image's fate is undecided until the running
+   * scan reconciles: it is either re-placed, and then a legitimate occupant, or
+   * gone, and then evicted on the spot. Counting it in the meantime makes the
+   * budget unreachable rather than merely exceeded, and #pruneDetachedPlacements
+   * answers an unreachable budget by shedding historical Ghostty pins in its
+   * while loop until it runs out of them — irreversibly, for a number that no
+   * eviction it is permitted to make can move. Deferring the count instead
+   * costs a few milliseconds over the cap.
+   */
+  #budgetedTerminalImages(): number {
+    let reservedIdle = 0;
+    for (const key of this.#relayoutPendingImageKeys) {
+      // A forced eviction ignores the reservation, so a reserved key can outlive
+      // its image; and an image re-placed by the running scan is already decided.
+      if (this.#terminalImages.get(key)?.placements === 0) reservedIdle += 1;
+    }
+    return this.#terminalImages.size - reservedIdle;
+  }
+
   #takeIdleTerminalImageEvictions(force = false): string[] {
     const excess = force
       ? this.#terminalImages.size
-      : this.#terminalImages.size - this.#maxTerminalImages;
+      : this.#budgetedTerminalImages() - this.#maxTerminalImages;
     if (excess <= 0) return [];
     const idle = Array.from(this.#terminalImages.entries())
       .filter(([key, image]) => image.placements === 0
@@ -1894,7 +1921,8 @@ export class FormulaScreen {
     enforceImageBudget = false
   ): number {
     if (this.#detachedPlacements.size <= targetSize
-      && (!enforceImageBudget || this.#terminalImages.size <= this.#maxTerminalImages)) return 0;
+      && (!enforceImageBudget
+        || this.#budgetedTerminalImages() <= this.#maxTerminalImages)) return 0;
 
     // Map insertion order is detach order. Delete the oldest Ghostty pins one
     // at a time, decrementing shared image references exactly once. Under the
@@ -1905,7 +1933,7 @@ export class FormulaScreen {
     let removed = 0;
     let removedImages = 0;
     while (this.#detachedPlacements.size > targetSize
-      || (enforceImageBudget && this.#terminalImages.size > this.#maxTerminalImages)) {
+      || (enforceImageBudget && this.#budgetedTerminalImages() > this.#maxTerminalImages)) {
       const placement = this.#detachedPlacements.values().next().value as
         | PlacedFormula
         | undefined;
@@ -2178,6 +2206,37 @@ export class FormulaScreen {
     const row = region.canvas.startRow + (source?.rowOffset ?? 0);
     const column = region.canvas.startCol + (source?.startCol ?? 0);
     return `${bufferType}:${viewportY + row}:${column}`;
+  }
+
+  /**
+   * Whether a `${anchor}|${fingerprint}` retry/block key names an alternate row
+   * a scroll could have moved. Kept beside #anchor() on purpose: the row is read
+   * straight back out of the string the method above writes, and a parallel copy
+   * carried in the map and the set would be a second source of truth that can
+   * only ever drift from the anchor the key is built from. An unrecognised shape
+   * counts as moved, which is the old, conservative all-keys clearing.
+   *
+   * The anchor's row is the topmost-leftmost source mask, not the canvas origin,
+   * so a canvas may reach rows this test ignores. That is not a gap: the canvas
+   * is part of the fingerprint, so a scroll that changes which blank rows a
+   * formula may borrow produces a different key and therefore a fresh ladder
+   * without any clearing here. A key that survives a scroll unchanged describes
+   * a formula whose source text and canvas both stayed put, and whose failure is
+   * reproducible — exactly the case that must keep counting toward the ceiling.
+   */
+  #alternateKeyWasMoved(key: string, dirty?: { start: number; end: number }): boolean {
+    if (!key.startsWith("alternate:")) return false;
+    if (!dirty) return true;
+    // Digits rather than Number.isInteger: Number("") and Number(" ") are 0, so
+    // a degenerate "alternate:" key read as row 0 and was cleared only when the
+    // band happened to start there, instead of taking the conservative branch
+    // this guard exists to provide. "1e3" and "0x10" pass isInteger too. What
+    // #anchor() writes is `${nonNegativeInteger}`, which never takes any of
+    // those forms, so no key a scan can produce changes branch here.
+    const rowText = key.split(":", 3)[1];
+    if (!/^\d+$/.test(rowText)) return true;
+    const row = Number(rowText);
+    return row >= dirty.start && row <= dirty.end;
   }
 
   #regionIdentity(region: FormulaPlacementPlan): string {
@@ -2721,6 +2780,16 @@ export class FormulaScreen {
           }
           const attempt = (this.#placementRetries.get(placementRetryKey)?.attempt ?? 0) + 1;
           if (attempt > 5) {
+            // Row-precise relayout clearing is what makes this ceiling
+            // reachable on the alternate screen. Every scroll used to reset the
+            // ladder of every alternate key, so a repainting TUI holding at
+            // least one placed formula retried a failing one without bound. A
+            // formula the dirty band does not cover now keeps its count, and
+            // its five attempts become a real budget: spending them leaves raw
+            // source at that position until a later scroll does cover the row
+            // -- an unrecognisable scroll shape still dirties every row -- or
+            // until resize(), DECSET 1049 re-entering the alternate screen,
+            // DECRST 1047 leaving it, or a clear/ED-2.
             this.#placementRetries.delete(placementRetryKey);
             this.#blockedPlacementKeys.add(placementRetryKey);
             this.#debug(`formula variant at ${anchor} exceeded the render retry limit`);
@@ -2778,8 +2847,17 @@ export class FormulaScreen {
         // The screen is reconciled: every image a relayout unpinned has either
         // been re-placed or belongs to a formula that is genuinely gone, so
         // lift the eviction reservation before the budget is enforced again.
+        const reserved = this.#relayoutPendingImageKeys.size > 0;
         this.#relayoutPendingImageKeys.clear();
         this.#evictIdleTerminalImages();
+        // Detached pins are weighed against the budget only when a placement
+        // detaches, and one that detached during the reservation was weighed
+        // against a deferred count that nothing else would revisit. Run it after
+        // the idle sweep, never before: an unpinned upload is reclaimable, a
+        // historical Ghostty pin is the last copy of a formula in scrollback.
+        if (reserved && this.#detachedPlacements.size > 0) {
+          this.#pruneDetachedPlacements(this.#maxDetachedPlacements, false, true);
+        }
       }
     } finally {
       // A scan that never reached its reconciliation — disposed, layout
@@ -2796,7 +2874,12 @@ export class FormulaScreen {
         // the reservation is not enough on its own: without a sweep here,
         // nothing would enforce the image budget again until the output pauses
         // long enough for a scan to complete.
-        if (!this.#disposed) this.#evictIdleTerminalImages();
+        if (!this.#disposed) {
+          this.#evictIdleTerminalImages();
+          if (this.#detachedPlacements.size > 0) {
+            this.#pruneDetachedPlacements(this.#maxDetachedPlacements, false, true);
+          }
+        }
       }
       this.#scanning = false;
       for (const resolve of this.#scanWaiters.splice(0)) resolve();
