@@ -34,6 +34,10 @@ export type MathRenderFailureCode =
   | "disabled-command"
   | "tex-error"
   | "invalid-svg"
+  // Typesetting never reached a verdict on the source: the MathJax module
+  // failed to load, or the engine itself threw. Kept distinct from tex-error
+  // so callers can treat that code as a property of the LaTeX alone.
+  | "renderer-unavailable"
   | "raster-limit"
   | "empty-raster"
   | "png-limit"
@@ -524,15 +528,33 @@ export async function renderMathJaxSvg(
       });
       const adaptor = mathJax.startup.adaptor;
       const svgNode = adaptor.tags(node, "svg")[0];
-      if (!svgNode) throw new MathRenderError("invalid-svg", "MathJax produced no SVG");
+      // A typeset that returns no <svg> root is a misbuilt engine, not a
+      // miswritten formula: output/svg missing from the loader, or an adaptor
+      // that does not match the output jax. Raise it as a plain Error so the
+      // catch below classifies it with the other engine faults. Naming it
+      // invalid-svg would put it on SOURCE_DETERMINED_RENDER_FAILURES, which
+      // retires the LaTeX for the whole session on the first occurrence.
+      if (!svgNode) {
+        throw new Error(
+          "the engine returned a node with no <svg> root; output/svg may be missing or the adaptor mismatched"
+        );
+      }
       const serialized = adaptor.serializeXML(svgNode);
       assertValidMathJaxSvg(serialized);
       return serialized;
     } catch (error) {
       if (error instanceof MathRenderError) throw error;
+      // Everything the source can be blamed for is already a MathRenderError
+      // by this point: safeLatex() classifies the input and
+      // assertValidMathJaxSvg() classifies the output. What is left is the
+      // engine failing to run at all — a rejected `import("@mathjax/src")`, a
+      // RangeError out of tex2svgPromise under memory pressure, or a typeset
+      // that hands back no <svg> root. Those say nothing about the formula and
+      // can succeed on the next attempt, so they must not carry a source
+      // verdict's code.
       throw new MathRenderError(
-        "tex-error",
-        `MathJax could not parse the formula: ${error instanceof Error ? error.message : String(error)}`
+        "renderer-unavailable",
+        `the MathJax renderer failed: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   };
@@ -550,11 +572,26 @@ export async function renderMathJaxSvg(
     } catch {
       await cache.deleteSvg(request.svgKey);
       const repaired = await cache.getOrCreateSvg(request.svgKey, create);
-      assertValidMathJaxSvg(repaired);
-      return repaired;
+      try {
+        assertValidMathJaxSvg(repaired);
+        return repaired;
+      } catch {
+        // create() validates before it returns, so a value that fails here
+        // cannot have come from it: the disk cache is shared between
+        // processes, and a peer restored the same bad entry between the delete
+        // and the read. That is a cache-coherence fault, not a verdict on the
+        // source, and reporting it as one would retire a formula that typesets
+        // perfectly well. Typeset directly instead, letting create() throw the
+        // true failure code if the source really is at fault.
+        return await create();
+      }
     }
   } catch (error) {
-    if (error instanceof MathRenderError) {
+    // renderer-unavailable means typesetting never reached a verdict on the
+    // source. Caching it would answer every later attempt from the cache
+    // without running the engine, so the retry ladder it was deliberately
+    // left on could never reach the engine again for this key.
+    if (error instanceof MathRenderError && error.code !== "renderer-unavailable") {
       renderFailureCache.set(request.svgKey, error, error.message.length * 2 + 64);
     }
     throw error;
@@ -576,6 +613,75 @@ export async function renderMathJaxMathMl(
   return mathml;
 }
 
+interface PlacementGeometry {
+  columns: number;
+  rows: number;
+  display: boolean;
+  wrapSegments: FormulaPlacementPlan["formulaSlices"] | undefined;
+  logicalColumns: number;
+  horizontallySliced: boolean;
+  tightInline: boolean;
+}
+
+function placementGeometry(plan: FormulaPlacementPlan): PlacementGeometry {
+  const columns = Math.max(1, plan.canvas.endCol - plan.canvas.startCol);
+  const rows = Math.max(1, plan.canvas.endRow - plan.canvas.startRow + 1);
+  const display = plan.formula.intent !== "inline";
+  const wrapSegments = plan.formulaSlices.length ? plan.formulaSlices : undefined;
+  const segmentLogicalColumns = wrapSegments
+    ? Math.max(...wrapSegments.map((segment) =>
+      segment.logicalStartCol + segment.endCol - segment.startCol
+    ))
+    : 0;
+  const logicalColumns = plan.displayRange
+    ? Math.max(1, plan.displayRange.endCol - plan.displayRange.startCol)
+    : wrapSegments
+    ? Math.max(1, segmentLogicalColumns)
+    : columns;
+  return {
+    columns,
+    rows,
+    display,
+    wrapSegments,
+    logicalColumns,
+    horizontallySliced: Boolean(wrapSegments),
+    tightInline: !display
+      && rows === 1
+      && plan.mode === "compact"
+      && plan.sourceMasks.length === 0
+      && !wrapSegments
+      && !plan.displayRange
+  };
+}
+
+/**
+ * The MathJax container width a placement is typeset at, normalized exactly as
+ * the SVG cache key normalizes it. Display formulas that wrap derive it from
+ * the region geometry and scale, so callers that identify a render by its
+ * MathJax inputs need this alongside the source and the display flag.
+ */
+export function mathJaxContainerWidthForPlacement(
+  plan: FormulaPlacementPlan,
+  capabilities: TerminalCapabilities,
+  scale: number
+): number {
+  const { display, rows, horizontallySliced, logicalColumns } = placementGeometry(plan);
+  // A one-row TUI region has no vertical space for MathJax's line boxes and
+  // can become less legible when several lines are compressed back into it.
+  // Multi-row, non-segmented displays can use their reserved height safely.
+  const linebreakDisplay = display && !horizontallySliced && rows > 1;
+  if (!linebreakDisplay) return CANONICAL_CONTAINER_WIDTH;
+  const availableWidthPx = Math.max(
+    1,
+    logicalColumns * capabilities.cell.width - capabilities.cell.width * 2
+  );
+  const targetExPx = capabilities.cell.height * 0.45 * scale;
+  return normalizedContainerWidth(
+    display,
+    Math.max(1, availableWidthPx * MATHJAX_EX_PX / targetExPx)
+  );
+}
+
 export class MathRenderer {
   readonly #cache = new WeightedLruCache<RenderedFormula>(
     256,
@@ -591,39 +697,20 @@ export class MathRenderer {
     foreground = capabilities.foreground,
     background = capabilities.background
   ): Promise<RenderedFormula> {
-    const columns = Math.max(1, plan.canvas.endCol - plan.canvas.startCol);
-    const rows = Math.max(1, plan.canvas.endRow - plan.canvas.startRow + 1);
-    const display = plan.formula.intent !== "inline";
-    const wrapSegments = plan.formulaSlices.length ? plan.formulaSlices : undefined;
-    const segmentLogicalColumns = wrapSegments
-      ? Math.max(...wrapSegments.map((segment) =>
-        segment.logicalStartCol + segment.endCol - segment.startCol
-      ))
-      : 0;
-    const logicalColumns = plan.displayRange
-      ? Math.max(1, plan.displayRange.endCol - plan.displayRange.startCol)
-      : wrapSegments
-      ? Math.max(1, segmentLogicalColumns)
-      : columns;
-    const horizontallySliced = Boolean(wrapSegments);
-    const tightInline = !display
-      && rows === 1
-      && plan.mode === "compact"
-      && plan.sourceMasks.length === 0
-      && !wrapSegments
-      && !plan.displayRange;
-    // A one-row TUI region has no vertical space for MathJax's line boxes and
-    // can become less legible when several lines are compressed back into it.
-    // Multi-row, non-segmented displays can use their reserved height safely.
-    const linebreakDisplay = display && !horizontallySliced && rows > 1;
-    const availableWidthPx = Math.max(
-      1,
-      logicalColumns * capabilities.cell.width - capabilities.cell.width * 2
+    const {
+      columns,
+      rows,
+      display,
+      wrapSegments,
+      logicalColumns,
+      horizontallySliced,
+      tightInline
+    } = placementGeometry(plan);
+    const mathJaxContainerWidth = mathJaxContainerWidthForPlacement(
+      plan,
+      capabilities,
+      scale
     );
-    const targetExPx = capabilities.cell.height * 0.45 * scale;
-    const mathJaxContainerWidth = linebreakDisplay
-      ? Math.max(1, availableWidthPx * MATHJAX_EX_PX / targetExPx)
-      : CANONICAL_CONTAINER_WIDTH;
     const { svgKey } = mathJaxCacheRequest(
       plan.formula.latex,
       display,

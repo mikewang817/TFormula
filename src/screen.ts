@@ -9,7 +9,12 @@ import type {
 } from "@xterm/headless";
 import { containsFormulaTrigger, MAX_DISPLAY_BLOCK_ROWS } from "./detect.js";
 import { planFormulaPlacements } from "./formula-layout.js";
-import { MathRenderer } from "./math-renderer.js";
+import {
+  mathJaxContainerWidthForPlacement,
+  MathRenderError,
+  MathRenderer,
+  type MathRenderFailureCode
+} from "./math-renderer.js";
 import {
   cursorPosition,
   kittyDeleteByZIndex,
@@ -84,6 +89,24 @@ interface FormulaStabilityState {
 const DEFAULT_MAX_TERMINAL_IMAGES = 256;
 const DEFAULT_MAX_DETACHED_PLACEMENTS = 4_096;
 const MIRROR_SCROLLBACK_ROWS = 10_000;
+const MAX_UNPARSEABLE_FORMULAS = 4_096;
+/**
+ * Render failures decided by the LaTeX source alone. The raster codes are
+ * deliberately absent: raster-limit, empty-raster and png-limit depend on the
+ * canvas geometry, cell metrics and scale rather than the source, and
+ * raster-error reports a crashed or timed-out rasterizer process, which a
+ * retry can legitimately clear. renderer-unavailable is absent for the same
+ * reason: it reports MathJax failing to run rather than failing on the input,
+ * so it must keep its place on the retry ladder. Membership here is permanent
+ * for the session, so a code only belongs if it is reproducible from the
+ * source; anything a second attempt could clear must stay out.
+ */
+const SOURCE_DETERMINED_RENDER_FAILURES = new Set<MathRenderFailureCode>([
+  "input-too-long",
+  "disabled-command",
+  "tex-error",
+  "invalid-svg"
+]);
 
 interface MutableXtermBufferCursor {
   x: number;
@@ -424,6 +447,19 @@ export class FormulaScreen {
   readonly #blockedImageKeys = new Set<string>();
   readonly #imageRetries = new Map<string, { attempt: number; notBefore: number }>();
   readonly #blockedPlacementKeys = new Set<string>();
+  /**
+   * Sources whose render failure is decided by the LaTeX alone, keyed by
+   * content. The coordinate-keyed ladder cannot hold this: a failed render
+   * schedules the next scan itself, and #invalidateDirtyAlternatePlacements
+   * drops the alternate-screen retry entries whenever a scroll moves the
+   * layout, so the attempt counter never reaches the ceiling that would add
+   * the key to #blockedPlacementKeys. A TUI that scrolls while a placement is
+   * on screen therefore re-attempts the same text forever (a real session
+   * mis-detected prose as TeX and failed to parse it 865 times). The outcome
+   * depends only on the source, so these keys deliberately survive repaint,
+   * resize, clear and scale changes.
+   */
+  readonly #unparseableFormulaKeys = new Set<string>();
   readonly #placementRetries = new Map<string, { attempt: number; notBefore: number }>();
   readonly #formulaStability = new Map<string, FormulaStabilityState>();
   readonly #recentFormulas: RecentFormulaEntry[] = [];
@@ -2156,6 +2192,39 @@ export class FormulaScreen {
     return `${bufferType}:${viewportY}:${this.#regionIdentity(region)}`;
   }
 
+  /**
+   * Identify a formula by everything MathJax typesetting depends on: the source
+   * text, whether it is typeset in display mode, and the container width. The
+   * width is canonical for everything except a multi-row, non-sliced display
+   * formula, which MathJax linebreaks to the region — a source that fails only
+   * because it could not be broken into a narrow pane must be retried when the
+   * pane widens, rather than staying raw for the rest of the session. Colours
+   * and the exact anchor are excluded, unlike the placement fingerprint, so a
+   * repainted TUI frame reuses the key instead of minting a new one.
+   */
+  #unparseableFormulaKey(region: FormulaPlacementPlan): string {
+    const containerWidth = mathJaxContainerWidthForPlacement(
+      region,
+      this.#capabilities,
+      this.#scale
+    );
+    return `${region.formula.intent !== "inline" ? "display" : "inline"}|${containerWidth}|${
+      createHash("sha1").update(region.formula.latex).digest("hex")
+    }`;
+  }
+
+  #rememberUnparseableFormula(key: string): void {
+    this.#unparseableFormulaKeys.add(key);
+    // A session that keeps mis-detecting fresh prose as TeX would otherwise
+    // grow this set without bound; the oldest entries are the least likely to
+    // still be on screen.
+    while (this.#unparseableFormulaKeys.size > MAX_UNPARSEABLE_FORMULAS) {
+      this.#unparseableFormulaKeys.delete(
+        this.#unparseableFormulaKeys.values().next().value!
+      );
+    }
+  }
+
   /** Return zero when stable, otherwise the remaining quiet-period delay. */
   #observeFormulaStability(key: string, forceStable: boolean): number {
     const now = Date.now();
@@ -2336,19 +2405,6 @@ export class FormulaScreen {
             background: currentPresentation.background
           };
         }
-        const fingerprint = createHash("sha1").update(JSON.stringify({
-          formula: plan.formula,
-          canvas: plan.canvas,
-          mode: plan.mode,
-          estimatedQuality: plan.estimatedQuality,
-          displayRange: plan.displayRange,
-          composite: plan.composite,
-          sourceMasks: plan.sourceMasks,
-          formulaSlices: plan.formulaSlices,
-          colors: renderColors,
-          cell: this.#capabilities.cell,
-          scale: this.#scale
-        })).digest("hex");
         let replacement = this.#replacementForRegion(
           anchor,
           region,
@@ -2379,6 +2435,29 @@ export class FormulaScreen {
           claimedReplacementAnchors.add(replacement.anchor);
           retainedReplacementAnchors.add(replacement.anchor);
         }
+        // Only the retention bookkeeping above has to precede this test. A
+        // source blocked at some other geometry can still own a correct image
+        // here, and the sweep at the end of the scan deletes every placement
+        // that was not retained; past that point a blocked source needs
+        // nothing else from this iteration. Leaving before the plan
+        // fingerprint is what keeps a repainting TUI from hashing the full
+        // source, masks and slices of a formula it has already given up on,
+        // once per frame.
+        const unparseableKey = this.#unparseableFormulaKey(plan);
+        if (this.#unparseableFormulaKeys.has(unparseableKey)) continue;
+        const fingerprint = createHash("sha1").update(JSON.stringify({
+          formula: plan.formula,
+          canvas: plan.canvas,
+          mode: plan.mode,
+          estimatedQuality: plan.estimatedQuality,
+          displayRange: plan.displayRange,
+          composite: plan.composite,
+          sourceMasks: plan.sourceMasks,
+          formulaSlices: plan.formulaSlices,
+          colors: renderColors,
+          cell: this.#capabilities.cell,
+          scale: this.#scale
+        })).digest("hex");
         if (replacement?.anchor === anchor
           && existing?.fingerprint === fingerprint
           && existing.resizeGeneration === this.#resizeGeneration
@@ -2629,6 +2708,17 @@ export class FormulaScreen {
           // LaTeX. Leave it in place; a later layout/output scan can replace it
           // transactionally instead of exposing raw source on a transient
           // MathJax or terminal-graphics failure.
+          if (error instanceof MathRenderError
+            && SOURCE_DETERMINED_RENDER_FAILURES.has(error.code)) {
+            // These failures are decided by the LaTeX source alone, so they
+            // recur identically at every geometry and the retry ladder can only
+            // burn renders. Record the source and skip the coordinate-keyed
+            // machinery, which a repainting TUI keeps resetting.
+            this.#rememberUnparseableFormula(unparseableKey);
+            this.#placementRetries.delete(placementRetryKey);
+            this.#debug(`formula at ${anchor} is unparseable; skipping it for this session`);
+            continue;
+          }
           const attempt = (this.#placementRetries.get(placementRetryKey)?.attempt ?? 0) + 1;
           if (attempt > 5) {
             this.#placementRetries.delete(placementRetryKey);

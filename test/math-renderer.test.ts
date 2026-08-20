@@ -322,6 +322,32 @@ describe("MathRenderer", () => {
     }
   });
 
+  it("typesets directly when a peer process restores the bad cache entry", async () => {
+    // The SVG cache is shared between processes, so the delete that opens the
+    // repair can be undone by a peer before the re-read. Overriding deleteSvg
+    // reproduces exactly that outcome: the repair reads back the entry it just
+    // rejected. The formula itself is impeccable, so the call must still yield
+    // its rendering rather than a failure code that reads as a source verdict.
+    class RacingFormulaCache extends FormulaCache {
+      override async deleteSvg(): Promise<void> {}
+    }
+    const root = await mkdtemp(join(tmpdir(), "tformula-math-race-cache-"));
+    try {
+      const cache = new RacingFormulaCache({ root, maxDiskBytes: 0 });
+      await renderMathJaxSvg("x+3", false, 160, cache);
+      cache.clearMemory();
+      const [bucket] = await readdir(join(cache.root, "svg"));
+      const [filename] = await readdir(join(cache.root, "svg", bucket!));
+      await writeFile(join(cache.root, "svg", bucket!, filename!), "<svg></svg>");
+
+      const repaired = await renderMathJaxSvg("x+3", false, 160, cache);
+      expect(repaired).toContain('data-mml-node="math"');
+      expect(repaired).toContain("viewBox=");
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   it("accepts an escaped currency symbol inside valid TeX", async () => {
     const svg = await renderMathJaxSvg("x=\\$5", false, 160);
     expect(svg).toContain("<svg");
