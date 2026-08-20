@@ -4,6 +4,7 @@ import { join } from "node:path";
 import * as pty from "node-pty";
 import { afterEach, describe, expect, it } from "vitest";
 import { isRuntimeProbeQueryId } from "../src/probe.js";
+import { ptyEnvironment } from "./pty-environment.js";
 
 const ESC = "\x1b";
 const ST = `${ESC}\\`;
@@ -67,14 +68,12 @@ describe("runProxy pseudo-terminal integration", () => {
   it("quarantines startup probe replies that arrive after the Agent starts", async () => {
     const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
     const fixture = join(process.cwd(), "test", "fixtures", "proxy-edge-agent.mjs");
-    const environment = {
-      ...process.env,
+    const environment = ptyEnvironment({
       TERM: "xterm-ghostty",
       TERM_PROGRAM: "ghostty",
       TFORMULA_EDGE_MODE: "late-startup",
       TFORMULA_EDGE_READY_DELAY_MS: "1200"
-    } as Record<string, string>;
-    delete environment.TFORMULA_ACTIVE;
+    });
     let transcript = "";
     let answered = false;
     const terminal = pty.spawn(tsx, ["src/cli.ts", "--", process.execPath, fixture], {
@@ -119,13 +118,11 @@ describe("runProxy pseudo-terminal integration", () => {
   it("cancels a suspended resize probe before waiting for child-exit output", async () => {
     const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
     const fixture = join(process.cwd(), "test", "fixtures", "proxy-edge-agent.mjs");
-    const environment = {
-      ...process.env,
+    const environment = ptyEnvironment({
       TERM: "xterm-ghostty",
       TERM_PROGRAM: "ghostty",
       TFORMULA_EDGE_MODE: "exit-during-probe"
-    } as Record<string, string>;
-    delete environment.TFORMULA_ACTIVE;
+    });
     let transcript = "";
     let startupAnswered = false;
     let resized = false;
@@ -173,13 +170,11 @@ describe("runProxy pseudo-terminal integration", () => {
   it("places after resize leaves an otherwise idle Agent in pending-wrap", async () => {
     const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
     const fixture = join(process.cwd(), "test", "fixtures", "proxy-edge-agent.mjs");
-    const environment = {
-      ...process.env,
+    const environment = ptyEnvironment({
       TERM: "xterm-ghostty",
       TERM_PROGRAM: "ghostty",
       TFORMULA_EDGE_MODE: "idle-pending-resize"
-    } as Record<string, string>;
-    delete environment.TFORMULA_ACTIVE;
+    });
     let transcript = "";
     let startupAnswered = false;
     let narrowed = false;
@@ -255,10 +250,7 @@ describe("runProxy pseudo-terminal integration", () => {
     temporaryRoots.push(historyRoot);
     const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
     const fixture = join(process.cwd(), "test", "fixtures", "proxy-agent.mjs");
-    const environment = Object.fromEntries(
-      Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
-    );
-    Object.assign(environment, {
+    const environment = ptyEnvironment({
       TERM: "xterm-ghostty",
       TERM_PROGRAM: "ghostty",
       COLORTERM: "truecolor",
@@ -266,16 +258,6 @@ describe("runProxy pseudo-terminal integration", () => {
       TFORMULA_HISTORY_DIR: historyRoot,
       FORCE_COLOR: "0"
     });
-    for (const name of [
-      "TFORMULA_ACTIVE",
-      "TMUX",
-      "STY",
-      "ZELLIJ",
-      "MOSH_CONNECTION",
-      "SSH_CONNECTION",
-      "SSH_CLIENT",
-      "SSH_TTY"
-    ]) delete environment[name];
     // A remote Ghostty still answers the Kitty query, but cannot open a path
     // on the local filesystem. This forces the bounded direct-PNG path whose
     // payload caused the original visible-Base64 failure.
