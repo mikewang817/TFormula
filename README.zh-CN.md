@@ -51,6 +51,12 @@ tformula codex
 完整集成只有这一步，不需要安装 Codex 插件，也不需要修改 Codex 配置。Codex
 本身需要已经安装，并且可以从当前 `PATH` 中找到。
 
+直接包装 Codex 时，TFormula 还会读取该子进程会话的本地 rollout，恢复被
+终端 Markdown 排版破坏的独立公式。`codex resume <UUID>` 会在回放前预载
+指定会话。可用 `--no-codex-source` 关闭恢复，或用
+`--codex-session <rollout.jsonl>` 明确选择来源；这些选项放在 `codex` 前。
+匹配规则、隐私、依赖及流式输出限制见 [Codex 原文恢复说明](docs/codex-source-recovery.md)。
+
 ## 效果预览
 
 下面展示了在 Ghostty 中运行 Codex、介绍麦克斯韦方程时的效果。TFormula

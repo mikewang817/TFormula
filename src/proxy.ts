@@ -2,13 +2,14 @@ import process from "node:process";
 import { appendFileSync, chmodSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import * as pty from "node-pty";
 import { containsFormulaTrigger } from "./detect.js";
 import { FormulaFocusInput, type FormulaFocusAction } from "./formula-focus.js";
 import { FormulaHistoryStore } from "./formula-history.js";
 import { FormulaScreen } from "./screen.js";
+import { CodexFormulaSource, findCodexResumeSource } from "./codex-source.js";
 import {
   isGhosttyTerminal,
   KittyImageTransmitter,
@@ -111,6 +112,21 @@ export async function runProxy(
   const writeOuter = (data: string | Uint8Array): void => {
     terminalWriter.enqueue(data);
   };
+  // The PID becomes available after spawn. Explicit sources are loaded before
+  // any child output, so resumed/replayed answers cannot outrun the catalogue.
+  const useCodexSource = options.renderMath && options.codexSource !== false
+    && (options.codexSession || /^codex(?:\.js)?$/u.test(basename(options.command)));
+  const sourcePath = useCodexSource
+    ? options.codexSession ? resolvePath(options.cwd, options.codexSession)
+      : await findCodexResumeSource(options.args)
+    : undefined;
+  const formulaSource = useCodexSource
+    ? new CodexFormulaSource({
+        path: sourcePath,
+        debug
+      })
+    : undefined;
+  if (sourcePath) await formulaSource?.refresh();
   const screen = options.renderMath
     ? new FormulaScreen({
         cols,
@@ -129,7 +145,8 @@ export async function runProxy(
         // A delayed explicit Kitty ACK can safely enable graphics shortly
         // after startup. Ghostty's ED2 rewrite policy must already be active
         // when that happens or its first clear would orphan image pins.
-        preserveImagesOnClear: ghosttyTerminal
+        preserveImagesOnClear: ghosttyTerminal,
+        formulaSource
       })
     : undefined;
   const focusInput = screen && options.focusKey
@@ -375,6 +392,16 @@ export async function runProxy(
     cwd: options.cwd,
     env: { ...process.env, TFORMULA_ACTIVE: "1" } as Record<string, string>
   });
+  formulaSource?.setPid(child.pid);
+  let sourceTimer: NodeJS.Timeout | undefined;
+  if (formulaSource) {
+    sourceTimer = setInterval(() => {
+      void formulaSource.refresh().then((changed) => {
+        if (changed && !exiting) screen?.scheduleScan(0);
+      });
+    }, 250);
+    sourceTimer.unref();
+  }
 
   if (startupProbeQuarantine) {
     startupProbeTimer = setTimeout(
@@ -530,6 +557,7 @@ export async function runProxy(
     // and closure for every checkpoint slice in a large PTY burst.
     screen.queueWrites(slices.length);
     enqueueScreenOperation(async () => {
+      await formulaSource?.refresh();
       for (const slice of slices) {
         let queued = true;
         let realCursorCatchupQueued = false;
@@ -642,6 +670,8 @@ export async function runProxy(
     child.onExit(({ exitCode, signal }) => {
       if (exiting) return;
       exiting = true;
+      if (sourceTimer) clearInterval(sourceTimer);
+      formulaSource?.close();
       // Wake every checkpoint before waiting for outputQueue.  Otherwise an
       // exit between two resize epochs can leave the queue blocked on a
       // layout waiter whose probe is deliberately cancelled below.
