@@ -19,7 +19,7 @@ const root = await mkdtemp(join(tmpdir(), "tformula-source-test-"));
 afterAll(async () => { await rm(root, { recursive: true, force: true }); });
 
 describe("OPSD source-backed formula recovery", () => {
-  it.each([60, 100, 160])("renders all 19 regression formulas exactly at %i columns", async (cols) => {
+  it.each([60, 100, 160])("renders all 19 original formulas exactly at %i columns", async (cols) => {
     const source = new FormulaSource();
     source.addMarkdown(formulas.map(markdown).join("\n\n"));
     const renderer = new MathRenderer(new FormulaCache({ root: join(root, String(cols)), maxDiskBytes: 0 }));
@@ -39,6 +39,35 @@ describe("OPSD source-backed formula recovery", () => {
       } finally { screen.dispose(); }
     }
   }, 30_000);
+
+  it("rescans a still-visible streamed objective when its original source arrives late", async () => {
+    const latex = String.raw`\mathcal L
+=
+\mathbb E_{\hat y\sim p_S}
+\left[
+\frac{1}{|\hat y|}
+\sum_t
+D\left(
+\operatorname{sg}\!\left[p_T(\cdot\mid x,y^*,\hat y_{<t})\right],
+p_S(\cdot\mid x,\hat y_{<t})
+\right)
+\right]`;
+    const source = new FormulaSource();
+    const rendered: string[] = [];
+    const renderer = new MathRenderer(new FormulaCache({ root: join(root, "late-source"), maxDiskBytes: 0 }));
+    const screen = new FormulaScreen({ cols: 120, rows: 44, capabilities, scale: 1,
+      stabilityMs: 0, formulaSource: source, renderer, writeOuter: () => {},
+      onFormulaRendered: (event) => rendered.push(event.latex) });
+    try {
+      await screen.write(terminalMarkdownProjection(markdown(latex)).replaceAll("\n", "\r\n") + "\r\n");
+      await screen.flushScan();
+      expect(rendered).toEqual([]);
+      source.addMarkdown(markdown(latex));
+      await screen.flushScan();
+      expect(rendered).toEqual([latex]);
+      expect(screen.recentFormulas[0]?.degradationReason).toBeUndefined();
+    } finally { screen.dispose(); }
+  });
 
   it("recovers hard wrapping and preserves the original underscore and double bar", () => {
     const latex = formulas[11]!;
@@ -75,6 +104,48 @@ describe("OPSD source-backed formula recovery", () => {
       await new Promise<void>((resolve, reject) => { child.stdout.once("data", () => resolve()); child.once("error", reject); });
       expect(await discoverCodexSession(child.pid!)).toBe(await realpath(path));
     } finally { child.kill(); }
+  });
+
+  it.skipIf(process.platform === "win32")("follows session switches in the same Codex process and drops stale formulas", async () => {
+    const first = join(root, "rollout-switch-first.jsonl");
+    const second = join(root, "rollout-switch-second.jsonl");
+    const record = (latex: string) => JSON.stringify({ type: "response_item", payload: {
+      type: "message", role: "assistant", content: [{ type: "output_text", text: markdown(latex) }]
+    } }) + "\n";
+    await writeFile(first, record("x=1"));
+    await writeFile(second, record("y=2"));
+    const child = spawn(process.execPath, ["-e", `
+      const fs = require('fs');
+      let fd = fs.openSync(process.argv[1], 'r');
+      process.stdout.write('ready');
+      process.stdin.once('data', () => {
+        fs.closeSync(fd); fd = fs.openSync(process.argv[2], 'r');
+        process.stdout.write('switched');
+      });
+    `, first, second], { stdio: ["pipe", "pipe", "ignore"] });
+    const ready = () => new Promise<void>((resolve, reject) => {
+      child.stdout.once("data", () => resolve()); child.once("error", reject);
+    });
+    const source = new CodexFormulaSource({ pid: child.pid });
+    const pinned = new CodexFormulaSource({ path: first, pid: child.pid });
+    const preloaded = new CodexFormulaSource({ path: first, pid: child.pid, followProcess: true });
+    try {
+      await ready();
+      expect(await source.refresh()).toBe(true);
+      await pinned.refresh(); await preloaded.refresh();
+      expect(source.resolve(["[", "x=1", "]"]).formulas).toHaveLength(1);
+      const switched = ready(); child.stdin.write("switch"); await switched;
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      expect(await source.refresh()).toBe(true);
+      expect(source.resolve(["[", "y=2", "]"]).formulas[0]?.latex).toBe("y=2");
+      expect(source.resolve(["[", "x=1", "]"]).formulas).toEqual([]);
+      await pinned.refresh(); await preloaded.refresh();
+      expect(pinned.resolve(["[", "x=1", "]"]).formulas).toHaveLength(1);
+      expect(preloaded.resolve(["[", "y=2", "]"]).formulas).toHaveLength(1);
+      await writeFile(second, "");
+      expect(await source.refresh()).toBe(true);
+      expect(source.size).toBe(0);
+    } finally { source.close(); pinned.close(); preloaded.close(); child.kill(); }
   });
 
   it("refuses ambiguous projections instead of guessing mathematical symbols", () => {

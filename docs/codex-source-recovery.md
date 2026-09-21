@@ -48,6 +48,12 @@ Selection proceeds as follows:
 3. Otherwise, `ps` and `lsof` identify a rollout file held open by the wrapped
    child or its descendants. The nearest process is preferred over deeper
    subagents; equally near, conflicting paths are rejected.
+4. Automatic selection is rechecked at most once per second. When the child
+   holds a different rollout after an in-process session switch, the old
+   catalogue and partial input are discarded and the new file is loaded.
+   An explicit `--codex-session` stays pinned; UUID-preloaded sources follow
+   subsequent unambiguous process discovery. Missing or ambiguous discovery
+   preserves the last source, including a read-only resume.
 
 There is no newest-file or working-directory heuristic that could silently
 attach another conversation. Automatic process discovery needs `ps` and
@@ -92,8 +98,9 @@ Restored formulas participate in the existing formula-history behavior;
 - CommonMark projection is a compatibility model, not a copy of every Codex
   TUI renderer. Unsupported transformations remain unmatched. Damaged heading
   blocks and ambiguous matched blocks are withheld from fragment inference.
-- A source file is bound for the proxy's lifetime. Switching conversations
-  inside the same child should use a fresh TFormula invocation.
+- Session switching is detected by polling. Replay can outrun discovery;
+  launching `tformula codex resume <UUID>` preloads the source before output
+  and remains the reliable way to replay an already persisted answer.
 - This change does not alter Ghostty configuration or solve image-mask color
   differences on translucent backgrounds. An opaque terminal background can
   avoid that separate visual issue.
@@ -111,4 +118,5 @@ MathJax and rasterization at 60, 100 and 160 columns, asserting that the rendere
 receives the original TeX rather than a visually plausible fragment. Additional
 tests cover hard wrapping, one-line displays, ambiguous projections, fenced
 code, incomplete blocks, incremental UTF-8, log truncation, process discovery
-and UUID-based preloading.
+UUID-based preloading, switching rollouts within one process, explicitly
+pinned sources, and rescanning a still-visible formula after its source arrives.

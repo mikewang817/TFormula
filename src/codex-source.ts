@@ -71,12 +71,14 @@ export class CodexFormulaSource extends FormulaSource {
   #lastDiscovery = 0;
   #closed = false;
   readonly #explicitPath?: string;
+  readonly #followProcess: boolean;
   #pid?: number;
   readonly #debug: (message: string) => void;
 
-  constructor(options: { path?: string; pid?: number; debug?: (message: string) => void }) {
+  constructor(options: { path?: string; pid?: number; followProcess?: boolean; debug?: (message: string) => void }) {
     super();
     this.#explicitPath = options.path;
+    this.#followProcess = options.followProcess ?? !options.path;
     this.#pid = options.pid;
     this.#debug = options.debug ?? (() => {});
   }
@@ -93,24 +95,33 @@ export class CodexFormulaSource extends FormulaSource {
   }
 
   async #read(): Promise<boolean> {
-    if (!this.#path) {
-      if (this.#explicitPath) this.#path = await realpath(this.#explicitPath);
-      else if (this.#pid && Date.now() - this.#lastDiscovery >= 1000) {
-        this.#lastDiscovery = Date.now();
-        this.#path = await discoverCodexSession(this.#pid);
-      }
-      if (!this.#path) return false;
+    let changed = false;
+    let nextPath = this.#path;
+    if (!nextPath && this.#explicitPath) nextPath = await realpath(this.#explicitPath);
+    if (this.#followProcess && this.#pid && Date.now() - this.#lastDiscovery >= 1000) {
+      this.#lastDiscovery = Date.now();
+      // Revalidate the main process after /resume or /new. A missing/ambiguous
+      // result must not discard a preloaded, possibly read-only resume source.
+      const discovered = await discoverCodexSession(this.#pid).catch(() => undefined);
+      if (discovered) nextPath = await realpath(discovered);
+    }
+    if (!nextPath) return false;
+    if (nextPath !== this.#path) {
+      changed = this.size > 0;
+      this.clear(); this.#offset = 0; this.#tail = Buffer.alloc(0);
+      this.#inode = undefined; this.#discardLine = false;
+      this.#path = nextPath;
       this.#debug("connected to the Codex session formula source");
     }
     const info = await stat(this.#path);
-    if (!info.isFile()) return false;
+    if (!info.isFile()) return changed;
     if (info.ino !== this.#inode || info.size < this.#offset) {
+      changed = this.size > 0 || changed;
       this.clear(); this.#offset = 0; this.#tail = Buffer.alloc(0); this.#inode = info.ino;
       this.#discardLine = false;
     }
-    if (info.size === this.#offset) return false;
+    if (info.size === this.#offset) return changed;
     const file = await open(this.#path, "r");
-    let changed = false;
     try {
       // Incremental reads preserve split UTF-8 and partial JSON records. Only
       // assistant message text is indexed; user/tool/system content is ignored.

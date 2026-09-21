@@ -123,6 +123,7 @@ export async function runProxy(
   const formulaSource = useCodexSource
     ? new CodexFormulaSource({
         path: sourcePath,
+        followProcess: !options.codexSession,
         debug
       })
     : undefined;
