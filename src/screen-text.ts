@@ -1,4 +1,5 @@
 import stringWidth from "string-width";
+import type { FormulaSource } from "./formula-source.js";
 import { containsFormulaTrigger, detectFormulas, escapeTexText } from "./detect.js";
 import type {
   DetectedFormula,
@@ -519,15 +520,27 @@ function mappedFormulaFromRegion(
 export function detectScreenFormulaRegions(
   physicalLines: PhysicalScreenLine[],
   terminalColumns: number,
-  continuesAfterViewport = false
+  continuesAfterViewport = false,
+  formulaSource?: FormulaSource
 ): FormulaSnapshot {
   if (!physicalLines.some((line) => containsFormulaTrigger(line.text))) {
     return { formulas: [], deferred: [] };
   }
   const logicalLines = collapseSoftWrappedLines(physicalLines, continuesAfterViewport);
+  const texts = logicalLines.map((line) => line.text);
+  const restored = formulaSource?.resolve(texts);
+  const inferred = detectFormulas(texts).filter((formula) => {
+    if (!restored) return true;
+    for (let row = formula.source.startRow; row <= formula.source.endRow; row += 1) {
+      if (restored.ownedRows.has(row)) return false;
+    }
+    return true;
+  });
   const detected = composeInlineFormulaTails(
     logicalLines,
-    detectFormulas(logicalLines.map((line) => line.text)).map(detectedFormulaRegion)
+    [...inferred, ...(restored?.formulas ?? [])]
+      .sort((a, b) => a.source.startRow - b.source.startRow || a.source.startCol - b.source.startCol)
+      .map(detectedFormulaRegion)
   );
   const regions: PhysicalFormulaCandidate[] = [];
   const deferred: FormulaSnapshot["deferred"] = [];

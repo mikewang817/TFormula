@@ -136,6 +136,10 @@ export interface CliOptions {
   /** One control character which toggles the non-destructive formula focus overlay. */
   focusKey: string;
   cellOverride?: { width: number; height: number };
+  /** Explicit source for replay/resume; otherwise discover the Codex child. */
+  codexSession?: string;
+  /** Opt out of local, source-backed formula recovery. */
+  codexSource?: boolean;
 }
 
 export interface CacheCliOptions {

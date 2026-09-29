@@ -51,6 +51,8 @@ Options:
   --read <path>           Open a Markdown, text, or image file in the reader
   --no-math               Run only as a transparent PTY proxy
   --no-history            Do not persist successfully rendered formulas
+  --codex-session <path>   Restore formulas from this Codex rollout JSONL
+  --no-codex-source        Disable automatic Codex source recovery
   --scale <number>         Formula-to-terminal text scale, default 1.0
   --min-readable-scale <n> Keep raw TeX below this fitted ratio, default 0.4
   --stability-ms <number>  Background formula quiet period, default 80 ms
@@ -308,6 +310,8 @@ export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" 
   let forceShell = false;
   let readerPath: string | undefined;
   let commandSeparator = false;
+  let codexSession: string | undefined;
+  let codexSource = true;
   const commandParts: string[] = [];
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -327,6 +331,8 @@ export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" 
     else if (value === "--read") readerPath = argv[++index] ?? fail("--read requires a file path");
     else if (value === "--no-math") renderMath = false;
     else if (value === "--no-history") recordHistory = false;
+    else if (value === "--codex-session") codexSession = argv[++index] ?? fail("--codex-session requires a JSONL path");
+    else if (value === "--no-codex-source") codexSource = false;
     else if (value === "--debug") debug = true;
     else if (value === "--scale") scale = Number(argv[++index]);
     else if (value === "--min-readable-scale") minReadableScale = Number(argv[++index]);
@@ -385,7 +391,9 @@ export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" 
     minReadableScale,
     stabilityMs,
     focusKey,
-    cellOverride
+    cellOverride,
+    ...(codexSession ? { codexSession } : {}),
+    ...(codexSource ? {} : { codexSource: false })
   };
 }
 
