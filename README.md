@@ -114,6 +114,8 @@ cells wrap vertically instead of losing their tails. Local PNG, JPEG, WebP,
 GIF, AVIF, TIFF, HEIF, and SVG files are converted to a terminal-ready PNG and
 keep their aspect ratio. An image is still drawn when a PDF/OCR converter has
 placed a caption or page header in the same paragraph.
+Local Obsidian image embeds such as `![[photo.png]]` and
+`![[figures/photo.png]]` also work; their paths are relative to the document.
 
 The open document and its referenced local images are watched for changes.
 Saving from an editor refreshes the rendered view automatically without

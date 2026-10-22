@@ -51,7 +51,7 @@ export interface ReaderDocument {
 }
 
 export function parseMarkdown(source: string): Root {
-  const normalized = normalizeMarkdownMathDelimiters(source);
+  const normalized = normalizeObsidianImageEmbeds(normalizeMarkdownMathDelimiters(source));
   const root = fromMarkdown(normalized, {
     extensions: [gfm(), math()],
     mdastExtensions: [gfmFromMarkdown(), mathFromMarkdown()]
@@ -84,6 +84,51 @@ function fencedCodeLines(lines: string[]): boolean[] {
     }
   }
   return fenced;
+}
+
+/** Turn local Obsidian image embeds into ordinary Markdown images for the reader pipeline. */
+function normalizeObsidianImageEmbeds(source: string): string {
+  const lines = source.split("\n");
+  const fenced = fencedCodeLines(lines);
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex]!;
+    if (fenced[lineIndex] || /^(?: {4}|\t)/u.test(line)) continue;
+    let output = "";
+    let codeTicks = 0;
+    for (let index = 0; index < line.length;) {
+      if (line[index] === "`") {
+        let end = index + 1;
+        while (line[end] === "`") end += 1;
+        const ticks = end - index;
+        if (codeTicks === 0) codeTicks = ticks;
+        else if (ticks === codeTicks) codeTicks = 0;
+        output += line.slice(index, end);
+        index = end;
+        continue;
+      }
+      if (codeTicks === 0 && line.startsWith("![[", index)) {
+        let backslashes = 0;
+        while (line[index - backslashes - 1] === "\\") backslashes += 1;
+        const end = line.indexOf("]]", index + 3);
+        if (backslashes % 2 === 0 && end >= 0) {
+          // Obsidian's optional |width/alias suffix is not part of the file path.
+          const path = line.slice(index + 3, end).split("|", 1)[0]!.trim();
+          if (readerFileKind(path) === "image" && !/^(?:[a-z][a-z\d+.-]*:|\/\/)/iu.test(path)) {
+            const alt = basename(path).replace(/[\\\[\]]/gu, "\\$&");
+            const url = encodeURIComponent(path).replace(/[()]/gu, (char) =>
+              char === "(" ? "%28" : "%29");
+            output += `![${alt}](${url})`;
+            index = end + 2;
+            continue;
+          }
+        }
+      }
+      output += line[index];
+      index += 1;
+    }
+    lines[lineIndex] = output;
+  }
+  return lines.join("\n");
 }
 
 function replaceExplicitInlineMathDelimiters(line: string): string {

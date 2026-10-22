@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,6 +9,7 @@ import {
   parseMarkdown,
   readerFileKind
 } from "../src/reader-document.js";
+import { layoutReaderDocument } from "../src/reader-layout.js";
 
 describe("reader document parsing", () => {
   it("parses GFM blocks, links, images, and math into one document tree", () => {
@@ -48,6 +49,63 @@ describe("reader document parsing", () => {
       { latex: "\\frac{1}{2}", display: true }
     ]));
     expect(mathResourceKey("x", false)).not.toBe(mathResourceKey("x", true));
+  });
+
+  it("recognizes Obsidian image embeds without changing code or non-image wiki embeds", () => {
+    const root = parseMarkdown([
+      "Before ![[图片.png]] and ![standard](standard.png).",
+      "![[figures/plot (v2).png|320]]",
+      "`![[inline.png]]` and \\![[escaped.png]]",
+      "",
+      "```md",
+      "![[fenced.png]]",
+      "```",
+      "",
+      "    ![[indented.png]]",
+      "",
+      "![[another-note.md]]"
+    ].join("\n"));
+
+    expect(collectDocumentResources(root).imageUrls.map(decodeURIComponent)).toEqual([
+      "图片.png",
+      "standard.png",
+      "figures/plot (v2).png"
+    ]);
+    expect(root.children).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "code", value: "![[fenced.png]]" }),
+      expect.objectContaining({ type: "code", value: "![[indented.png]]" })
+    ]));
+    expect(JSON.stringify(root)).toContain("![[inline.png]]");
+    expect(JSON.stringify(root)).toContain("![[escaped.png]]");
+    expect(JSON.stringify(root)).toContain("![[another-note.md]]");
+  });
+
+  it("loads and lays out a local Obsidian image with spaces in its filename", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tformula-obsidian-image-"));
+    const path = join(directory, "note.md");
+    const image = join(directory, "图片 (1).png");
+    try {
+      await copyFile(join(process.cwd(), "assets", "tformula-maxwell.png"), image);
+      await writeFile(path, "Before ![[图片 (1).png]] after\n");
+
+      const document = await loadReaderDocument(path);
+      expect([...document.images.values()]).toEqual([
+        expect.objectContaining({ path: image, width: expect.any(Number), height: expect.any(Number) })
+      ]);
+      const layout = layoutReaderDocument(document, {
+        columns: 80,
+        viewportRows: 24,
+        cell: { width: 9, height: 18, source: "fallback" },
+        scale: 1,
+        graphics: true
+      });
+      expect(layout.placements).toEqual([
+        expect.objectContaining({ asset: expect.objectContaining({ kind: "image", path: image }) })
+      ]);
+      expect(layout.lines.map(({ plain }) => plain).join("\n")).toContain("after");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("repairs OCR page headers attached to display closers and decodes TeX entities", () => {

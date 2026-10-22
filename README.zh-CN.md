@@ -107,6 +107,8 @@ tformula --read package.json
 换行，不再用省略号丢弃尾部内容。本地 PNG、JPEG、WebP、GIF、AVIF、TIFF、
 HEIF 和 SVG 图片会转换为终端 PNG，并保持宽高比；即使 PDF/OCR 转换器把图注
 或页眉粘在图片所在段落中，图片仍会正常绘制。
+本地图片也支持 Obsidian 的 `![[图片.png]]`、`![[figures/图片.png]]` 写法，
+路径相对于当前 Markdown 文档解析。
 
 阅读器会实时监听当前文档及其引用的本地图片。在编辑器中保存后，渲染视图会自动
 刷新，无需重启 TFormula。基于目录的监听兼容“临时文件写入后原子替换”的保存
