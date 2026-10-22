@@ -84,6 +84,21 @@ tformula --shell
 
 不带参数运行 `tformula` 等价于 `tformula --shell`。
 
+## Agent 输出本地图片
+
+让 Agent 在终端中**单独一行**输出本地图片的 Markdown 引用，例如：
+
+```md
+![抓取的页面截图](./artifacts/screenshot.png)
+```
+
+相对路径从启动 Agent 的工作目录解析；也支持绝对路径和 `file://` URI。
+TFormula 会把本地图片缩成预览并覆盖引用行及其后连续的空白行，最多占用 12 行；
+不会插入终端行或改动原文。没有足够空白空间、路径不可读或终端不支持 Kitty
+图形协议时保留原引用。代码块中的示例和远程 URL 不会自动加载。
+这适用于 Agent 确实把 Markdown 引用写到了终端的情况；若 Agent 的 TUI
+在输出前自行转换或隐藏该引用，PTY 代理无法从终端画面恢复原始路径。
+
 ## Markdown 阅读器
 
 把 Markdown、文本或图片路径作为参数传入，即可进入 TFormula 的全屏阅读视图：

@@ -117,6 +117,7 @@ export async function runProxy(
         rows,
         capabilities,
         scale: options.scale,
+        cwd: options.cwd,
         minReadableScale: options.minReadableScale,
         stabilityMs: options.stabilityMs,
         writeOuter,
@@ -145,6 +146,7 @@ export async function runProxy(
   const outputSplitter = new OutputCheckpointSplitter(Math.max(2, Math.floor(rows / 3)));
   outputSplitter.setCharacterInterval(cols * Math.max(2, Math.floor(rows / 3)));
   let plainOutputFastPath = false;
+  let pendingImageOpener = false;
 
   const enqueueScreenOperation = (operation: () => Promise<unknown> | void): void => {
     outputQueue = outputQueue.then(async () => { await operation(); }).catch((error) => {
@@ -518,7 +520,10 @@ export async function runProxy(
     // logs into thousands of Promise callbacks and viewport scans. Once
     // enabled, the fast path may span adjacent queued callbacks because every
     // one is independently trigger-free.
-    const formulaOrLayoutTrigger = containsFormulaTrigger(data) || data.includes("\x1b");
+    const imageTrigger = data.includes("![") || (pendingImageOpener && data.includes("["));
+    pendingImageOpener = data.endsWith("!");
+    const formulaOrLayoutTrigger = containsFormulaTrigger(data)
+      || imageTrigger || data.includes("\x1b");
     const skipCheckpoints = !formulaOrLayoutTrigger
       && (plainOutputFastPath || screen.canSkipOutputCheckpoints);
     plainOutputFastPath = skipCheckpoints;

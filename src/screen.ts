@@ -7,6 +7,7 @@ import type {
   ITerminalAddon,
   Terminal as XtermTerminal
 } from "@xterm/headless";
+import { AgentImagePreviews, localImageReference, type LocalImageReference } from "./agent-image.js";
 import { containsFormulaTrigger, MAX_DISPLAY_BLOCK_ROWS } from "./detect.js";
 import { planFormulaPlacements } from "./formula-layout.js";
 import {
@@ -54,7 +55,15 @@ interface PlannedFormulaSnapshot {
   deferred: Array<{ latex: string; startRow: number; endRow: number }>;
 }
 
+interface VisibleLocalImage {
+  row: number;
+  reference: LocalImageReference;
+  sourceColumns: number;
+  availableRows: number;
+}
+
 interface PlacedFormula {
+  kind: "formula" | "image";
   anchor: string;
   imageId: number;
   placementId: number;
@@ -428,6 +437,8 @@ function lineTextSnapshot(line: IBufferLine | undefined, translatedText?: string
 export class FormulaScreen {
   readonly terminal: XtermTerminal;
   readonly #renderer: MathRenderer;
+  readonly #imagePreviews = new AgentImagePreviews();
+  readonly #cwd: string;
   readonly #transmitImage: (png: Uint8Array, imageId: number) => string;
   readonly #placed = new Map<string, PlacedFormula>();
   /**
@@ -524,6 +535,7 @@ export class FormulaScreen {
     rows: number;
     capabilities: TerminalCapabilities;
     scale: number;
+    cwd?: string;
     minReadableScale?: number;
     stabilityMs?: number;
     writeOuter: (data: string | Uint8Array) => void;
@@ -562,6 +574,7 @@ export class FormulaScreen {
       ? Math.max(0, Math.min(2_000, Math.floor(options.stabilityMs!)))
       : 80;
     this.#renderer = options.renderer ?? new MathRenderer();
+    this.#cwd = options.cwd ?? process.cwd();
     this.#transmitImage = options.transmitImage ?? kittyTransmitImage;
     this.#writeOuter = options.writeOuter;
     this.#writeGraphics = options.writeGraphics;
@@ -1061,7 +1074,7 @@ export class FormulaScreen {
     const buffer = this.terminal.buffer.active;
     for (let row = 0; row < this.terminal.rows; row += 1) {
       const text = buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? "";
-      if (containsFormulaTrigger(text)) return false;
+      if (containsFormulaTrigger(text) || text.includes("![")) return false;
     }
     return true;
   }
@@ -1960,11 +1973,15 @@ export class FormulaScreen {
   }
 
   #markersForRegion(region: FormulaPlacementPlan): { startMarker?: IMarker; endMarker?: IMarker } {
+    return this.#markersForRows(region.canvas.startRow, region.canvas.endRow);
+  }
+
+  #markersForRows(startRow: number, endRow: number): { startMarker?: IMarker; endMarker?: IMarker } {
     const buffer = this.terminal.buffer.active;
     if (buffer.type !== "normal") return {};
     const cursorAbsoluteRow = buffer.baseY + buffer.cursorY;
-    const startAbsoluteRow = buffer.viewportY + region.canvas.startRow;
-    const endAbsoluteRow = buffer.viewportY + region.canvas.endRow;
+    const startAbsoluteRow = buffer.viewportY + startRow;
+    const endAbsoluteRow = buffer.viewportY + endRow;
     return {
       startMarker: this.terminal.registerMarker(startAbsoluteRow - cursorAbsoluteRow),
       endMarker: this.terminal.registerMarker(endAbsoluteRow - cursorAbsoluteRow)
@@ -2335,6 +2352,7 @@ export class FormulaScreen {
     const end = viewportY + region.canvas.endRow;
     for (const [oldAnchor, placement] of this.#placed) {
       if (claimedAnchors.has(oldAnchor)) continue;
+      if (placement.kind !== "formula") continue;
       if (placement.bufferType !== bufferType || placement.latex !== region.formula.latex) continue;
       const bounds = this.#placementBounds(placement);
       if (bounds.start < 0 || bounds.end < 0) continue;
@@ -2349,6 +2367,7 @@ export class FormulaScreen {
     // visual order instead of leaving duplicate Ghostty pins behind.
     const candidates = Array.from(this.#placed.entries())
       .filter(([oldAnchor, placement]) => !claimedAnchors.has(oldAnchor)
+        && placement.kind === "formula"
         && placement.bufferType === bufferType
         && placement.latex === region.formula.latex
         && placement.layoutHint
@@ -2384,6 +2403,175 @@ export class FormulaScreen {
     const bounds = this.#placementBounds(placement);
     return bounds.start === viewportY + region.canvas.startRow
       && bounds.end === viewportY + region.canvas.endRow;
+  }
+
+  #imageCanvasAvailable(row: number, text: string, rows: number): boolean {
+    const buffer = this.terminal.buffer.active;
+    const source = buffer.getLine(buffer.viewportY + row);
+    if (!source || source.isWrapped || source.translateToString(true) !== text
+      || buffer.getLine(buffer.viewportY + row + 1)?.isWrapped) return false;
+    for (let offset = 1; offset < rows; offset += 1) {
+      const line = buffer.getLine(buffer.viewportY + row + offset);
+      if (!line || line.isWrapped || line.translateToString(true).trim()) return false;
+    }
+    return true;
+  }
+
+  #visibleLocalImages(formulaRegions: readonly FormulaPlacementPlan[]): VisibleLocalImage[] {
+    const buffer = this.terminal.buffer.active;
+    const visible = Array.from({ length: this.terminal.rows }, (_, row) =>
+      buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? ""
+    );
+    if (!visible.some((text) => text.includes("!["))) return [];
+
+    // Read from the start of the retained buffer so a fence opened just above
+    // the viewport cannot turn code examples into live file references.
+    let fence = "";
+    let fenceLength = 0;
+    const candidates: VisibleLocalImage[] = [];
+    for (let absoluteRow = 0; absoluteRow < buffer.viewportY + this.terminal.rows; absoluteRow += 1) {
+      const row = absoluteRow - buffer.viewportY;
+      const line = buffer.getLine(absoluteRow);
+      const text = line?.translateToString(true) ?? "";
+      if (!line?.isWrapped) {
+        const marker = /^ {0,3}(`{3,}|~{3,})/u.exec(text)?.[1];
+        if (marker && (!fence || (marker[0] === fence && marker.length >= fenceLength
+          && /^ {0,3}(?:`{3,}|~{3,})\s*$/u.test(text)))) {
+          if (fence) fence = "";
+          else { fence = marker[0]!; fenceLength = marker.length; }
+          continue;
+        }
+      }
+      if (fence || row < 0 || !line || line.isWrapped) continue;
+      const reference = localImageReference(text, this.#cwd);
+      if (!reference || buffer.getLine(absoluteRow + 1)?.isWrapped) continue;
+      const sourceColumns = lineTrimmedColumns(line);
+      if (sourceColumns > this.terminal.cols
+        || formulaRegions.some((region) =>
+          region.canvas.startRow <= row && region.canvas.endRow >= row)) continue;
+      let availableRows = 1;
+      while (row + availableRows < this.terminal.rows && availableRows < 12) {
+        const next = buffer.getLine(absoluteRow + availableRows);
+        if (!next || next.isWrapped || next.translateToString(true).trim()
+          || formulaRegions.some((region) => region.canvas.startRow <= row + availableRows
+            && region.canvas.endRow >= row + availableRows)) break;
+        availableRows += 1;
+      }
+      if (availableRows >= 2) candidates.push({ row, reference, sourceColumns, availableRows });
+    }
+    return candidates;
+  }
+
+  async #scanLocalImages(
+    formulaRegions: readonly FormulaPlacementPlan[],
+    bufferType: string,
+    viewportY: number,
+    version: number,
+    layoutVersion: number,
+    allowQueuedWrites: boolean,
+    desiredAnchors: Set<string>
+  ): Promise<void> {
+    for (const { row, reference, sourceColumns, availableRows } of
+      this.#visibleLocalImages(formulaRegions)) {
+      if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
+        || version !== this.#scanVersion || (!allowQueuedWrites && this.#pendingWrites > 0)) break;
+      const anchor = `${bufferType}:${viewportY + row}:0`;
+      const existing = this.#placed.get(anchor);
+      try {
+        const prepared = await this.#imagePreviews.prepare(
+          reference.path, sourceColumns, this.terminal.cols, availableRows,
+          this.#capabilities.cell, this.#capabilities.background
+        );
+        if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
+          || this.terminal.buffer.active.type !== bufferType
+          || this.terminal.buffer.active.viewportY !== viewportY
+          || version !== this.#scanVersion || (!allowQueuedWrites && this.#pendingWrites > 0)) {
+          this.#rescanRequested = true;
+          break;
+        }
+        if (!prepared || !this.#imageCanvasAvailable(row, reference.text, prepared.rows)) continue;
+        desiredAnchors.add(anchor);
+        const fingerprint = prepared.key;
+        const bounds = existing && this.#placementBounds(existing);
+        if (existing?.kind === "image" && existing.fingerprint === fingerprint
+          && existing.resizeGeneration === this.#resizeGeneration
+          && bounds?.start === viewportY + row
+          && bounds?.end === viewportY + row + prepared.rows - 1
+          && (bufferType !== "normal" || [existing.startMarker, existing.endMarker].some(
+            (marker) => Boolean(marker && !marker.isDisposed && marker.line >= 0)
+          ))) continue;
+        if (this.terminal.buffer.active.cursorX >= this.terminal.cols
+          && this.#pendingWrapHeldColumns === undefined && !this.#pendingWrapReplay()) break;
+        const imageKey = `${bufferType}:agent-image:${fingerprint}`;
+        if (this.#blockedImageKeys.has(imageKey)) continue;
+        const retry = this.#imageRetries.get(imageKey);
+        if (retry && retry.notBefore > Date.now()) continue;
+        let image = this.#terminalImages.get(imageKey);
+        if (!image) {
+          image = { imageId: this.#nextImageId(), placements: 0, lastUsed: ++this.#imageUse };
+          const transmission = this.#transmitImage(prepared.png, image.imageId);
+          this.#terminalImages.set(imageKey, image);
+          if (!await this.#writeGraphicsTransaction(() =>
+            this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
+              || version !== this.#scanVersion ? undefined : transmission)) {
+            this.#terminalImages.delete(imageKey);
+            this.#rescanRequested = true;
+            break;
+          }
+        }
+        if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
+          || version !== this.#scanVersion || (!allowQueuedWrites && this.#pendingWrites > 0)
+          || this.terminal.buffer.active.viewportY !== viewportY
+          || !this.#imageCanvasAvailable(row, reference.text, prepared.rows)) {
+          this.#rescanRequested = true;
+          break;
+        }
+        const imageId = image.imageId;
+        const placementId = this.#nextPlacementId();
+        const emitted = await this.#writeGraphicsTransaction(() => {
+          if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
+            || version !== this.#scanVersion
+            || this.terminal.buffer.active.viewportY !== viewportY
+            || !this.#imageCanvasAvailable(row, reference.text, prepared.rows)) return undefined;
+          const restore = this.#cursorRestoreAfterGraphics();
+          if (!restore) return undefined;
+          return (existing ? kittyDeletePlacement(existing.imageId, existing.placementId) : "")
+            + cursorPosition(row + 1, 1)
+            + kittyPlaceImage(imageId, placementId, prepared.columns, prepared.rows)
+            + restore;
+        });
+        if (!emitted) { this.#rescanRequested = true; break; }
+        if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
+          || version !== this.#scanVersion || this.terminal.buffer.active.viewportY !== viewportY
+          || !this.#imageCanvasAvailable(row, reference.text, prepared.rows)) {
+          await this.#writeGraphicsTransaction(
+            kittyDeletePlacement(imageId, placementId) + (this.#cursorRestoreAfterGraphics() ?? "")
+          );
+          // The transaction already removed the old pin, if there was one.
+          if (existing && this.#placed.get(anchor) === existing) {
+            this.#releasePlacement(existing);
+            this.#placed.delete(anchor);
+          }
+          this.#rescanRequested = true;
+          break;
+        }
+        if (existing) this.#releasePlacement(existing);
+        image.placements += 1;
+        image.lastUsed = ++this.#imageUse;
+        this.#placed.set(anchor, {
+          kind: "image", anchor, imageId, placementId, imageKey,
+          latex: reference.path, sourceText: reference.text, fingerprint,
+          resizeGeneration: this.#resizeGeneration, bufferType,
+          absoluteStartRow: viewportY + row,
+          absoluteEndRow: viewportY + row + prepared.rows - 1,
+          ...this.#markersForRows(row, row + prepared.rows - 1)
+        });
+        this.#evictIdleTerminalImages();
+        this.#debug(`rendered local image at ${anchor} (${prepared.columns}x${prepared.rows} cells)`);
+      } catch (error) {
+        this.#debug(`local image skipped: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 
   async #scan(allowQueuedWrites = false, forceStable = false): Promise<void> {
@@ -2723,6 +2911,7 @@ export class FormulaScreen {
           image.lastUsed = ++this.#imageUse;
           const markers = this.#markersForRegion(region);
           this.#placed.set(anchor, {
+            kind: "formula",
             anchor,
             imageId: image.imageId,
             placementId,
@@ -2803,6 +2992,10 @@ export class FormulaScreen {
           }
         }
       }
+      await this.#scanLocalImages(
+        regions, bufferType, viewportY, version, layoutVersion,
+        allowQueuedWrites, desiredAnchors
+      );
       // Stale placement deletion is deliberately transactional as well. A
       // resize can invalidate an in-flight scan; deleting before all current
       // formulas are prepared would permanently lose an image that has just

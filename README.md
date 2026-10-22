@@ -88,6 +88,23 @@ tformula --shell
 
 Running `tformula` without arguments is equivalent to `tformula --shell`.
 
+## Local images in Agent output
+
+Ask the Agent to print a local image reference on its **own line**, for example:
+
+```md
+![Fetched page screenshot](./artifacts/screenshot.png)
+```
+
+Relative paths resolve from the Agent's working directory; absolute paths and
+`file://` URIs also work. TFormula fits a preview over the reference line and
+the immediately following blank lines (up to 12 rows), without inserting lines
+or replacing the underlying text. If there is insufficient space, the file
+cannot be read, or the terminal lacks Kitty graphics, the reference stays as
+text. Fenced examples and remote URLs are ignored. The Agent's TUI must actually
+print the Markdown reference: a PTY proxy cannot recover a path that the TUI
+already transformed or omitted before writing to the terminal.
+
 ## Markdown reader
 
 Pass a Markdown, text, or image path instead of a command to open TFormula's
