@@ -61,6 +61,8 @@ export class FocusKeyDecoder {
   }
 
   #decode(sequence: string, final: string, parameters: string, focused: boolean): string {
+    if (final === "A") return focused ? "p" : sequence;
+    if (final === "B") return focused ? "n" : sequence;
     if (final !== "u") return focused ? "" : sequence;
     // Kitty primary codepoint, optional shifted/base codepoints, modifier mask
     // (+1), optional press/repeat/release type, optional associated text.

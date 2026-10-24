@@ -336,8 +336,10 @@ tformula --focus-key ctrl-f codex
 TFORMULA_FOCUS_KEY=none tformula claude
 ```
 
-图片聚焦使用独立的 `Ctrl-\`，聚焦期间 `n`/`j`、`p`/`k` 切换近期图片；也可以
-使用 `--image-focus-key <key>` 或 `TFORMULA_IMAGE_FOCUS_KEY` 更改快捷键。
+图片聚焦使用独立的 `Ctrl-\`：按一次进入读图，聚焦期间再次按下退出；`n`/`j`
+或下方向键切换到下一张，`p`/`k` 或上方向键切换到上一张。这些按键由 TFormula
+消费，不会泄漏给 Agent。可以使用 `--image-focus-key <key>` 或
+`TFORMULA_IMAGE_FOCUS_KEY` 更改进入/退出快捷键。
 
 ## Agent 提示词模板
 

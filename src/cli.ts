@@ -55,7 +55,7 @@ Options:
   --min-readable-scale <n> Keep raw TeX below this fitted ratio, default 0.4
   --stability-ms <number>  Background formula quiet period, default 80 ms
   --focus-key <key>        Focus latest formula, default ctrl-] (or none)
-  --image-focus-key <key>  Focus latest local image, default ctrl-\\ (or none)
+  --image-focus-key <key>  Browse local images, default ctrl-\\ (or none)
   --cell-size <WxH>        Override terminal cell pixels, for example 9x18
   -C, --cwd <directory>    Child or reader working directory
   --debug                  Print diagnostics

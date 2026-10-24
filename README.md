@@ -404,9 +404,11 @@ tformula --focus-key ctrl-f codex
 TFORMULA_FOCUS_KEY=none tformula claude
 ```
 
-Images have their own `Ctrl-\` focus shortcut. While focused, `n`/`j` and
-`p`/`k` navigate recent images. Customize it with `--image-focus-key <key>` or
-`TFORMULA_IMAGE_FOCUS_KEY`.
+Images have their own `Ctrl-\` focus shortcut. Press it to enter image focus;
+press it again to close the overlay. While focused, `n`/`j` or Down selects
+the next recent image, and `p`/`k` or Up selects the previous one. These keys
+are consumed by TFormula. Customize the entry shortcut with
+`--image-focus-key <key>` or `TFORMULA_IMAGE_FOCUS_KEY`.
 
 ## Agent prompt template
 

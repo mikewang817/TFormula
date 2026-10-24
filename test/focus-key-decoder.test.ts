@@ -32,6 +32,12 @@ describe("FocusKeyDecoder", () => {
   it("decodes navigation and Escape while focus is active", () => {
     const decoder = new FocusKeyDecoder(new Set(["\x1c"]));
     expect(decoder.push("\x1b[110u\x1b[9u\x1b[27u", true)).toBe("n\t\x1b");
-    expect(decoder.push("\x1b[113;1:3u\x1b[A", true)).toBe("");
+    expect(decoder.push("\x1b[113;1:3u\x1b[A", true)).toBe("p");
+  });
+
+  it("maps arrow navigation only while focus is active", () => {
+    const decoder = new FocusKeyDecoder(new Set(["\x1c"]));
+    expect(decoder.push("\x1b[A\x1b[B", false)).toBe("\x1b[A\x1b[B");
+    expect(decoder.push("\x1b[A\x1b[B", true)).toBe("pn");
   });
 });
