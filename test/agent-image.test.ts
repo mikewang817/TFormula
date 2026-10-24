@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { localImageReference } from "../src/agent-image.js";
+import { AgentImagePreviews, localImageReference } from "../src/agent-image.js";
 import { loadSharp } from "../src/sharp-loader.js";
+import { TFORMULA_FOCUS_Z_INDEX } from "../src/kitty.js";
 import { FormulaScreen } from "../src/screen.js";
 
 const capabilities = {
@@ -24,6 +25,32 @@ beforeAll(async () => {
 afterAll(async () => { if (directory) await rm(directory, { recursive: true, force: true }); });
 
 describe("local Agent image overlays", () => {
+  it("rasterizes real source pixels into the transmitted PNG instead of a blank canvas", async () => {
+    const prepared = await new AgentImagePreviews().prepare(
+      join(directory, "sample.png"), 30, 60, 8, capabilities.cell, capabilities.background
+    );
+    expect(prepared).toBeDefined();
+    const sharp = await loadSharp();
+    const { data, info } = await sharp(prepared!.png).raw().toBuffer({ resolveWithObject: true });
+    expect(info.width).toBe(prepared!.columns * capabilities.cell.width);
+    expect(info.height).toBe(prepared!.rows * capabilities.cell.height);
+    expect([...data.subarray(0, 3)]).toEqual([255, 0, 0]);
+  });
+
+  it("keeps a tiny dark screenshot as a link and prepares a full-viewport focus image", async () => {
+    const previews = new AgentImagePreviews();
+    const source = join(process.cwd(), "assets", "tformula-maxwell.png");
+    expect(await previews.prepare(source, 30, 80, 2, capabilities.cell, capabilities.background))
+      .toBeUndefined();
+    const full = await previews.prepare(
+      source, 80, 80, 24, capabilities.cell, capabilities.background, true
+    );
+    expect(full).toMatchObject({ columns: 80, rows: 24 });
+    const sharp = await loadSharp();
+    const stats = await sharp(full!.png).stats();
+    expect(stats.channels[0]!.max).toBeGreaterThan(100);
+  });
+
   it("accepts only standalone local Markdown images, including encoded and file paths", () => {
     expect(localImageReference("![preview](./sample.png)", directory)?.path)
       .toBe(join(directory, "sample.png"));
@@ -62,6 +89,84 @@ describe("local Agent image overlays", () => {
       await screen.flushScan();
       expect(output.join("")).toContain(`a=d,d=i,i=${first[1]},p=${first[2]}`);
       expect(screen.terminal.buffer.active.getLine(2)?.translateToString(true)).toBe("new status");
+    } finally { screen.dispose(); }
+  });
+
+  it("renders an OpenTUI-style OSC 8 image label whose Markdown markup was concealed", async () => {
+    const output: string[] = [];
+    const debug: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 60, rows: 8, cwd: directory, capabilities, scale: 1,
+      writeOuter: (data) => output.push(String(data)),
+      debug: (message) => debug.push(message)
+    });
+    try {
+      const label = "TFormula 麦克斯韦方程组截图";
+      await screen.write(`\x1b]8;;./sample.png\x1b\\${label}\x1b]8;;\x1b\\`);
+      expect(debug).toContain(`local image target indexed: ${join(directory, "sample.png")}`);
+      expect(screen.canSkipOutputCheckpoints).toBe(false);
+      await screen.flushScan();
+      expect(output.join("")).toContain("a=p");
+      expect(screen.terminal.buffer.active.getLine(0)?.translateToString(true)).toBe(label);
+
+      output.length = 0;
+      await screen.write("\r\x1b[2KSee \x1b]8;;./sample.png\x1b\\preview\x1b]8;;\x1b\\ here");
+      await screen.flushScan();
+      expect(output.join("")).toContain("a=d,d=i");
+      expect(output.join("")).not.toContain("a=p");
+    } finally { screen.dispose(); }
+  });
+
+  it("focuses a linked image even when there is no blank line to borrow", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 60, rows: 8, cwd: directory, capabilities, scale: 1,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      await screen.write("\x1b]8;;./sample.png\x1b\\preview\x1b]8;;\x1b\\\r\nnext line");
+      expect(screen.recentImageCount).toBe(1);
+      await screen.flushScan();
+      expect(output.join("")).not.toContain("a=p");
+
+      output.length = 0;
+      expect(await screen.focusLatestImage()).toBe(true);
+      expect(output.join("")).toContain(`c=60,r=8,C=1,z=${TFORMULA_FOCUS_Z_INDEX}`);
+      expect(screen.terminal.buffer.active.getLine(0)?.translateToString(true)).toBe("preview");
+      screen.resize(65, 9);
+      output.length = 0;
+      expect(await screen.refreshFormulaFocus()).toBe(true);
+      expect(output.join("")).toContain(`c=65,r=9,C=1,z=${TFORMULA_FOCUS_Z_INDEX}`);
+
+      output.length = 0;
+      await screen.closeFormulaFocus();
+      expect(output.join("")).toContain("a=d,d=i");
+      expect(screen.formulaFocusActive).toBe(false);
+    } finally { screen.dispose(); }
+  });
+
+  it("reports a missing target once and focuses an earlier valid image", async () => {
+    const output: string[] = [];
+    const debug: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 60, rows: 8, cwd: directory, capabilities, scale: 1,
+      writeOuter: (data) => output.push(String(data)),
+      debug: (message) => debug.push(message)
+    });
+    try {
+      await screen.write(
+        "\x1b]8;;./sample.png\x1b\\valid\x1b]8;;\x1b\\"
+        + "\x1b[2;1H\x1b]8;;./image.png\x1b\\missing\x1b]8;;\x1b\\"
+      );
+      await screen.flushScan();
+      await screen.flushScan();
+      expect(debug.filter((message) => message.includes("ENOENT"))).toHaveLength(1);
+      expect(screen.recentImageCount).toBe(2);
+
+      output.length = 0;
+      expect(await screen.focusLatestImage()).toBe(true);
+      expect(debug).toContainEqual(expect.stringContaining("image focus skipped: ENOENT"));
+      expect(output.join("")).toContain(`z=${TFORMULA_FOCUS_Z_INDEX}`);
     } finally { screen.dispose(); }
   });
 

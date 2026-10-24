@@ -10,18 +10,15 @@ const MAX_SOURCE_PIXELS = 40_000_000;
 const MAX_PREVIEW_COLUMNS = 80;
 const MAX_PREVIEW_ROWS = 12;
 const MAX_CACHED_PREVIEWS = 8;
+const MIN_READABLE_PREVIEW_ROWS = 6;
 
 export interface LocalImageReference {
   text: string;
   path: string;
 }
 
-/** Only a complete, standalone Markdown image owns the cells it may cover. */
-export function localImageReference(text: string, cwd: string): LocalImageReference | undefined {
-  if (text.length > 2_048 || !/^ {0,3}!\[[^\]\r\n]*\]\(/u.test(text)) return undefined;
-  const match = /^ {0,3}!\[[^\]\r\n]*\]\((?:<([^<>\r\n]+)>|([^()\r\n]+))\)\s*$/u.exec(text);
-  if (!match) return undefined;
-  const raw = (match[1] ?? match[2] ?? "").trim();
+/** Resolve only local image targets; never fetch network URLs from Agent output. */
+export function localImagePath(raw: string, cwd: string): string | undefined {
   if (!raw || /^(?:https?:|data:|\/\/)/iu.test(raw)) return undefined;
   try {
     const path = /^file:/iu.test(raw)
@@ -30,10 +27,19 @@ export function localImageReference(text: string, cwd: string): LocalImageRefere
         ? undefined
         : decodeURIComponent(raw.replace(/\\([ ()])/gu, "$1"));
     if (!path || readerFileKind(path) !== "image") return undefined;
-    return { text, path: isAbsolute(path) ? path : resolve(cwd, path) };
+    return isAbsolute(path) ? path : resolve(cwd, path);
   } catch {
     return undefined;
   }
+}
+
+/** Only a complete, standalone Markdown image owns the cells it may cover. */
+export function localImageReference(text: string, cwd: string): LocalImageReference | undefined {
+  if (text.length > 2_048 || !/^ {0,3}!\[[^\]\r\n]*\]\(/u.test(text)) return undefined;
+  const match = /^ {0,3}!\[[^\]\r\n]*\]\((?:<([^<>\r\n]+)>|([^()\r\n]+))\)\s*$/u.exec(text);
+  if (!match) return undefined;
+  const path = localImagePath((match[1] ?? match[2] ?? "").trim(), cwd);
+  return path ? { text, path } : undefined;
 }
 
 export interface PreparedAgentImage {
@@ -54,7 +60,8 @@ export class AgentImagePreviews {
     terminalColumns: number,
     availableRows: number,
     cell: CellMetrics,
-    background: string
+    background: string,
+    focus = false
   ): Promise<PreparedAgentImage | undefined> {
     const info = await stat(path);
     if (!info.isFile() || info.size === 0 || info.size > MAX_SOURCE_BYTES) return undefined;
@@ -78,23 +85,25 @@ export class AgentImagePreviews {
 
     const cellWidth = Math.max(1, cell.width);
     const cellHeight = Math.max(1, cell.height);
-    const maxColumns = Math.min(terminalColumns, MAX_PREVIEW_COLUMNS);
-    const maxRows = Math.min(availableRows, MAX_PREVIEW_ROWS);
-    if (maxRows < 2 || sourceColumns > terminalColumns) return undefined;
+    const maxColumns = focus ? terminalColumns : Math.min(terminalColumns, MAX_PREVIEW_COLUMNS);
+    const maxRows = focus ? availableRows : Math.min(availableRows, MAX_PREVIEW_ROWS);
+    if (maxRows < (focus ? 1 : 2) || sourceColumns > terminalColumns) return undefined;
     const scale = Math.min(1, maxColumns * cellWidth / width, maxRows * cellHeight / height);
     const imageColumns = Math.max(1, Math.ceil(width * scale / cellWidth));
     const imageRows = Math.max(1, Math.ceil(height * scale / cellHeight));
-    // A one-cell thumbnail of a large screenshot is less useful than its path.
-    if (imageRows < 2 && height > cellHeight) return undefined;
-    const columns = Math.max(sourceColumns, imageColumns);
-    const rows = imageRows;
+    // A full-page screenshot squeezed into two rows looks like a solid dark
+    // rectangle. Keep its linked label and let the user focus it instead.
+    if (!focus && imageRows < MIN_READABLE_PREVIEW_ROWS
+      && height > MIN_READABLE_PREVIEW_ROWS * cellHeight) return undefined;
+    const columns = focus ? terminalColumns : Math.max(sourceColumns, imageColumns);
+    const rows = focus ? availableRows : imageRows;
     const canvasWidth = Math.max(1, Math.floor(columns * cellWidth));
     const canvasHeight = Math.max(1, Math.floor(rows * cellHeight));
     const imageWidth = Math.max(1, Math.min(canvasWidth, Math.floor(width * scale)));
     const imageHeight = Math.max(1, Math.min(canvasHeight, Math.floor(height * scale)));
     const key = JSON.stringify([
       path, info.size, info.mtimeMs, columns, rows, canvasWidth, canvasHeight,
-      imageWidth, imageHeight, background
+      imageWidth, imageHeight, background, focus
     ]);
     const cached = this.#cache.get(key);
     if (cached) return cached;
@@ -107,7 +116,11 @@ export class AgentImagePreviews {
       .toBuffer();
     const png = await sharp({
       create: { width: canvasWidth, height: canvasHeight, channels: 4, background }
-    }).composite([{ input: image, left: 0, top: 0 }]).png().toBuffer();
+    }).composite([{
+      input: image,
+      left: focus ? Math.floor((canvasWidth - imageWidth) / 2) : 0,
+      top: focus ? Math.floor((canvasHeight - imageHeight) / 2) : 0
+    }]).png().toBuffer();
     const prepared = { key, png, columns, rows };
     this.#cache.set(key, prepared);
     if (this.#cache.size > MAX_CACHED_PREVIEWS) {

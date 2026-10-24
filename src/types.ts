@@ -135,6 +135,8 @@ export interface CliOptions {
   stabilityMs: number;
   /** One control character which toggles the non-destructive formula focus overlay. */
   focusKey: string;
+  /** One control character which opens the last local image at readable size. */
+  imageFocusKey: string;
   cellOverride?: { width: number; height: number };
 }
 

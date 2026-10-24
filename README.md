@@ -97,13 +97,18 @@ Ask the Agent to print a local image reference on its **own line**, for example:
 ```
 
 Relative paths resolve from the Agent's working directory; absolute paths and
-`file://` URIs also work. TFormula fits a preview over the reference line and
+`file://` URIs also work. The Agent must first save the image as a local file
+accessible to this terminal; mentioning `image.png` without creating it is not
+enough. TFormula fits a preview over the reference line and
 the immediately following blank lines (up to 12 rows), without inserting lines
 or replacing the underlying text. If there is insufficient space, the file
 cannot be read, or the terminal lacks Kitty graphics, the reference stays as
-text. Fenced examples and remote URLs are ignored. The Agent's TUI must actually
-print the Markdown reference: a PTY proxy cannot recover a path that the TUI
-already transformed or omitted before writing to the terminal.
+text. Large screenshots squeezed into only a few spare rows are left as links;
+press `Ctrl-\` to view the latest image in a full-screen overlay, then `q`,
+`Esc`, or `Ctrl-\` to return. Fenced examples and remote URLs are ignored. The Agent's TUI must actually
+print the Markdown reference or emit a standalone OSC 8-linked image label (as
+OpenCode's Markdown renderer does). A PTY proxy cannot recover a path if the TUI
+discards both the reference and its hyperlink target.
 
 ## Markdown reader
 
@@ -399,6 +404,10 @@ tformula --focus-key ctrl-f codex
 TFORMULA_FOCUS_KEY=none tformula claude
 ```
 
+Images have their own `Ctrl-\` focus shortcut. While focused, `n`/`j` and
+`p`/`k` navigate recent images. Customize it with `--image-focus-key <key>` or
+`TFORMULA_IMAGE_FOCUS_KEY`.
+
 ## Agent prompt template
 
 TFormula needs no agent-side configuration. If you also want the agent to emit
@@ -547,6 +556,7 @@ ordinary prices such as `$12.50` from being rendered.
 --min-readable-scale <n> Keep raw TeX below this fitted ratio (0 to 1)
 --stability-ms <number> Background formula quiet period (0 to 2000 ms)
 --focus-key <key>       Formula focus shortcut (ctrl-X, one character, or none)
+--image-focus-key <key> Image focus shortcut (default ctrl-\)
 --cell-size <WxH>       Override terminal cell pixels
 -C, --cwd <directory>  Child working directory
 --debug                 Print detection and sizing diagnostics

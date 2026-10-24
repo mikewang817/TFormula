@@ -93,11 +93,16 @@ tformula --shell
 ```
 
 相对路径从启动 Agent 的工作目录解析；也支持绝对路径和 `file://` URI。
+Agent 必须先把图片保存到这个终端可访问的本地文件，再输出真实路径；仅在回答中
+写 `image.png`、但没有创建该文件，不会产生可渲染的图片。
 TFormula 会把本地图片缩成预览并覆盖引用行及其后连续的空白行，最多占用 12 行；
 不会插入终端行或改动原文。没有足够空白空间、路径不可读或终端不支持 Kitty
-图形协议时保留原引用。代码块中的示例和远程 URL 不会自动加载。
-这适用于 Agent 确实把 Markdown 引用写到了终端的情况；若 Agent 的 TUI
-在输出前自行转换或隐藏该引用，PTY 代理无法从终端画面恢复原始路径。
+图形协议时保留原引用。特别是大图只有几行空白时，不会再绘制近乎纯黑的微缩图；
+可按 `Ctrl-\` 在全屏覆盖层查看最近一张图片，用 `q`、`Esc` 或再次按
+`Ctrl-\` 返回。代码块中的示例和远程 URL 不会自动加载。
+如果 OpenCode 等 TUI 把 Markdown 图片转换成独占一行的 OSC 8 可点击说明文字，
+代理也能从链接目标读取图片路径。若 TUI 在输出前既隐藏引用也丢弃链接目标，
+PTY 代理就无法恢复原始路径。
 
 ## Markdown 阅读器
 
@@ -331,6 +336,9 @@ tformula --focus-key ctrl-f codex
 TFORMULA_FOCUS_KEY=none tformula claude
 ```
 
+图片聚焦使用独立的 `Ctrl-\`，聚焦期间 `n`/`j`、`p`/`k` 切换近期图片；也可以
+使用 `--image-focus-key <key>` 或 `TFORMULA_IMAGE_FOCUS_KEY` 更改快捷键。
+
 ## Agent 提示词模板
 
 TFormula 不需要任何 Agent 侧配置。如果你还希望 Agent 输出最容易被识别的公式
@@ -465,6 +473,7 @@ $ ... $
 --min-readable-scale <n> 低于该缩放比例时保留原始 TeX，范围 0～1
 --stability-ms <number> 后台公式静默期，范围 0～2000 毫秒
 --focus-key <key>       公式聚焦快捷键（ctrl-X、单字符或 none）
+--image-focus-key <key> 图片聚焦快捷键（默认 ctrl-\）
 --cell-size <WxH>       手动指定终端单元格像素尺寸
 -C, --cwd <directory>  指定 Agent 的工作目录
 --debug                 输出检测与尺寸调试信息

@@ -7,7 +7,9 @@ import type {
   ITerminalAddon,
   Terminal as XtermTerminal
 } from "@xterm/headless";
-import { AgentImagePreviews, localImageReference, type LocalImageReference } from "./agent-image.js";
+import {
+  AgentImagePreviews, localImagePath, localImageReference, type LocalImageReference
+} from "./agent-image.js";
 import { containsFormulaTrigger, MAX_DISPLAY_BLOCK_ROWS } from "./detect.js";
 import { planFormulaPlacements } from "./formula-layout.js";
 import {
@@ -475,8 +477,12 @@ export class FormulaScreen {
   readonly #formulaStability = new Map<string, FormulaStabilityState>();
   readonly #recentFormulas: RecentFormulaEntry[] = [];
   readonly #recentFormulaLimit = 50;
+  readonly #recentImages: string[] = [];
+  readonly #seenImageAnchors = new Map<string, string>();
+  readonly #imageFailureReports = new Map<string, { message: string; at: number }>();
   #recentFormulaId = 1;
   #focusIndex = -1;
+  #imageFocusIndex = -1;
   #focusPlacement?: FocusPlacement;
   #focusDirty = false;
   readonly #writeOuter: (data: string | Uint8Array) => void;
@@ -565,6 +571,17 @@ export class FormulaScreen {
     // ZWJ families). Wrong cell widths corrupt both formula anchors and the
     // cursor position restored after a Kitty placement.
     this.terminal.loadAddon(new UnicodeGraphemesAddon());
+    this.terminal.parser.registerOscHandler(8, (data) => {
+      // OpenCode may redraw/scroll a linked label before a viewport scan gets
+      // a quiet moment. Record the local target as the OSC 8 arrives, while
+      // returning false so xterm's native hyperlink handling remains intact.
+      const separator = data.indexOf(";");
+      const path = separator >= 0
+        ? localImagePath(data.slice(separator + 1), this.#cwd)
+        : undefined;
+      if (path) this.#rememberImage(path, `hyperlink:${path}`);
+      return false;
+    });
     this.#capabilities = options.capabilities;
     this.#scale = options.scale;
     this.#minReadableScale = Number.isFinite(options.minReadableScale)
@@ -671,7 +688,7 @@ export class FormulaScreen {
     alreadyQueued = false,
     preservedEraseDisplayOffsets: readonly number[] = []
   ): Promise<void> {
-    if (this.#focusIndex >= 0 && data) this.#focusDirty = true;
+    if (this.formulaFocusActive && data) this.#focusDirty = true;
     if (!alreadyQueued) this.queueWrite();
     if (this.#controlTail === ""
       && preservedEraseDisplayOffsets.length === 0
@@ -899,7 +916,24 @@ export class FormulaScreen {
   }
 
   get formulaFocusActive(): boolean {
-    return this.#focusIndex >= 0;
+    return this.#focusIndex >= 0 || this.#imageFocusIndex >= 0;
+  }
+
+  get recentImageCount(): number {
+    return this.#recentImages.length;
+  }
+
+  #rememberImage(path: string, anchor: string): void {
+    if (this.#seenImageAnchors.get(anchor) === path) return;
+    this.#seenImageAnchors.set(anchor, path);
+    if (this.#seenImageAnchors.size > 128) {
+      this.#seenImageAnchors.delete(this.#seenImageAnchors.keys().next().value!);
+    }
+    const previous = this.#recentImages.indexOf(path);
+    if (previous >= 0) this.#recentImages.splice(previous, 1);
+    else this.#debug(`local image target indexed: ${path}`);
+    this.#recentImages.unshift(path);
+    if (this.#recentImages.length > 50) this.#recentImages.pop();
   }
 
   #rememberFormula(
@@ -938,6 +972,7 @@ export class FormulaScreen {
 
   async focusLatestFormula(): Promise<boolean> {
     if (this.#recentFormulas.length === 0 || !this.#capabilities.kittyGraphics) return false;
+    if (this.#imageFocusIndex >= 0) await this.closeFormulaFocus();
     const previousIndex = this.#focusIndex;
     this.#focusIndex = 0;
     this.#focusDirty = true;
@@ -968,6 +1003,7 @@ export class FormulaScreen {
   }
 
   async refreshFormulaFocus(): Promise<boolean> {
+    if (this.#imageFocusIndex >= 0) return this.#refreshImageFocus();
     if (this.#focusIndex < 0) return false;
     if (!this.#focusDirty && this.#focusPlacement) return true;
     if (this.#disposed || this.#layoutSuspended || !this.#capabilities.kittyGraphics) return false;
@@ -1030,8 +1066,84 @@ export class FormulaScreen {
     }
   }
 
+  async focusLatestImage(): Promise<boolean> {
+    if (this.#recentImages.length === 0) this.#visibleLocalImages([]);
+    if (this.#recentImages.length === 0 || !this.#capabilities.kittyGraphics) return false;
+    if (this.#focusIndex >= 0) await this.closeFormulaFocus();
+    return this.#focusAvailableImage(0, 1);
+  }
+
+  async focusNextImage(): Promise<boolean> {
+    if (this.#recentImages.length === 0) return false;
+    return this.#focusAvailableImage((this.#imageFocusIndex + 1) % this.#recentImages.length, 1);
+  }
+
+  async focusPreviousImage(): Promise<boolean> {
+    if (this.#recentImages.length === 0) return false;
+    return this.#focusAvailableImage(
+      (this.#imageFocusIndex - 1 + this.#recentImages.length) % this.#recentImages.length, -1
+    );
+  }
+
+  async #focusAvailableImage(start: number, direction: 1 | -1): Promise<boolean> {
+    const previousIndex = this.#imageFocusIndex;
+    for (let offset = 0; offset < this.#recentImages.length; offset += 1) {
+      this.#imageFocusIndex = (start + direction * offset + this.#recentImages.length)
+        % this.#recentImages.length;
+      this.#focusDirty = true;
+      if (await this.#refreshImageFocus()) return true;
+    }
+    this.#imageFocusIndex = this.#focusPlacement ? previousIndex : -1;
+    return false;
+  }
+
+  async #refreshImageFocus(): Promise<boolean> {
+    if (this.#imageFocusIndex < 0) return false;
+    if (!this.#focusDirty && this.#focusPlacement) return true;
+    if (this.#disposed || this.#layoutSuspended || !this.#capabilities.kittyGraphics) return false;
+    const path = this.#recentImages[this.#imageFocusIndex];
+    if (!path) return false;
+    try {
+      const columns = this.terminal.cols;
+      const rows = this.terminal.rows;
+      const preview = await this.#imagePreviews.prepare(
+        path, columns, columns, rows, this.#capabilities.cell, this.#capabilities.background, true
+      );
+      if (!preview || this.#disposed || this.#layoutSuspended) {
+        if (!preview) this.#debug(`image focus skipped: image unavailable: ${path}`);
+        return false;
+      }
+      const restoreCursor = this.#cursorRestoreAfterGraphics();
+      if (!restoreCursor) return false;
+      const previous = this.#focusPlacement;
+      const imageId = this.#nextImageId();
+      const placementId = this.#nextPlacementId();
+      const emitted = await this.#writeGraphicsTransaction([
+        previous ? kittyDeletePlacement(previous.imageId, previous.placementId) : "",
+        previous ? kittyDeleteImage(previous.imageId) : "",
+        this.#transmitImage(preview.png, imageId),
+        cursorPosition(1, 1),
+        kittyPlaceImage(imageId, placementId, columns, rows, undefined, TFORMULA_FOCUS_Z_INDEX),
+        restoreCursor
+      ].join(""));
+      if (!emitted) {
+        this.#allocatedImageIds.delete(imageId);
+        return false;
+      }
+      if (previous) this.#allocatedImageIds.delete(previous.imageId);
+      this.#focusPlacement = { imageId, placementId };
+      this.#focusDirty = false;
+      this.#debug(`focused local image across ${columns}x${rows} cells`);
+      return true;
+    } catch (error) {
+      this.#debug(`image focus skipped: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
   async closeFormulaFocus(): Promise<void> {
     this.#focusIndex = -1;
+    this.#imageFocusIndex = -1;
     this.#focusDirty = false;
     const placement = this.#focusPlacement;
     this.#focusPlacement = undefined;
@@ -1073,8 +1185,9 @@ export class FormulaScreen {
     // fast path across callback boundaries.
     const buffer = this.terminal.buffer.active;
     for (let row = 0; row < this.terminal.rows; row += 1) {
-      const text = buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? "";
-      if (containsFormulaTrigger(text) || text.includes("![")) return false;
+      const line = buffer.getLine(buffer.viewportY + row);
+      const text = line?.translateToString(true) ?? "";
+      if (containsFormulaTrigger(text) || this.#imageReferenceAt(line, text)) return false;
     }
     return true;
   }
@@ -1136,7 +1249,7 @@ export class FormulaScreen {
   }
 
   resize(cols: number, rows: number, epoch?: number, deferUntilCapabilities = false): void {
-    if (this.#focusIndex >= 0) this.#focusDirty = true;
+    if (this.formulaFocusActive) this.#focusDirty = true;
     // A terminal may rebuild its cell grid (notably during rapid font zoom)
     // without reporting whether Kitty placements survived. Treat every resize
     // callback as a new placement generation. Rendered PNGs remain cached, but
@@ -1290,7 +1403,7 @@ export class FormulaScreen {
   }
 
   updateCapabilities(capabilities: TerminalCapabilities, resumeEpoch?: number): void {
-    if (this.#focusIndex >= 0) this.#focusDirty = true;
+    if (this.formulaFocusActive) this.#focusDirty = true;
     const graphicsChanged = capabilities.kittyGraphics !== this.#capabilities.kittyGraphics;
     const dimensionsChanged = capabilities.cell.width !== this.#capabilities.cell.width
       || capabilities.cell.height !== this.#capabilities.cell.height;
@@ -1316,7 +1429,7 @@ export class FormulaScreen {
   }
 
   setScale(scale: number): void {
-    if (this.#focusIndex >= 0) this.#focusDirty = true;
+    if (this.formulaFocusActive) this.#focusDirty = true;
     this.#scale = scale;
     this.#layoutVersion += 1;
     this.scheduleScan();
@@ -2405,10 +2518,38 @@ export class FormulaScreen {
       && bounds.end === viewportY + region.canvas.endRow;
   }
 
-  #imageCanvasAvailable(row: number, text: string, rows: number): boolean {
+  #imageReferenceAt(line: IBufferLine | undefined, text: string): LocalImageReference | undefined {
+    const markdown = localImageReference(text, this.#cwd);
+    if (markdown || !line || !text.trim()) return markdown;
+    // OpenTUI conceals Markdown images to an OSC 8-linked alt label. xterm
+    // stores the hyperlink target in its link service, not in the visible text.
+    // Feature-detect these internals and accept only a line consisting entirely
+    // of one linked label, never an ordinary inline link in a prose sentence.
+    const service = (this.terminal as unknown as {
+      _core?: { _oscLinkService?: {
+        getLinkData?: (id: number) => { uri?: string } | undefined;
+      } };
+    })._core?._oscLinkService;
+    if (typeof service?.getLinkData !== "function") return undefined;
+    let linkId = 0;
+    for (let column = 0; column < lineTrimmedColumns(line); column += 1) {
+      const cell = line.getCell(column);
+      if (!cell || !cell.getChars().trim()) continue;
+      const id = (cell as unknown as { extended?: { _urlId?: number } }).extended?._urlId;
+      if (!id || (linkId !== 0 && id !== linkId)) return undefined;
+      linkId = id;
+    }
+    if (!linkId) return undefined;
+    const path = localImagePath(service.getLinkData(linkId)?.uri ?? "", this.#cwd);
+    return path ? { text, path } : undefined;
+  }
+
+  #imageCanvasAvailable(row: number, reference: LocalImageReference, rows: number): boolean {
     const buffer = this.terminal.buffer.active;
     const source = buffer.getLine(buffer.viewportY + row);
-    if (!source || source.isWrapped || source.translateToString(true) !== text
+    if (!source || source.isWrapped
+      || this.#imageReferenceAt(source, source.translateToString(true))?.path !== reference.path
+      || source.translateToString(true) !== reference.text
       || buffer.getLine(buffer.viewportY + row + 1)?.isWrapped) return false;
     for (let offset = 1; offset < rows; offset += 1) {
       const line = buffer.getLine(buffer.viewportY + row + offset);
@@ -2419,10 +2560,11 @@ export class FormulaScreen {
 
   #visibleLocalImages(formulaRegions: readonly FormulaPlacementPlan[]): VisibleLocalImage[] {
     const buffer = this.terminal.buffer.active;
-    const visible = Array.from({ length: this.terminal.rows }, (_, row) =>
-      buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? ""
-    );
-    if (!visible.some((text) => text.includes("!["))) return [];
+    const references = Array.from({ length: this.terminal.rows }, (_, row) => {
+      const line = buffer.getLine(buffer.viewportY + row);
+      return this.#imageReferenceAt(line, line?.translateToString(true) ?? "");
+    });
+    if (!references.some(Boolean)) return [];
 
     // Read from the start of the retained buffer so a fence opened just above
     // the viewport cannot turn code examples into live file references.
@@ -2443,8 +2585,9 @@ export class FormulaScreen {
         }
       }
       if (fence || row < 0 || !line || line.isWrapped) continue;
-      const reference = localImageReference(text, this.#cwd);
+      const reference = references[row];
       if (!reference || buffer.getLine(absoluteRow + 1)?.isWrapped) continue;
+      this.#rememberImage(reference.path, `${buffer.type}:${absoluteRow}`);
       const sourceColumns = lineTrimmedColumns(line);
       if (sourceColumns > this.terminal.cols
         || formulaRegions.some((region) =>
@@ -2489,7 +2632,7 @@ export class FormulaScreen {
           this.#rescanRequested = true;
           break;
         }
-        if (!prepared || !this.#imageCanvasAvailable(row, reference.text, prepared.rows)) continue;
+        if (!prepared || !this.#imageCanvasAvailable(row, reference, prepared.rows)) continue;
         desiredAnchors.add(anchor);
         const fingerprint = prepared.key;
         const bounds = existing && this.#placementBounds(existing);
@@ -2522,7 +2665,7 @@ export class FormulaScreen {
         if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
           || version !== this.#scanVersion || (!allowQueuedWrites && this.#pendingWrites > 0)
           || this.terminal.buffer.active.viewportY !== viewportY
-          || !this.#imageCanvasAvailable(row, reference.text, prepared.rows)) {
+          || !this.#imageCanvasAvailable(row, reference, prepared.rows)) {
           this.#rescanRequested = true;
           break;
         }
@@ -2532,7 +2675,7 @@ export class FormulaScreen {
           if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
             || version !== this.#scanVersion
             || this.terminal.buffer.active.viewportY !== viewportY
-            || !this.#imageCanvasAvailable(row, reference.text, prepared.rows)) return undefined;
+            || !this.#imageCanvasAvailable(row, reference, prepared.rows)) return undefined;
           const restore = this.#cursorRestoreAfterGraphics();
           if (!restore) return undefined;
           return (existing ? kittyDeletePlacement(existing.imageId, existing.placementId) : "")
@@ -2543,7 +2686,7 @@ export class FormulaScreen {
         if (!emitted) { this.#rescanRequested = true; break; }
         if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
           || version !== this.#scanVersion || this.terminal.buffer.active.viewportY !== viewportY
-          || !this.#imageCanvasAvailable(row, reference.text, prepared.rows)) {
+          || !this.#imageCanvasAvailable(row, reference, prepared.rows)) {
           await this.#writeGraphicsTransaction(
             kittyDeletePlacement(imageId, placementId) + (this.#cursorRestoreAfterGraphics() ?? "")
           );
@@ -2569,7 +2712,17 @@ export class FormulaScreen {
         this.#evictIdleTerminalImages();
         this.#debug(`rendered local image at ${anchor} (${prepared.columns}x${prepared.rows} cells)`);
       } catch (error) {
-        this.#debug(`local image skipped: ${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        const previous = this.#imageFailureReports.get(reference.path);
+        const now = Date.now();
+        if (!previous || previous.message !== message || now - previous.at >= 10_000) {
+          this.#debug(`local image skipped: ${message}`);
+          this.#imageFailureReports.delete(reference.path);
+          this.#imageFailureReports.set(reference.path, { message, at: now });
+          if (this.#imageFailureReports.size > 128) {
+            this.#imageFailureReports.delete(this.#imageFailureReports.keys().next().value!);
+          }
+        }
       }
     }
   }

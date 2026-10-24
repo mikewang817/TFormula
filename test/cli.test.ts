@@ -27,12 +27,13 @@ describe("CLI arguments", () => {
 
   it("configures a single-character formula focus prefix", () => {
     expect(parseFocusKey("ctrl-]")).toBe("\x1d");
+    expect(parseFocusKey("ctrl-\\")).toBe("\x1c");
     expect(parseFocusKey("none")).toBe("");
     expect(parseArgs(["--focus-key", "ctrl-f", "codex"])).toMatchObject({
       mode: "proxy",
       focusKey: "\x06"
     });
-    expect(parseArgs(["codex"])).toMatchObject({ focusKey: "\x1d" });
+    expect(parseArgs(["codex"])).toMatchObject({ focusKey: "\x1d", imageFocusKey: "\x1c" });
   });
 
   it("starts a login shell by default", () => {

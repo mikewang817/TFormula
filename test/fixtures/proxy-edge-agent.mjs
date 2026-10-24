@@ -28,6 +28,10 @@ if (mode === "idle-pending-resize") {
   // cannot restore pending-wrap, no later child output is available to hide
   // the bug by triggering another scan.
   await delay(1_200);
+} else if (mode === "image-focus") {
+  process.stdout.write("\x1b[3;1H\x1b]8;;./assets/tformula-maxwell.png\x1b\\image preview\x1b]8;;\x1b\\");
+  process.stdout.write("\x1b[4;1Hnext line");
+  await delay(1_600);
 } else if (mode === "exit-during-probe") {
   await delay(25);
   process.stdout.write(`$$E=mc^2$$\n${"checkpoint\n".repeat(30)}`);
