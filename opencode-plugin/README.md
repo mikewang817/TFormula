@@ -59,3 +59,20 @@ Validated against the local OpenCode v2.2.2 installation and
 The installed declaration documents newer `api.keymap.registerLayer` methods
 but does not expose them on its `TuiKeymap` type. This implementation uses the
 runtime-compatible command registration until that API mismatch is resolved.
+
+## OpenCode 2.2.2 Runtime Note
+
+The plugin logic and the selection harness pass against the installed
+`@opencode-ai/plugin` declarations. A real OpenCode `v2.2.2` PTY launch was
+also attempted with this package loaded through both `cli.json` and the
+documented project `.opencode/plugins` discovery path. The TUI reported:
+
+```text
+Invalid V2 TUI plugin module: .../tformula-opencode
+```
+
+The error occurs before `tui()` setup runs, including with compiled JavaScript
+and the published module shape. This is a v2.2.2 local-loader/API compatibility
+issue, not a selection or TFormula bridge error. The stable package layout is
+kept here so it can be loaded by a compatible OpenCode v2 release or installed
+as a package through the normal plugin manager.

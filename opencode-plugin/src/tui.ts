@@ -112,16 +112,43 @@ async function showImageBoard(api: TuiPluginApi): Promise<void> {
   }));
 }
 
-const plugin: TuiPlugin = async (api) => {
-  const unregister = api.command?.register(() => [{
+export const id = "tformula-opencode";
+
+export const tui: TuiPlugin = async (api) => {
+  const command = {
     title: "TFormula: choose conversation image",
-    value: "tformula.image-board",
+    id: "tformula.image-board",
     category: "TFormula",
-    keybind: "ctrl-\\",
+    bind: "ctrl-\\",
+    palette: true,
     slash: { name: "tformula-images", aliases: ["images"] },
-    onSelect: () => { void showImageBoard(api); }
-  }]);
-  api.lifecycle.onDispose(() => unregister?.());
+    run: () => { void showImageBoard(api); }
+  };
+  const keymap = api.keymap as typeof api.keymap & {
+    registerLayer?: (layer: { mode?: string; commands: typeof command[]; bindings?: string[] }) => () => void;
+  };
+  let unregister: (() => void) | undefined;
+  if (typeof keymap.registerLayer === "function") {
+    unregister = keymap.registerLayer({
+      mode: "global",
+      commands: [command],
+      bindings: [command.id]
+    });
+  } else if (api.command?.register) {
+    // Compatibility with older local plugin runtimes.
+    unregister = api.command.register(() => [{
+      title: command.title,
+      value: command.id,
+      category: command.category,
+      keybind: command.bind,
+      slash: command.slash,
+      onSelect: command.run
+    }]);
+  }
+  api.lifecycle?.onDispose?.(() => unregister?.());
 };
 
-export default { id: "tformula-opencode", tui: plugin };
+// The v2 TUI module contract is an object containing the plugin id and setup
+// function. OpenCode's local loader uses this shape for both package exports
+// and direct local plugin directories.
+export default { id, tui };

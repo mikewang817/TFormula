@@ -21,6 +21,7 @@ function mockApi() {
       ]
     },
     command: { register: (factory: typeof commandFactory) => { commandFactory = factory; return () => undefined; } },
+    keymap: {},
     ui: {
       DialogSelect: (props: typeof dialogProps) => { dialogProps = props; return null; },
       dialog: { replace: (render: () => unknown) => { render(); }, clear: () => undefined },
