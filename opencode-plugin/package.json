@@ -1,0 +1,16 @@
+{
+  "name": "tformula-opencode-plugin",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./tui": "./src/tui.tsx"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.30"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.4.5",
+    "@opentui/keymap": ">=0.4.5",
+    "@opentui/solid": ">=0.4.5"
+  }
+}
