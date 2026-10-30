@@ -33,6 +33,7 @@ import {
   TFORMULA_IMAGE_ID_MIN
 } from "./kitty.js";
 import { detectScreenFormulaRegions } from "./screen-text.js";
+import { cancelRasterizationRequests } from "./resvg-client.js";
 import type {
   FormulaPlacementPlan,
   FormulaRenderedEvent,
@@ -1764,6 +1765,10 @@ export class FormulaScreen {
    * internal shape degrades to the conservative all-placements invalidation.
    */
   #markAlternateLayoutDirty(force = false, rows?: { start: number; end: number }): void {
+    // A native rasterization cannot be interrupted by xterm state changes. A
+    // rapid alternate-screen repaint makes its result stale, so terminate the
+    // worker here and let the latest viewport create a fresh request.
+    cancelRasterizationRequests();
     if ((!force && this.terminal.buffer.active.type !== "alternate")
       || !Array.from(this.#placed.values()).some((placement) =>
         placement.bufferType === "alternate"

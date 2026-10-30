@@ -171,6 +171,21 @@ export function closeRasterWorker(): void {
   child.kill();
 }
 
+/** Cancel work for a viewport that was invalidated while native rasterization ran. */
+export function cancelRasterizationRequests(): void {
+  const child = worker;
+  const superseded = new RasterWorkerError(
+    "raster-error",
+    "formula rasterization request superseded by a newer viewport"
+  );
+  rejectActive(superseded);
+  rejectQueued(superseded);
+  if (!child) return;
+  worker = undefined;
+  intentionallyClosed.add(child);
+  child.kill();
+}
+
 /** Reset process-local raster state between isolated test cases. */
 export function resetRasterWorkerState(): void {
   closeRasterWorker();
