@@ -44,6 +44,7 @@ export type MathRenderFailureCode =
   | "raster-error";
 
 export const RENDERER_COOLDOWN_MESSAGE = "formula rasterization paused after an isolated renderer crash";
+export const RENDER_REQUEST_SUPERSEDED_MESSAGE = "formula rasterization request superseded by a newer viewport";
 
 export class MathRenderError extends Error {
   constructor(readonly code: MathRenderFailureCode, message: string) {

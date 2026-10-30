@@ -15,16 +15,6 @@ export class RasterWorkerError extends Error {
   }
 }
 
-const WORKER_COOLDOWN_MS = 1_000;
-let workerUnavailableUntil = 0;
-
-function rendererCooldownError(): RasterWorkerError {
-  return new RasterWorkerError(
-    "raster-error",
-    "formula rasterization paused after an isolated renderer crash"
-  );
-}
-
 interface RasterRequest {
   id: number;
   svg: string;
@@ -43,6 +33,7 @@ interface RasterResponse {
 }
 
 interface PendingRequest {
+  id: number;
   child: ChildProcess;
   resolve: (png: Buffer) => void;
   reject: (error: Error) => void;
@@ -52,26 +43,57 @@ interface PendingRequest {
 const WORKER_TIMEOUT_MS = 15_000;
 let worker: ChildProcess | undefined;
 let nextRequestId = 1;
-const pending = new Map<number, PendingRequest>();
 const intentionallyClosed = new WeakSet<ChildProcess>();
+let activeRequest: PendingRequest | undefined;
+const queuedRequests: Array<{
+  id: number;
+  options: Omit<RasterRequest, "id">;
+  resolve: (png: Buffer) => void;
+  reject: (error: Error) => void;
+}> = [];
+const MAX_QUEUED_REQUESTS = 2;
 
 function workerUnavailable(message: string): RasterWorkerError {
   return new RasterWorkerError("raster-error", `formula rasterization failed: ${message}`);
 }
 
 function releaseWorkerIfIdle(child: ChildProcess): void {
-  if ([...pending.values()].some((request) => request.child === child)) return;
+  if (activeRequest?.child === child) return;
   child.unref();
   child.channel?.unref();
 }
 
-function rejectPending(child: ChildProcess, error: Error): void {
-  for (const [id, request] of pending) {
-    if (request.child !== child) continue;
-    clearTimeout(request.timer);
-    request.reject(error);
-    pending.delete(id);
-  }
+function rejectActive(error: Error): void {
+  const request = activeRequest;
+  activeRequest = undefined;
+  if (!request) return;
+  clearTimeout(request.timer);
+  request.reject(error);
+}
+
+function rejectQueued(error: Error): void {
+  while (queuedRequests.length > 0) queuedRequests.shift()!.reject(error);
+}
+
+function pump(): void {
+  if (activeRequest || queuedRequests.length === 0) return;
+  const next = queuedRequests.shift()!;
+  const child = worker?.connected ? worker : startWorker();
+  child.ref();
+  child.channel?.ref();
+  const timer = setTimeout(() => {
+    if (activeRequest?.child !== child || activeRequest === undefined) return;
+    rejectActive(workerUnavailable(`isolated renderer timed out after ${WORKER_TIMEOUT_MS} ms`));
+    child.kill("SIGKILL");
+    pump();
+  }, WORKER_TIMEOUT_MS);
+  timer.unref();
+  activeRequest = { id: next.id, child, resolve: next.resolve, reject: next.reject, timer };
+  child.send({ id: next.id, ...next.options }, (error) => {
+    if (!error || activeRequest?.child !== child) return;
+    rejectActive(workerUnavailable(error.message));
+    pump();
+  });
 }
 
 function workerModulePath(): string {
@@ -94,71 +116,58 @@ function startWorker(): ChildProcess {
 
   child.on("message", (value: RasterResponse) => {
     if (!value || !Number.isSafeInteger(value.id)) return;
-    const request = pending.get(value.id);
-    if (!request) return;
-    pending.delete(value.id);
+    const request = activeRequest;
+    if (!request || request.id !== value.id) return;
     clearTimeout(request.timer);
+    activeRequest = undefined;
     if (value.ok && Buffer.isBuffer(value.png)) request.resolve(value.png);
     else request.reject(new RasterWorkerError(
       value.code ?? "raster-error",
       value.message ?? "formula rasterization failed"
     ));
     releaseWorkerIfIdle(child);
+    pump();
   });
   child.on("error", (error) => {
     if (worker === child) worker = undefined;
-    rejectPending(child, workerUnavailable(error.message));
+    if (activeRequest?.child !== child) return;
+    rejectActive(workerUnavailable(error.message));
+    rejectQueued(workerUnavailable(error.message));
   });
   child.on("exit", (code, signal) => {
     if (worker === child) worker = undefined;
-    // A native worker crash invalidates the current batch of formulas. Do not
-    // immediately fork another worker for every stale viewport scan; that
-    // creates a crash/retry storm while a TUI is rapidly repainting.
-    if (!intentionallyClosed.has(child) && (signal || code !== 0)) {
-      workerUnavailableUntil = Date.now() + WORKER_COOLDOWN_MS;
-    }
-    rejectPending(child, workerUnavailable(
+    if (activeRequest?.child !== child) return;
+    const failure = workerUnavailable(
       `isolated renderer exited${signal ? ` on ${signal}` : ` with code ${code ?? "unknown"}`}`
-    ));
+    );
+    rejectActive(failure);
+    rejectQueued(failure);
   });
   releaseWorkerIfIdle(child);
   return child;
 }
 
 export function rasterizeSvgIsolated(options: Omit<RasterRequest, "id">): Promise<Buffer> {
-  if (Date.now() < workerUnavailableUntil) return Promise.reject(rendererCooldownError());
-  const child = worker?.connected ? worker : startWorker();
   const id = nextRequestId++;
-  child.ref();
-  child.channel?.ref();
-
   return new Promise<Buffer>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      if (!pending.delete(id)) return;
-      reject(workerUnavailable(`isolated renderer timed out after ${WORKER_TIMEOUT_MS} ms`));
-      child.kill("SIGKILL");
-    }, WORKER_TIMEOUT_MS);
-    timer.unref();
-    pending.set(id, { child, resolve, reject, timer });
-    child.send({ id, ...options }, (error) => {
-      if (!error) return;
-      const request = pending.get(id);
-      if (!request) return;
-      pending.delete(id);
-      clearTimeout(request.timer);
-      request.reject(workerUnavailable(error.message));
-      releaseWorkerIfIdle(child);
-    });
+    while (queuedRequests.length >= MAX_QUEUED_REQUESTS) {
+      queuedRequests.shift()!.reject(new RasterWorkerError(
+        "raster-error",
+        "formula rasterization request superseded by a newer viewport"
+      ));
+    }
+    queuedRequests.push({ id, options, resolve, reject });
+    pump();
   });
 }
 
 export function closeRasterWorker(): void {
   const child = worker;
   worker = undefined;
-  workerUnavailableUntil = 0;
+  rejectActive(workerUnavailable("isolated renderer closed"));
+  rejectQueued(workerUnavailable("isolated renderer closed"));
   if (!child) return;
   intentionallyClosed.add(child);
-  rejectPending(child, workerUnavailable("isolated renderer closed"));
   child.kill();
 }
 

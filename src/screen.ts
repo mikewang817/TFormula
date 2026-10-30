@@ -17,6 +17,7 @@ import {
   MathRenderError,
   MathRenderer,
   RENDERER_COOLDOWN_MESSAGE,
+  RENDER_REQUEST_SUPERSEDED_MESSAGE,
   type MathRenderFailureCode
 } from "./math-renderer.js";
 import {
@@ -3136,6 +3137,14 @@ export class FormulaScreen {
             }
           }
         } catch (error) {
+          if (error instanceof MathRenderError
+            && error.code === "raster-error"
+            && error.message.includes(RENDER_REQUEST_SUPERSEDED_MESSAGE)) {
+            // The latest-only raster queue intentionally discarded this old
+            // viewport request. It is not a formula failure and must not enter
+            // the retry ladder.
+            continue;
+          }
           if (error instanceof MathRenderError
             && error.code === "raster-error"
             && (error.message.includes(RENDERER_COOLDOWN_MESSAGE)
