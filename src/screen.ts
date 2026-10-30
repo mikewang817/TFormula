@@ -104,6 +104,14 @@ interface FormulaStabilityState {
   stable: boolean;
 }
 
+type DecorationStability =
+  | "inactive"
+  | "dirty"
+  | "settling"
+  | "stable"
+  | "rendering"
+  | "suspended";
+
 const DEFAULT_MAX_TERMINAL_IMAGES = 256;
 const DEFAULT_MAX_DETACHED_PLACEMENTS = 4_096;
 const MIRROR_SCROLLBACK_ROWS = 10_000;
@@ -516,6 +524,12 @@ export class FormulaScreen {
   #decorationQuietTimer?: NodeJS.Timeout;
   #decorationsPaused = false;
   #decorationsDirty = false;
+  #decorationState: DecorationStability = "stable";
+  #screenEpoch = 0;
+  #latestBatchId = 0;
+  #dirtySince = 0;
+  #stableSince = Date.now();
+  #lastDirtyReason = "initial";
   #scanVersion = 0;
   #layoutVersion = 0;
   #resizeGeneration = 0;
@@ -1292,6 +1306,7 @@ export class FormulaScreen {
     // visible cell pins are reasserted once and a formula blocked by a stale
     // transient snapshot receives a fresh attempt at the new geometry.
     this.#resizeGeneration += 1;
+    this.#invalidateDecorationBatch("resize");
     this.#blockedPlacementKeys.clear();
     this.#placementRetries.clear();
     this.#formulaStability.clear();
@@ -1425,6 +1440,7 @@ export class FormulaScreen {
 
   /** Cancel work prepared for the old real-terminal geometry immediately. */
   invalidateLayout(): number {
+    this.#invalidateDecorationBatch("layout-invalidate");
     this.#layoutEpoch += 1;
     this.#layoutSuspended = true;
     this.#layoutVersion += 1;
@@ -1446,11 +1462,21 @@ export class FormulaScreen {
     const colorsChanged = capabilities.foreground !== this.#capabilities.foreground
       || capabilities.background !== this.#capabilities.background;
     this.#capabilities = capabilities;
+    if (graphicsChanged || dimensionsChanged || colorsChanged || resumeEpoch !== undefined) {
+      this.#invalidateDecorationBatch("capability-change");
+    }
     if (graphicsChanged && capabilities.kittyGraphics) {
       this.#writeGraphicsTransaction(kittyDeleteByZIndex());
     }
     if (resumeEpoch !== undefined && resumeEpoch === this.#layoutEpoch) {
       this.#layoutSuspended = false;
+    }
+    if (!this.#layoutSuspended && this.#decorationState === "suspended") {
+      this.#decorationsDirty = false;
+      this.#decorationsPaused = false;
+      this.#decorationState = "stable";
+      this.#stableSince = Date.now();
+      this.#dirtySince = 0;
     }
     if (!this.#layoutSuspended) {
       for (const resolve of this.#layoutWaiters.splice(0)) resolve();
@@ -1467,6 +1493,7 @@ export class FormulaScreen {
   setScale(scale: number): void {
     if (this.formulaFocusActive) this.#focusDirty = true;
     this.#scale = scale;
+    this.#invalidateDecorationBatch("scale-change");
     this.#layoutVersion += 1;
     this.scheduleScan();
   }
@@ -1475,25 +1502,66 @@ export class FormulaScreen {
     return this.#decorationsPaused;
   }
 
+  get decorationStability(): DecorationStability {
+    return this.#decorationState;
+  }
+
+  get decorationEpoch(): number {
+    return this.#screenEpoch;
+  }
+
   notifyDecorationActivity(quietMs = 200): void {
+    this.markDecorationDirty("alternate-repaint", "layout", quietMs);
+  }
+
+  markDecorationDirty(
+    reason: string,
+    severity: "content" | "layout" | "global" = "content",
+    quietMs = severity === "content" ? this.#stabilityMs : 200
+  ): void {
     if (this.#disposed) return;
+    this.#screenEpoch += 1;
+    this.#latestBatchId += 1;
     this.#decorationsPaused = true;
     this.#decorationsDirty = true;
+    this.#decorationState = severity === "global" ? "suspended" : "dirty";
+    this.#dirtySince = this.#dirtySince || Date.now();
+    this.#lastDirtyReason = reason;
     if (this.#decorationQuietTimer) clearTimeout(this.#decorationQuietTimer);
     this.#decorationQuietTimer = setTimeout(() => {
       this.#decorationQuietTimer = undefined;
+      if (this.#disposed) return;
+      if (this.#layoutSuspended) {
+        this.#decorationState = "suspended";
+        this.#decorationsPaused = true;
+        return;
+      }
+      this.#decorationState = "settling";
       this.#decorationsPaused = false;
-      if (this.#decorationsDirty && !this.#layoutSuspended) {
+      if (this.#decorationsDirty) {
         this.#decorationsDirty = false;
+        this.#decorationState = "stable";
+        this.#stableSince = Date.now();
+        this.#dirtySince = 0;
         this.scheduleScan(0);
       }
     }, Math.max(0, Math.floor(quietMs)));
+  }
+
+  #invalidateDecorationBatch(reason: string): void {
+    this.#screenEpoch += 1;
+    this.#latestBatchId += 1;
+    this.#lastDirtyReason = reason;
+    this.#rescanRequested = true;
   }
 
   resumeDecorations(): void {
     if (this.#decorationQuietTimer) clearTimeout(this.#decorationQuietTimer);
     this.#decorationQuietTimer = undefined;
     this.#decorationsPaused = false;
+    this.#decorationState = "stable";
+    this.#stableSince = Date.now();
+    this.#dirtySince = 0;
     if (this.#decorationsDirty && !this.#layoutSuspended) {
       this.#decorationsDirty = false;
       this.scheduleScan(0);
@@ -1502,7 +1570,8 @@ export class FormulaScreen {
 
   scheduleScan(delayMs = 110, retryOnly = false): void {
     if (this.#disposed) return;
-    if (this.#decorationsPaused) {
+    if (this.#decorationsPaused || this.#decorationState === "dirty"
+      || this.#decorationState === "settling" || this.#decorationState === "suspended") {
       this.#decorationsDirty = true;
       return;
     }
@@ -2688,12 +2757,14 @@ export class FormulaScreen {
     viewportY: number,
     version: number,
     layoutVersion: number,
+    screenEpoch: number,
     allowQueuedWrites: boolean,
     desiredAnchors: Set<string>
   ): Promise<void> {
     for (const { row, reference, sourceColumns, availableRows } of
       this.#visibleLocalImages(formulaRegions)) {
-      if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
+      if (this.#disposed || this.#screenEpoch !== screenEpoch || this.#layoutSuspended
+        || layoutVersion !== this.#layoutVersion
         || version !== this.#scanVersion || (!allowQueuedWrites && this.#pendingWrites > 0)) break;
       const anchor = `${bufferType}:${viewportY + row}:0`;
       const existing = this.#placed.get(anchor);
@@ -2702,7 +2773,8 @@ export class FormulaScreen {
           reference.path, sourceColumns, this.terminal.cols, availableRows,
           this.#capabilities.cell, this.#capabilities.background
         );
-        if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
+        if (this.#disposed || this.#screenEpoch !== screenEpoch || this.#layoutSuspended
+          || layoutVersion !== this.#layoutVersion
           || this.terminal.buffer.active.type !== bufferType
           || this.terminal.buffer.active.viewportY !== viewportY
           || version !== this.#scanVersion || (!allowQueuedWrites && this.#pendingWrites > 0)) {
@@ -2732,14 +2804,16 @@ export class FormulaScreen {
           const transmission = this.#transmitImage(prepared.png, image.imageId);
           this.#terminalImages.set(imageKey, image);
           if (!await this.#writeGraphicsTransaction(() =>
-            this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
+            this.#disposed || this.#screenEpoch !== screenEpoch || this.#layoutSuspended
+              || layoutVersion !== this.#layoutVersion
               || version !== this.#scanVersion ? undefined : transmission)) {
             this.#terminalImages.delete(imageKey);
             this.#rescanRequested = true;
             break;
           }
         }
-        if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
+        if (this.#disposed || this.#screenEpoch !== screenEpoch || this.#layoutSuspended
+          || layoutVersion !== this.#layoutVersion
           || version !== this.#scanVersion || (!allowQueuedWrites && this.#pendingWrites > 0)
           || this.terminal.buffer.active.viewportY !== viewportY
           || !this.#imageCanvasAvailable(row, reference, prepared.rows)) {
@@ -2806,6 +2880,11 @@ export class FormulaScreen {
 
   async #scan(allowQueuedWrites = false, forceStable = false): Promise<void> {
     if (this.#disposed || !this.#capabilities.kittyGraphics || this.terminal.modes.originMode) return;
+    if ((allowQueuedWrites || !forceStable)
+      && (this.#decorationsPaused || this.#decorationState !== "stable")) {
+      this.#rescanRequested = true;
+      return;
+    }
     const rasterizerCooldown = this.#rasterizerCooldownUntil - Date.now();
     if (rasterizerCooldown > 0) {
       this.scheduleScan(rasterizerCooldown, true);
@@ -2821,6 +2900,7 @@ export class FormulaScreen {
     }
 
     this.#scanning = true;
+    this.#decorationState = "rendering";
     this.#rescanRequested = false;
     if (this.terminal.buffer.active.type === "alternate" && this.#alternateDirtyRows) {
       if (this.#alternate47Restored) {
@@ -2832,6 +2912,8 @@ export class FormulaScreen {
       }
     }
     const version = this.#scanVersion;
+    const screenEpoch = this.#screenEpoch;
+    const batchId = ++this.#latestBatchId;
     const layoutVersion = this.#layoutVersion;
     const activeBuffer = this.terminal.buffer.active;
     const viewportY = activeBuffer.viewportY;
@@ -2873,6 +2955,8 @@ export class FormulaScreen {
 
       for (const { region, plan, rows, columns, anchor, colors } of prepared) {
         if (this.#disposed
+          || this.#screenEpoch !== screenEpoch
+          || this.#latestBatchId !== batchId
           || (!allowQueuedWrites && this.#pendingWrites > 0)
           || this.#layoutSuspended
           || layoutVersion !== this.#layoutVersion
@@ -2982,6 +3066,8 @@ export class FormulaScreen {
             renderColors.background
           );
           if (this.#disposed
+            || this.#screenEpoch !== screenEpoch
+            || this.#latestBatchId !== batchId
             || (!allowQueuedWrites && this.#pendingWrites > 0)
             || this.#layoutSuspended
             || layoutVersion !== this.#layoutVersion
@@ -3081,6 +3167,8 @@ export class FormulaScreen {
             }
           }
           if (this.#disposed
+            || this.#screenEpoch !== screenEpoch
+            || this.#latestBatchId !== batchId
             || this.#layoutSuspended
             || layoutVersion !== this.#layoutVersion
             || this.terminal.buffer.active.type !== bufferType) {
@@ -3095,6 +3183,8 @@ export class FormulaScreen {
           try {
             emitted = await this.#writeGraphicsTransaction(() => {
               if (this.#disposed
+                || this.#screenEpoch !== screenEpoch
+                || this.#latestBatchId !== batchId
                 || this.#layoutSuspended
                 || layoutVersion !== this.#layoutVersion
                 || this.terminal.buffer.active.type !== bufferType) return undefined;
@@ -3116,6 +3206,8 @@ export class FormulaScreen {
             break;
           }
           if (this.#disposed
+            || this.#screenEpoch !== screenEpoch
+            || this.#latestBatchId !== batchId
             || this.#layoutSuspended
             || layoutVersion !== this.#layoutVersion
             || this.terminal.buffer.active.type !== bufferType) {
@@ -3249,7 +3341,7 @@ export class FormulaScreen {
       }
       await this.#scanLocalImages(
         regions, bufferType, viewportY, version, layoutVersion,
-        allowQueuedWrites, desiredAnchors
+        screenEpoch, allowQueuedWrites, desiredAnchors
       );
       // Stale placement deletion is deliberately transactional as well. A
       // resize can invalidate an in-flight scan; deleting before all current
@@ -3330,6 +3422,9 @@ export class FormulaScreen {
         }
       }
       this.#scanning = false;
+      if (this.#decorationState === "rendering") {
+        this.#decorationState = this.#decorationsPaused ? "dirty" : "stable";
+      }
       for (const resolve of this.#scanWaiters.splice(0)) resolve();
       if (!this.#disposed && (this.#rescanRequested || version !== this.#scanVersion)) {
         this.#rescanRequested = false;

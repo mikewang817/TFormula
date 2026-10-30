@@ -355,6 +355,81 @@ describe("FormulaScreen lifecycle", () => {
     }
   });
 
+  it("does not start decoration rendering while the screen is settling", async () => {
+    const renderer = new CapturingMathRenderer();
+    const screen = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined
+    });
+    try {
+      await screen.write("$$x=1$$");
+      screen.notifyDecorationActivity(1_000);
+      expect(screen.decorationStability).toBe("dirty");
+      await screen.flushScan(true);
+      expect(renderer.arguments).toHaveLength(0);
+      await waitFor(() => renderer.arguments.length === 1);
+      expect(screen.decorationStability).toBe("stable");
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("coalesces repeated decoration activity into one latest scan", async () => {
+    const renderer = new CapturingMathRenderer();
+    const screen = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      renderer,
+      writeOuter: () => undefined
+    });
+    try {
+      await screen.write("$$x=1$$");
+      screen.notifyDecorationActivity(40);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      screen.notifyDecorationActivity(40);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(renderer.arguments).toHaveLength(0);
+      await waitFor(() => renderer.arguments.length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(renderer.arguments).toHaveLength(1);
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("discards a render that becomes stale before placement", async () => {
+    const output: string[] = [];
+    const renderer = new DelayedMathRenderer();
+    renderer.delay = true;
+    renderer.started = () => undefined;
+    const screen = new FormulaScreen({
+      cols: 40,
+      rows: 4,
+      capabilities,
+      scale: 1,
+      stabilityMs: 0,
+      renderer,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      const scan = screen.write("$$x=1$$").then(() => screen.flushScan());
+      await waitFor(() => renderer.release !== undefined);
+      screen.notifyDecorationActivity(1_000);
+      renderer.release?.();
+      await scan;
+      expect(output.join("")).not.toContain("a=p");
+      expect(screen.decorationEpoch).toBeGreaterThan(0);
+    } finally {
+      screen.dispose();
+    }
+  });
+
   it("promotes a complete formula immediately at an output checkpoint", async () => {
     const renderer = new CapturingMathRenderer();
     const screen = new FormulaScreen({
