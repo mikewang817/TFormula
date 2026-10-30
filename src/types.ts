@@ -120,6 +120,16 @@ export interface FormulaRenderedEvent {
   confidence: DetectedFormula["confidence"];
 }
 
+/** A local image observed during one TFormula proxy process. */
+export interface RecentImageEntry {
+  /** Process-local identifier; it is invalid after this TFormula process exits. */
+  id: string;
+  /** Absolute local path resolved from the Agent working directory. */
+  path: string;
+  /** Last time this path was observed in the proxied terminal output. */
+  observedAt: number;
+}
+
 export interface CliOptions {
   mode: "proxy";
   command: string;

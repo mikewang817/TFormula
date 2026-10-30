@@ -34,6 +34,7 @@ import { detectScreenFormulaRegions } from "./screen-text.js";
 import type {
   FormulaPlacementPlan,
   FormulaRenderedEvent,
+  RecentImageEntry,
   RecentFormulaEntry,
   TerminalCapabilities
 } from "./types.js";
@@ -477,10 +478,11 @@ export class FormulaScreen {
   readonly #formulaStability = new Map<string, FormulaStabilityState>();
   readonly #recentFormulas: RecentFormulaEntry[] = [];
   readonly #recentFormulaLimit = 50;
-  readonly #recentImages: string[] = [];
+  readonly #recentImages: RecentImageEntry[] = [];
   readonly #seenImageAnchors = new Map<string, string>();
   readonly #imageFailureReports = new Map<string, { message: string; at: number }>();
   #recentFormulaId = 1;
+  #recentImageId = 1;
   #focusIndex = -1;
   #imageFocusIndex = -1;
   #focusPlacement?: FocusPlacement;
@@ -923,16 +925,24 @@ export class FormulaScreen {
     return this.#recentImages.length;
   }
 
+  /** Images observed in this proxy process, newest first. */
+  get recentImages(): readonly RecentImageEntry[] {
+    return this.#recentImages;
+  }
+
   #rememberImage(path: string, anchor: string): void {
     if (this.#seenImageAnchors.get(anchor) === path) return;
     this.#seenImageAnchors.set(anchor, path);
     if (this.#seenImageAnchors.size > 128) {
       this.#seenImageAnchors.delete(this.#seenImageAnchors.keys().next().value!);
     }
-    const previous = this.#recentImages.indexOf(path);
-    if (previous >= 0) this.#recentImages.splice(previous, 1);
-    else this.#debug(`local image target indexed: ${path}`);
-    this.#recentImages.unshift(path);
+    const previous = this.#recentImages.findIndex((entry) => entry.path === path);
+    const entry = previous >= 0
+      ? this.#recentImages.splice(previous, 1)[0]!
+      : { id: `img-${this.#recentImageId++}`, path, observedAt: Date.now() };
+    entry.observedAt = Date.now();
+    if (previous < 0) this.#debug(`local image target indexed: ${entry.id} ${path}`);
+    this.#recentImages.unshift(entry);
     if (this.#recentImages.length > 50) this.#recentImages.pop();
   }
 
@@ -1101,7 +1111,7 @@ export class FormulaScreen {
     if (this.#imageFocusIndex < 0) return false;
     if (!this.#focusDirty && this.#focusPlacement) return true;
     if (this.#disposed || this.#layoutSuspended || !this.#capabilities.kittyGraphics) return false;
-    const path = this.#recentImages[this.#imageFocusIndex];
+    const path = this.#recentImages[this.#imageFocusIndex]?.path;
     if (!path) return false;
     try {
       const columns = this.terminal.cols;
@@ -1139,6 +1149,15 @@ export class FormulaScreen {
       this.#debug(`image focus skipped: ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
+  }
+
+  async focusImage(id: string): Promise<boolean> {
+    const index = this.#recentImages.findIndex((entry) => entry.id === id);
+    if (index < 0) return false;
+    if (this.#focusIndex >= 0) await this.closeFormulaFocus();
+    this.#imageFocusIndex = index;
+    this.#focusDirty = true;
+    return this.#refreshImageFocus();
   }
 
   async closeFormulaFocus(): Promise<void> {

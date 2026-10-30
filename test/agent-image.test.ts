@@ -103,17 +103,43 @@ describe("local Agent image overlays", () => {
     try {
       const label = "TFormula 麦克斯韦方程组截图";
       await screen.write(`\x1b]8;;./sample.png\x1b\\${label}\x1b]8;;\x1b\\`);
-      expect(debug).toContain(`local image target indexed: ${join(directory, "sample.png")}`);
+      expect(debug).toContain(`local image target indexed: img-1 ${join(directory, "sample.png")}`);
       expect(screen.canSkipOutputCheckpoints).toBe(false);
       await screen.flushScan();
       expect(output.join("")).toContain("a=p");
       expect(screen.terminal.buffer.active.getLine(0)?.translateToString(true)).toBe(label);
+      expect(screen.recentImages).toHaveLength(1);
+      expect(screen.recentImages[0]).toMatchObject({
+        id: "img-1", path: join(directory, "sample.png")
+      });
 
       output.length = 0;
       await screen.write("\r\x1b[2KSee \x1b]8;;./sample.png\x1b\\preview\x1b]8;;\x1b\\ here");
       await screen.flushScan();
       expect(output.join("")).toContain("a=d,d=i");
       expect(output.join("")).not.toContain("a=p");
+    } finally { screen.dispose(); }
+  });
+
+  it("keeps a process-local image id while moving repeated paths to the front", async () => {
+    const screen = new FormulaScreen({
+      cols: 60, rows: 8, cwd: directory, capabilities, scale: 1,
+      writeOuter: () => undefined
+    });
+    try {
+      await screen.write(
+        "\x1b]8;;./sample.png\x1b\\first\x1b]8;;\x1b\\"
+        + "\r\n\x1b]8;;./second.png\x1b\\second\x1b]8;;\x1b\\"
+      );
+      await screen.flushScan();
+      const first = screen.recentImages.find((entry) => entry.path === join(directory, "sample.png"));
+      const second = screen.recentImages.find((entry) => entry.path === join(directory, "second.png"));
+      expect(first?.id).toBe("img-1");
+      expect(second?.id).toBe("img-2");
+      await screen.write("\r\x1b[2K\x1b]8;;./sample.png\x1b\\again\x1b]8;;\x1b\\");
+      await screen.flushScan();
+      expect(screen.recentImages.map((entry) => entry.id)).toEqual(["img-1", "img-2"]);
+      expect(screen.recentImages[0]?.observedAt).toBeGreaterThanOrEqual(second?.observedAt ?? 0);
     } finally { screen.dispose(); }
   });
 
