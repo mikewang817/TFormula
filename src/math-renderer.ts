@@ -801,7 +801,11 @@ export class MathRenderer {
         })
       : [
           `<svg xmlns="http://www.w3.org/2000/svg" width="${geometry.canvasWidth}" height="${geometry.canvasHeight}" viewBox="0 0 ${geometry.canvasWidth} ${geometry.canvasHeight}">`,
-          `<rect width="100%" height="100%" fill="${escapeAttribute(background)}"/>`,
+          // Keep the placement canvas stable for Kitty coordinates, but do not
+          // paint its unused cell area. The background should follow the
+          // fitted formula bounds instead of leaving a full black rectangle
+          // around a scaled-down formula.
+          `<rect x="${geometry.offsetX}" y="${geometry.offsetY}" width="${geometry.formulaWidth}" height="${geometry.formulaHeight}" fill="${escapeAttribute(background)}"/>`,
           content,
           "</svg>"
         ].join("");

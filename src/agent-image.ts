@@ -98,9 +98,10 @@ export class AgentImagePreviews {
     const scale = Math.min(1, maxColumns * cellWidth / width, maxRows * cellHeight / height);
     const imageColumns = Math.max(1, Math.ceil(width * scale / cellWidth));
     const imageRows = Math.max(1, Math.ceil(height * scale / cellHeight));
-    const columns = focus
-      ? terminalColumns
-      : Math.min(terminalColumns, Math.max(1, Math.min(sourceColumns, LOW_RES_PREVIEW_COLUMNS)));
+    // The preview canvas must follow the fitted image, not the width of the
+    // Markdown source line. Otherwise a tall image squeezed into one row gets
+    // a wide background-only tail beside the actual pixels.
+    const columns = focus ? terminalColumns : imageColumns;
     const rows = focus ? availableRows : imageRows;
     const canvasWidth = Math.max(1, Math.floor(columns * cellWidth));
     const canvasHeight = Math.max(1, Math.floor(rows * cellHeight));

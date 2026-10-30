@@ -464,6 +464,37 @@ describe("MathRenderer", () => {
     expect(png.readUInt32BE(20)).toBe(108);
   });
 
+  it("does not paint the unused canvas around a fitted formula", async () => {
+    const rendered = await renderTestRegion(new MathRenderer(),
+      {
+        startRow: 0,
+        endRow: 3,
+        startCol: 0,
+        endCol: 40,
+        latex: "x=1",
+        display: true,
+        confidence: "explicit"
+      },
+      40,
+      4,
+      {
+        kittyGraphics: true,
+        foreground: "#eeeeee",
+        background: "#202030",
+        cell: { width: 9, height: 18, source: "cell-query" }
+      },
+      0.5
+    );
+    const png = Buffer.from(rendered.png);
+    const sharp = await import("../src/sharp-loader.js").then(({ loadSharp }) => loadSharp());
+    const { data, info } = await sharp(png).ensureAlpha().raw()
+      .toBuffer({ resolveWithObject: true });
+    const outside = (info.width - 1) * 4;
+    expect(data[outside + 3]).toBe(0);
+    const center = (Math.floor(info.height / 2) * info.width + Math.floor(info.width / 2)) * 4;
+    expect(data[center + 3]).toBeGreaterThan(0);
+  });
+
   it("renders one-row reader math as a tight natural-size PNG", async () => {
     const rendered = await renderTestRegion(new MathRenderer(),
       {

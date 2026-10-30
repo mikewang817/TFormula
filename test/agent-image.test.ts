@@ -43,7 +43,7 @@ describe("local Agent image overlays", () => {
     const small = await previews.prepare(
       source, 30, 80, 1, capabilities.cell, capabilities.background
     );
-    expect(small).toMatchObject({ columns: 24, rows: 1 });
+    expect(small).toMatchObject({ rows: 1 });
     expect(small!.columns).toBeLessThanOrEqual(24);
     expect(small!.rows).toBeLessThanOrEqual(3);
     const full = await previews.prepare(
