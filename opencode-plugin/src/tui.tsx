@@ -33,7 +33,7 @@ function localPathFromPart(part: Part): string | undefined {
   return undefined;
 }
 
-function collectCandidates(api: TuiPluginApi, sessionID: string): ImageCandidate[] {
+export function collectImageCandidates(api: TuiPluginApi, sessionID: string): readonly ImageCandidate[] {
   const candidates: ImageCandidate[] = [];
   const seen = new Set<string>();
   for (const message of api.state.session.messages(sessionID)) {
@@ -74,7 +74,7 @@ async function showImageBoard(api: TuiPluginApi): Promise<void> {
     api.ui.toast({ message: "Image selection is available inside a session", variant: "warning" });
     return;
   }
-  const candidates = collectCandidates(api, currentSession);
+  const candidates = collectImageCandidates(api, currentSession);
   if (candidates.length === 0) {
     api.ui.toast({ message: "No local images in this conversation", variant: "warning" });
     return;
