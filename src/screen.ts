@@ -33,7 +33,6 @@ import {
   TFORMULA_IMAGE_ID_MIN
 } from "./kitty.js";
 import { detectScreenFormulaRegions } from "./screen-text.js";
-import { cancelRasterizationRequests } from "./resvg-client.js";
 import type {
   FormulaPlacementPlan,
   FormulaRenderedEvent,
@@ -514,6 +513,9 @@ export class FormulaScreen {
   #scanTimerDueAt = 0;
   #scanTimerRetryOnly = false;
   #rasterizerCooldownUntil = 0;
+  #decorationQuietTimer?: NodeJS.Timeout;
+  #decorationsPaused = false;
+  #decorationsDirty = false;
   #scanVersion = 0;
   #layoutVersion = 0;
   #resizeGeneration = 0;
@@ -1229,6 +1231,13 @@ export class FormulaScreen {
   /** Complete a scan before more PTY rows are allowed to scroll the viewport. */
   async flushScan(allowQueuedWrites = false): Promise<void> {
     while (!this.#disposed) {
+      if (this.#decorationsPaused) {
+        // Explicit callers use the default flush to request an immediate
+        // reconciliation. The proxy's allowQueuedWrites checkpoint path keeps
+        // the quiet window so rapid alternate-screen repaint can coalesce.
+        if (allowQueuedWrites) return;
+        this.resumeDecorations();
+      }
       if (!allowQueuedWrites && this.#pendingWrites > 0) {
         await new Promise<void>((resolve) => this.#writeWaiters.push(resolve));
         continue;
@@ -1462,8 +1471,41 @@ export class FormulaScreen {
     this.scheduleScan();
   }
 
+  get decorationsPaused(): boolean {
+    return this.#decorationsPaused;
+  }
+
+  notifyDecorationActivity(quietMs = 200): void {
+    if (this.#disposed) return;
+    this.#decorationsPaused = true;
+    this.#decorationsDirty = true;
+    if (this.#decorationQuietTimer) clearTimeout(this.#decorationQuietTimer);
+    this.#decorationQuietTimer = setTimeout(() => {
+      this.#decorationQuietTimer = undefined;
+      this.#decorationsPaused = false;
+      if (this.#decorationsDirty && !this.#layoutSuspended) {
+        this.#decorationsDirty = false;
+        this.scheduleScan(0);
+      }
+    }, Math.max(0, Math.floor(quietMs)));
+  }
+
+  resumeDecorations(): void {
+    if (this.#decorationQuietTimer) clearTimeout(this.#decorationQuietTimer);
+    this.#decorationQuietTimer = undefined;
+    this.#decorationsPaused = false;
+    if (this.#decorationsDirty && !this.#layoutSuspended) {
+      this.#decorationsDirty = false;
+      this.scheduleScan(0);
+    }
+  }
+
   scheduleScan(delayMs = 110, retryOnly = false): void {
     if (this.#disposed) return;
+    if (this.#decorationsPaused) {
+      this.#decorationsDirty = true;
+      return;
+    }
     if (!retryOnly) this.#scanVersion += 1;
     const delay = Math.max(0, delayMs);
     const dueAt = Date.now() + delay;
@@ -1765,14 +1807,11 @@ export class FormulaScreen {
    * internal shape degrades to the conservative all-placements invalidation.
    */
   #markAlternateLayoutDirty(force = false, rows?: { start: number; end: number }): void {
-    // A native rasterization cannot be interrupted by xterm state changes. A
-    // rapid alternate-screen repaint makes its result stale, so terminate the
-    // worker here and let the latest viewport create a fresh request.
-    cancelRasterizationRequests();
     if ((!force && this.terminal.buffer.active.type !== "alternate")
       || !Array.from(this.#placed.values()).some((placement) =>
         placement.bufferType === "alternate"
       )) return;
+    this.notifyDecorationActivity();
     const dirty = rows ?? { start: 0, end: this.terminal.rows - 1 };
     const previous = this.#alternateDirtyRows;
     // Several scrolls can land between two scans, so accumulate their union
@@ -2148,6 +2187,8 @@ export class FormulaScreen {
   dispose(): void {
     void this.closeFormulaFocus();
     this.#disposed = true;
+    if (this.#decorationQuietTimer) clearTimeout(this.#decorationQuietTimer);
+    this.#decorationQuietTimer = undefined;
     if (this.#scanTimer) clearTimeout(this.#scanTimer);
     this.#scanTimer = undefined;
     this.#scanTimerDueAt = 0;

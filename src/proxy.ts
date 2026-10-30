@@ -628,7 +628,9 @@ export async function runProxy(
             screen.cancelQueuedWrite();
             realCursorCatchupQueued = false;
           }
-          if (slice.checkpoint && !scannedBeforeHeldCell) await screen.flushScan(true);
+          if (slice.checkpoint && !scannedBeforeHeldCell && !screen.decorationsPaused) {
+            await screen.flushScan(true);
+          }
           if (screen.formulaFocusActive) await screen.refreshFormulaFocus();
         } catch (error) {
           // Match the former one-operation-per-slice queue semantics: a bad
