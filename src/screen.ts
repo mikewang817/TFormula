@@ -703,6 +703,15 @@ export class FormulaScreen {
     this.#pendingWrites += reservations;
     this.#scanVersion += 1;
     this.#rescanRequested = true;
+    // A newly enabled one-row image preview can create its first Kitty
+    // placement while an alternate-screen TUI is still repainting. Mark the
+    // alternate viewport dirty before the write begins, not only after an
+    // existing placement is scrolled. Explicit flushScan() can still promote
+    // a test or synchronous caller immediately; proxy checkpoints respect the
+    // quiet window.
+    if (this.terminal.buffer.active.type === "alternate") {
+      this.notifyDecorationActivity();
+    }
   }
 
   cancelQueuedWrite(): void {
