@@ -48,6 +48,10 @@ const { UnicodeGraphemesAddon } = createRequire(import.meta.url)(
   UnicodeGraphemesAddon: new () => ITerminalAddon;
 };
 
+// Keep image preparation local to the viewport neighborhood. The retained
+// terminal buffer can be much larger than the content currently being viewed.
+const IMAGE_SCAN_CONTEXT_ROWS = 2;
+
 interface FocusPlacement {
   imageId: number;
   placementId: number;
@@ -2585,12 +2589,15 @@ export class FormulaScreen {
     });
     if (!references.some(Boolean)) return [];
 
-    // Read from the start of the retained buffer so a fence opened just above
-    // the viewport cannot turn code examples into live file references.
+    // Scan only a bounded neighborhood. This preserves a little context for a
+    // Markdown fence without making every image scan walk the whole scrollback.
+    const contextRows = Math.max(this.terminal.rows, this.terminal.rows * IMAGE_SCAN_CONTEXT_ROWS);
+    const startRow = Math.max(0, buffer.viewportY - contextRows);
+    const endRow = Math.min(buffer.length, buffer.viewportY + this.terminal.rows + contextRows);
     let fence = "";
     let fenceLength = 0;
     const candidates: VisibleLocalImage[] = [];
-    for (let absoluteRow = 0; absoluteRow < buffer.viewportY + this.terminal.rows; absoluteRow += 1) {
+    for (let absoluteRow = startRow; absoluteRow < endRow; absoluteRow += 1) {
       const row = absoluteRow - buffer.viewportY;
       const line = buffer.getLine(absoluteRow);
       const text = line?.translateToString(true) ?? "";
@@ -2604,7 +2611,9 @@ export class FormulaScreen {
         }
       }
       if (fence || row < 0 || !line || line.isWrapped) continue;
-      const reference = references[row];
+      const reference = row >= 0 && row < references.length
+        ? references[row]
+        : this.#imageReferenceAt(line, text);
       if (!reference || buffer.getLine(absoluteRow + 1)?.isWrapped) continue;
       this.#rememberImage(reference.path, `${buffer.type}:${absoluteRow}`);
       const sourceColumns = lineTrimmedColumns(line);

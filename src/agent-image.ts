@@ -11,6 +11,7 @@ const MAX_PREVIEW_COLUMNS = 80;
 const MAX_PREVIEW_ROWS = 12;
 const MAX_CACHED_PREVIEWS = 8;
 const MIN_READABLE_PREVIEW_ROWS = 6;
+const MAX_CACHED_PREVIEW_BYTES = 32 * 1024 * 1024;
 
 export interface LocalImageReference {
   text: string;
@@ -53,6 +54,7 @@ export interface PreparedAgentImage {
 export class AgentImagePreviews {
   readonly #cache = new Map<string, PreparedAgentImage>();
   readonly #metadata = new Map<string, { width: number; height: number }>();
+  #cacheBytes = 0;
 
   async prepare(
     path: string,
@@ -106,7 +108,12 @@ export class AgentImagePreviews {
       imageWidth, imageHeight, background, focus
     ]);
     const cached = this.#cache.get(key);
-    if (cached) return cached;
+    if (cached) {
+      // Map insertion order is the LRU order: move a hit to the newest end.
+      this.#cache.delete(key);
+      this.#cache.set(key, cached);
+      return cached;
+    }
 
     const image = await sharp(path, { animated: false, limitInputPixels: MAX_SOURCE_PIXELS })
       .rotate()
@@ -123,8 +130,13 @@ export class AgentImagePreviews {
     }]).png().toBuffer();
     const prepared = { key, png, columns, rows };
     this.#cache.set(key, prepared);
-    if (this.#cache.size > MAX_CACHED_PREVIEWS) {
-      this.#cache.delete(this.#cache.keys().next().value!);
+    this.#cacheBytes += png.byteLength;
+    while (this.#cache.size > MAX_CACHED_PREVIEWS || this.#cacheBytes > MAX_CACHED_PREVIEW_BYTES) {
+      const oldestKey = this.#cache.keys().next().value;
+      if (oldestKey === undefined) break;
+      const oldest = this.#cache.get(oldestKey);
+      this.#cache.delete(oldestKey);
+      this.#cacheBytes -= oldest?.png.byteLength ?? 0;
     }
     return prepared;
   }
