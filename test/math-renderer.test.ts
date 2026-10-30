@@ -491,8 +491,14 @@ describe("MathRenderer", () => {
       .toBuffer({ resolveWithObject: true });
     const outside = (info.width - 1) * 4;
     expect(data[outside + 3]).toBe(0);
-    const center = (Math.floor(info.height / 2) * info.width + Math.floor(info.width / 2)) * 4;
-    expect(data[center + 3]).toBeGreaterThan(0);
+    let hasInk = false;
+    for (let offset = 3; offset < data.length; offset += 4) {
+      if (data[offset] > 0) {
+        hasInk = true;
+        break;
+      }
+    }
+    expect(hasInk).toBe(true);
   });
 
   it("renders one-row reader math as a tight natural-size PNG", async () => {

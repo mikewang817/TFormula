@@ -55,7 +55,7 @@ export class MathRenderError extends Error {
 
 let mathJaxPromise: Promise<MathJaxApi> | undefined;
 const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-scientific-svg-v6";
-const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v7";
+const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-transparent-v8";
 const CANONICAL_CONTAINER_WIDTH = 100_000;
 const MATHJAX_EX_PX = 8;
 export const MAX_FORMULA_LENGTH = 20_000;
@@ -801,11 +801,9 @@ export class MathRenderer {
         })
       : [
           `<svg xmlns="http://www.w3.org/2000/svg" width="${geometry.canvasWidth}" height="${geometry.canvasHeight}" viewBox="0 0 ${geometry.canvasWidth} ${geometry.canvasHeight}">`,
-          // Keep the placement canvas stable for Kitty coordinates, but do not
-          // paint its unused cell area. The background should follow the
-          // fitted formula bounds instead of leaving a full black rectangle
-          // around a scaled-down formula.
-          `<rect x="${geometry.offsetX}" y="${geometry.offsetY}" width="${geometry.formulaWidth}" height="${geometry.formulaHeight}" fill="${escapeAttribute(background)}"/>`,
+          // The ordinary formula canvas is transparent. Kitty keeps the
+          // placement geometry, while unused cell area must reveal the real
+          // terminal background instead of a baked-in black rectangle.
           content,
           "</svg>"
         ].join("");

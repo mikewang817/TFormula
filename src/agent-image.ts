@@ -122,11 +122,19 @@ export class AgentImagePreviews {
     const image = await sharp(path, { animated: false, limitInputPixels: MAX_SOURCE_PIXELS })
       .rotate()
       .resize(imageWidth, imageHeight, { fit: "inside", withoutEnlargement: true })
-      .flatten({ background })
+      // Keep the image alpha channel. Flattening here paints the terminal
+      // background into every pixel and makes transparent padding look like a
+      // black rectangle after the image is placed and scaled.
+      .ensureAlpha()
       .png()
       .toBuffer();
     const png = await sharp({
-      create: { width: canvasWidth, height: canvasHeight, channels: 4, background }
+      create: {
+        width: canvasWidth,
+        height: canvasHeight,
+        channels: 4,
+        background: { r: 0, g: 0, b: 0, alpha: 0 }
+      }
     }).composite([{
       input: image,
       left: focus ? Math.floor((canvasWidth - imageWidth) / 2) : 0,
