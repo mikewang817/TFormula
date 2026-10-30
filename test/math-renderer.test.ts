@@ -2,8 +2,9 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Resvg } from "@resvg/resvg-js";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { FormulaCache } from "../src/formula-cache.js";
+import { resetRasterWorkerState } from "../src/resvg-client.js";
 import {
   mathRendererInternals,
   MathRenderError,
@@ -77,6 +78,10 @@ function renderTestRegion(
 }
 
 describe("MathRenderer", () => {
+  afterEach(() => {
+    resetRasterWorkerState();
+  });
+
   it("reads MathJax ex dimensions", () => {
     expect(readSvgDimensions('<svg width="10ex" height="2.5ex" viewBox="0 0 4000 1000"></svg>'))
       .toEqual({ aspectRatio: 4, heightEx: 2.5, depthEx: 0 });
@@ -189,6 +194,7 @@ describe("MathRenderer", () => {
     ].join("");
     await expect(mathRendererInternals.renderSvgToPng(resvgPanic, false))
       .rejects.toMatchObject({ code: "raster-error" });
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
     await expect(mathRendererInternals.renderSvgToPng(
       '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2"/></svg>',
       false

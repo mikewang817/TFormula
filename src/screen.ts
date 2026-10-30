@@ -16,6 +16,7 @@ import {
   mathJaxContainerWidthForPlacement,
   MathRenderError,
   MathRenderer,
+  RENDERER_COOLDOWN_MESSAGE,
   type MathRenderFailureCode
 } from "./math-renderer.js";
 import {
@@ -3129,6 +3130,17 @@ export class FormulaScreen {
             }
           }
         } catch (error) {
+          if (error instanceof MathRenderError
+            && error.code === "raster-error"
+            && (error.message.includes(RENDERER_COOLDOWN_MESSAGE)
+              || error.message.includes("isolated renderer exited"))) {
+            // A native raster worker has just crashed. Stop this viewport scan
+            // as one unit; recording a retry entry for every visible formula
+            // would turn a rapid TUI repaint into a render/retry storm.
+            retryDelay = Math.min(retryDelay ?? 1_000, 1_000);
+            this.#debug("formula scan paused during rasterizer cooldown");
+            break;
+          }
           this.#rememberFormula(plan, {
             degradationReason: `render failed: ${error instanceof Error ? error.message : String(error)}`
           });

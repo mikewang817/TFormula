@@ -43,6 +43,8 @@ export type MathRenderFailureCode =
   | "png-limit"
   | "raster-error";
 
+export const RENDERER_COOLDOWN_MESSAGE = "formula rasterization paused after an isolated renderer crash";
+
 export class MathRenderError extends Error {
   constructor(readonly code: MathRenderFailureCode, message: string) {
     super(message);

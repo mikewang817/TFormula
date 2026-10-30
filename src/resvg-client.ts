@@ -15,6 +15,16 @@ export class RasterWorkerError extends Error {
   }
 }
 
+const WORKER_COOLDOWN_MS = 1_000;
+let workerUnavailableUntil = 0;
+
+function rendererCooldownError(): RasterWorkerError {
+  return new RasterWorkerError(
+    "raster-error",
+    "formula rasterization paused after an isolated renderer crash"
+  );
+}
+
 interface RasterRequest {
   id: number;
   svg: string;
@@ -43,6 +53,7 @@ const WORKER_TIMEOUT_MS = 15_000;
 let worker: ChildProcess | undefined;
 let nextRequestId = 1;
 const pending = new Map<number, PendingRequest>();
+const intentionallyClosed = new WeakSet<ChildProcess>();
 
 function workerUnavailable(message: string): RasterWorkerError {
   return new RasterWorkerError("raster-error", `formula rasterization failed: ${message}`);
@@ -100,6 +111,12 @@ function startWorker(): ChildProcess {
   });
   child.on("exit", (code, signal) => {
     if (worker === child) worker = undefined;
+    // A native worker crash invalidates the current batch of formulas. Do not
+    // immediately fork another worker for every stale viewport scan; that
+    // creates a crash/retry storm while a TUI is rapidly repainting.
+    if (!intentionallyClosed.has(child) && (signal || code !== 0)) {
+      workerUnavailableUntil = Date.now() + WORKER_COOLDOWN_MS;
+    }
     rejectPending(child, workerUnavailable(
       `isolated renderer exited${signal ? ` on ${signal}` : ` with code ${code ?? "unknown"}`}`
     ));
@@ -109,6 +126,7 @@ function startWorker(): ChildProcess {
 }
 
 export function rasterizeSvgIsolated(options: Omit<RasterRequest, "id">): Promise<Buffer> {
+  if (Date.now() < workerUnavailableUntil) return Promise.reject(rendererCooldownError());
   const child = worker?.connected ? worker : startWorker();
   const id = nextRequestId++;
   child.ref();
@@ -137,7 +155,14 @@ export function rasterizeSvgIsolated(options: Omit<RasterRequest, "id">): Promis
 export function closeRasterWorker(): void {
   const child = worker;
   worker = undefined;
+  workerUnavailableUntil = 0;
   if (!child) return;
+  intentionallyClosed.add(child);
   rejectPending(child, workerUnavailable("isolated renderer closed"));
   child.kill();
+}
+
+/** Reset process-local raster state between isolated test cases. */
+export function resetRasterWorkerState(): void {
+  closeRasterWorker();
 }
