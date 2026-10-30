@@ -511,6 +511,7 @@ export class FormulaScreen {
   #scanTimer?: NodeJS.Timeout;
   #scanTimerDueAt = 0;
   #scanTimerRetryOnly = false;
+  #rasterizerCooldownUntil = 0;
   #scanVersion = 0;
   #layoutVersion = 0;
   #resizeGeneration = 0;
@@ -2758,6 +2759,11 @@ export class FormulaScreen {
 
   async #scan(allowQueuedWrites = false, forceStable = false): Promise<void> {
     if (this.#disposed || !this.#capabilities.kittyGraphics || this.terminal.modes.originMode) return;
+    const rasterizerCooldown = this.#rasterizerCooldownUntil - Date.now();
+    if (rasterizerCooldown > 0) {
+      this.scheduleScan(rasterizerCooldown, true);
+      return;
+    }
     if ((!allowQueuedWrites && this.#pendingWrites > 0) || this.#layoutSuspended) {
       this.#rescanRequested = true;
       return;
@@ -3137,7 +3143,8 @@ export class FormulaScreen {
             // A native raster worker has just crashed. Stop this viewport scan
             // as one unit; recording a retry entry for every visible formula
             // would turn a rapid TUI repaint into a render/retry storm.
-            retryDelay = Math.min(retryDelay ?? 1_000, 1_000);
+            this.#rasterizerCooldownUntil = Date.now() + 10_000;
+            retryDelay = undefined;
             this.#debug("formula scan paused during rasterizer cooldown");
             break;
           }
