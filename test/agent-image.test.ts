@@ -175,6 +175,22 @@ describe("local Agent image overlays", () => {
     } finally { screen.dispose(); }
   });
 
+  it("focuses an image selected through the OpenCode bridge path", async () => {
+    const output: string[] = [];
+    const screen = new FormulaScreen({
+      cols: 60, rows: 8, cwd: directory, capabilities, scale: 1,
+      writeOuter: (data) => output.push(String(data))
+    });
+    try {
+      expect(await screen.focusImagePath(join(directory, "sample.png"))).toBe(true);
+      expect(output.join("")).toContain(`z=${TFORMULA_FOCUS_Z_INDEX}`);
+      expect(screen.formulaFocusActive).toBe(true);
+    } finally {
+      await screen.closeFormulaFocus();
+      screen.dispose();
+    }
+  });
+
   it("reports a missing target once and focuses an earlier valid image", async () => {
     const output: string[] = [];
     const debug: string[] = [];

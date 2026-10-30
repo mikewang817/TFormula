@@ -1,5 +1,5 @@
 import process from "node:process";
-import { appendFileSync, chmodSync } from "node:fs";
+import { appendFileSync, chmodSync, readFileSync, watchFile, unwatchFile } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -161,6 +161,27 @@ export async function runProxy(
       debug(`screen operation failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   };
+
+  const selectionPath = join(tmpdir(), "tformula-opencode-image-selection.json");
+  let lastSelectionTimestamp = 0;
+  const readPluginSelection = (): void => {
+    if (!screen) return;
+    try {
+      const selection = JSON.parse(readFileSync(selectionPath, "utf8")) as {
+        protocol?: string; path?: string; selectedAt?: number;
+      };
+      const selectedAt = selection.selectedAt;
+      if (selection.protocol !== "tformula.image-selection.v1"
+        || typeof selection.path !== "string"
+        || !Number.isSafeInteger(selectedAt)
+        || (selectedAt as number) <= lastSelectionTimestamp) return;
+      lastSelectionTimestamp = selectedAt as number;
+      enqueueScreenOperation(() => screen.focusImagePath(selection.path!));
+    } catch {
+      // Atomic plugin writes can briefly make the record unavailable.
+    }
+  };
+  watchFile(selectionPath, { interval: 250 }, readPluginSelection);
 
   const startRequestedProbe = (): void => {
     if (probeRequestedEpoch === undefined || exiting
@@ -733,7 +754,8 @@ export async function runProxy(
           focusTailTimer = undefined;
           const outputTail = outputTransformer.flush();
           if (outputTail) await terminalWriter.write(outputTail);
-          screen?.dispose();
+           unwatchFile(selectionPath, readPluginSelection);
+           screen?.dispose();
           await terminalWriter.flush();
         } catch (error) {
           finalExitCode = finalExitCode || 1;

@@ -1,5 +1,8 @@
 import type { FilePart, Part } from "@opencode-ai/sdk/v2";
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui";
+import { renameSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export interface TFormulaImageSelection {
   protocol: "tformula.image-selection.v1";
@@ -99,6 +102,10 @@ async function showImageBoard(api: TuiPluginApi): Promise<void> {
       // consume this event through the documented bridge without owning the
       // OpenCode TUI renderer or duplicating Kitty placement state.
       api.kv.set("tformula.last-image-selection", selection);
+      const selectionPath = join(tmpdir(), "tformula-opencode-image-selection.json");
+      const temporaryPath = `${selectionPath}.${process.pid}.tmp`;
+      writeFileSync(temporaryPath, `${JSON.stringify(selection)}\n`, { mode: 0o600 });
+      renameSync(temporaryPath, selectionPath);
       api.ui.dialog.clear();
       api.ui.toast({ message: `Selected ${candidate.title}`, variant: "success" });
     }

@@ -12,6 +12,9 @@ the raw terminal stream or Kitty placement lifecycle.
 - Opens an OpenCode `DialogSelect` board.
 - Stores the selected image as `tformula.image-selection.v1` under the TUI KV
   key `tformula.last-image-selection`.
+- Atomically writes the same record to
+  `/tmp/tformula-opencode-image-selection.json`, which the TFormula PTY wrapper
+  watches and routes through its existing Kitty focus renderer.
 
 ## Loading
 
@@ -38,9 +41,8 @@ interface TFormulaImageSelection {
 
 The current PTY wrapper remains authoritative for Kitty rendering, image
 validation, focus placement, cursor restoration, and alternate-screen safety.
-Future integration may mirror the KV record into the wrapper or use an RPC
-adapter, but must preserve this contract and must not make the plugin write
-Kitty APC sequences directly.
+The shared file contains no PNG data; the wrapper revalidates the path before
+rendering. The plugin must not write Kitty APC sequences directly.
 
 ## API Basis
 

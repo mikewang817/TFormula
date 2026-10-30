@@ -1193,6 +1193,17 @@ export class FormulaScreen {
     return this.#refreshImageFocus();
   }
 
+  async focusImagePath(path: string): Promise<boolean> {
+    if (!path) return false;
+    this.#rememberImage(path, `plugin:${path}`);
+    const index = this.#recentImages.findIndex((entry) => entry.path === path);
+    if (index < 0) return false;
+    if (this.#focusIndex >= 0) await this.closeFormulaFocus();
+    this.#imageFocusIndex = index;
+    this.#focusDirty = true;
+    return this.#refreshImageFocus();
+  }
+
   async closeFormulaFocus(): Promise<void> {
     this.#focusIndex = -1;
     this.#imageFocusIndex = -1;
