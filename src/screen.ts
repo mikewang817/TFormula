@@ -2690,8 +2690,10 @@ export class FormulaScreen {
     const source = buffer.getLine(buffer.viewportY + row);
     if (!source || source.isWrapped
       || this.#imageReferenceAt(source, source.translateToString(true))?.path !== reference.path
-      || source.translateToString(true) !== reference.text
-      || buffer.getLine(buffer.viewportY + row + 1)?.isWrapped) return false;
+      || source.translateToString(true) !== reference.text) return false;
+    // Low-resolution previews may cover the reference row itself. Focus images
+    // still use the available viewport canvas and are unaffected by this path.
+    if (rows > 1 && buffer.getLine(buffer.viewportY + row + 1)?.isWrapped) return false;
     for (let offset = 1; offset < rows; offset += 1) {
       const line = buffer.getLine(buffer.viewportY + row + offset);
       if (!line || line.isWrapped || line.translateToString(true).trim()) return false;
@@ -2746,7 +2748,7 @@ export class FormulaScreen {
             && region.canvas.endRow >= row + availableRows)) break;
         availableRows += 1;
       }
-      if (availableRows >= 2) candidates.push({ row, reference, sourceColumns, availableRows });
+      candidates.push({ row, reference, sourceColumns, availableRows: Math.max(1, availableRows) });
     }
     return candidates;
   }

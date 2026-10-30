@@ -37,11 +37,15 @@ describe("local Agent image overlays", () => {
     expect([...data.subarray(0, 3)]).toEqual([255, 0, 0]);
   });
 
-  it("keeps a tiny dark screenshot as a link and prepares a full-viewport focus image", async () => {
+  it("prepares a small preview and a full-viewport focus image", async () => {
     const previews = new AgentImagePreviews();
     const source = join(process.cwd(), "assets", "tformula-maxwell.png");
-    expect(await previews.prepare(source, 30, 80, 2, capabilities.cell, capabilities.background))
-      .toBeUndefined();
+    const small = await previews.prepare(
+      source, 30, 80, 1, capabilities.cell, capabilities.background
+    );
+    expect(small).toMatchObject({ columns: 24, rows: 1 });
+    expect(small!.columns).toBeLessThanOrEqual(24);
+    expect(small!.rows).toBeLessThanOrEqual(3);
     const full = await previews.prepare(
       source, 80, 80, 24, capabilities.cell, capabilities.background, true
     );
@@ -153,7 +157,7 @@ describe("local Agent image overlays", () => {
       await screen.write("\x1b]8;;./sample.png\x1b\\preview\x1b]8;;\x1b\\\r\nnext line");
       expect(screen.recentImageCount).toBe(1);
       await screen.flushScan();
-      expect(output.join("")).not.toContain("a=p");
+      expect(output.join("")).toContain("a=p");
 
       output.length = 0;
       expect(await screen.focusLatestImage()).toBe(true);
@@ -205,8 +209,9 @@ describe("local Agent image overlays", () => {
     try {
       await screen.write("![preview](./sample.png)\r\noccupied");
       await screen.flushScan();
-      expect(output.join("")).not.toContain("a=p");
+      expect(output.join("")).toContain("a=p");
 
+      output.length = 0;
       await screen.write("\x1b[2J\x1b[H![preview](./missing.png)");
       await screen.flushScan();
       expect(output.join("")).not.toContain("a=p");

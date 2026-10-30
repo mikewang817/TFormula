@@ -9,8 +9,9 @@ const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_SOURCE_PIXELS = 40_000_000;
 const MAX_PREVIEW_COLUMNS = 80;
 const MAX_PREVIEW_ROWS = 12;
+const LOW_RES_PREVIEW_COLUMNS = 24;
+const LOW_RES_PREVIEW_ROWS = 3;
 const MAX_CACHED_PREVIEWS = 8;
-const MIN_READABLE_PREVIEW_ROWS = 6;
 const MAX_CACHED_PREVIEW_BYTES = 32 * 1024 * 1024;
 
 export interface LocalImageReference {
@@ -87,17 +88,19 @@ export class AgentImagePreviews {
 
     const cellWidth = Math.max(1, cell.width);
     const cellHeight = Math.max(1, cell.height);
-    const maxColumns = focus ? terminalColumns : Math.min(terminalColumns, MAX_PREVIEW_COLUMNS);
-    const maxRows = focus ? availableRows : Math.min(availableRows, MAX_PREVIEW_ROWS);
-    if (maxRows < (focus ? 1 : 2) || sourceColumns > terminalColumns) return undefined;
+    const maxColumns = focus
+      ? terminalColumns
+      : Math.min(terminalColumns, Math.min(MAX_PREVIEW_COLUMNS, LOW_RES_PREVIEW_COLUMNS));
+    const maxRows = focus
+      ? availableRows
+      : Math.min(availableRows, Math.min(MAX_PREVIEW_ROWS, LOW_RES_PREVIEW_ROWS));
+    if (maxRows < 1 || sourceColumns > terminalColumns) return undefined;
     const scale = Math.min(1, maxColumns * cellWidth / width, maxRows * cellHeight / height);
     const imageColumns = Math.max(1, Math.ceil(width * scale / cellWidth));
     const imageRows = Math.max(1, Math.ceil(height * scale / cellHeight));
-    // A full-page screenshot squeezed into two rows looks like a solid dark
-    // rectangle. Keep its linked label and let the user focus it instead.
-    if (!focus && imageRows < MIN_READABLE_PREVIEW_ROWS
-      && height > MIN_READABLE_PREVIEW_ROWS * cellHeight) return undefined;
-    const columns = focus ? terminalColumns : Math.max(sourceColumns, imageColumns);
+    const columns = focus
+      ? terminalColumns
+      : Math.min(terminalColumns, Math.max(1, Math.min(sourceColumns, LOW_RES_PREVIEW_COLUMNS)));
     const rows = focus ? availableRows : imageRows;
     const canvasWidth = Math.max(1, Math.floor(columns * cellWidth));
     const canvasHeight = Math.max(1, Math.floor(rows * cellHeight));
