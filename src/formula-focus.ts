@@ -1,5 +1,11 @@
 export type FormulaFocusAction = "open" | "next" | "previous" | "close";
 
+// Internal tokens emitted by FocusKeyDecoder for Up/Down. They cannot be
+// produced by ordinary text input, so letters such as n/j/p/k never become
+// accidental focus commands.
+export const FOCUS_NEXT = "\x0e";
+export const FOCUS_PREVIOUS = "\x10";
+
 export interface FormulaFocusInputResult {
   residual: string;
   actions: FormulaFocusAction[];
@@ -37,12 +43,12 @@ export class FormulaFocusInput {
         actions.push("open");
         continue;
       }
-      if (character === this.prefix || character === "q" || character === "\x1b") {
+      if (character === "\x1b") {
         this.#active = false;
         actions.push("close");
-      } else if (character === "n" || character === "j" || character === "\t") {
+      } else if (character === FOCUS_NEXT) {
         actions.push("next");
-      } else if (character === "p" || character === "k") {
+      } else if (character === FOCUS_PREVIOUS) {
         actions.push("previous");
       }
       // Unknown keys are intentionally swallowed while focused.

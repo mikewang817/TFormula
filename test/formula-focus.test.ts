@@ -9,23 +9,31 @@ describe("FormulaFocusInput", () => {
     expect(input.active).toBe(true);
   });
 
-  it("consumes navigation, unknown, and exit keys while focused", () => {
+  it("consumes arrow navigation tokens and exit keys while focused", () => {
     const input = new FormulaFocusInput("\x1d");
     input.handle("\x1d");
-    expect(input.handle("n?p")).toEqual({
+    expect(input.handle("\x0e?\x10")).toEqual({
       residual: "",
       actions: ["next", "previous"]
     });
-    expect(input.handle("qtail")).toEqual({ residual: "tail", actions: ["close"] });
+    expect(input.handle("q")).toEqual({ residual: "", actions: [] });
+    expect(input.handle("\x1b")).toEqual({ residual: "", actions: ["close"] });
     expect(input.active).toBe(false);
   });
 
-  it("allows the same prefix to close without leaking bytes", () => {
+  it("does not treat letter navigation shortcuts as commands", () => {
+    const input = new FormulaFocusInput("\x1d");
+    input.handle("\x1d");
+    expect(input.handle("njtabpk")).toEqual({ residual: "", actions: [] });
+  });
+
+  it("swallows the same prefix while focused", () => {
     const input = new FormulaFocusInput("\x1d");
     expect(input.handle("\x1d\x1d")).toEqual({
       residual: "",
-      actions: ["open", "close"]
+      actions: ["open"]
     });
+    expect(input.active).toBe(true);
   });
 
   it("is transparent when focus is disabled", () => {

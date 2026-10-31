@@ -95,11 +95,18 @@ export async function showImageBoard(context: Context): Promise<void> {
   }
   const path = await context.ui.dialog.select({
     title: "TFormula images",
-    options: candidates.map((candidate) => ({
-      title: candidate.title,
-      value: candidate.path,
-      description: candidate.description
-    }))
+    options: [
+      ...candidates.map((candidate) => ({
+        title: candidate.title,
+        value: candidate.path,
+        description: candidate.description
+      })),
+      {
+        title: "Close",
+        value: "",
+        description: "Return to the conversation without selecting an image"
+      }
+    ]
   });
   const candidate = candidates.find((item) => item.path === path);
   if (!candidate) return;

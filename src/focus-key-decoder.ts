@@ -1,3 +1,5 @@
+import { FOCUS_NEXT, FOCUS_PREVIOUS } from "./formula-focus.js";
+
 /**
  * Translate only TFormula's focus keys from Kitty/CSI-u keyboard reports.
  * OpenCode enables enhanced keyboard input in Ghostty, so Ctrl-\ arrives as
@@ -61,8 +63,8 @@ export class FocusKeyDecoder {
   }
 
   #decode(sequence: string, final: string, parameters: string, focused: boolean): string {
-    if (final === "A") return focused ? "p" : sequence;
-    if (final === "B") return focused ? "n" : sequence;
+    if (final === "A") return focused ? FOCUS_PREVIOUS : sequence;
+    if (final === "B") return focused ? FOCUS_NEXT : sequence;
     if (final !== "u") return focused ? "" : sequence;
     // Kitty primary codepoint, optional shifted/base codepoints, modifier mask
     // (+1), optional press/repeat/release type, optional associated text.
@@ -87,10 +89,6 @@ export class FocusKeyDecoder {
     if (event === 3) return "";
     if (modifiers & ~(1 | lockModifiers)) return "";
     if (codepoint === 27) return "\x1b";
-    if (codepoint === 9) return "\t";
-    if (["q", "n", "j", "p", "k"].includes(String.fromCodePoint(codepoint))) {
-      return String.fromCodePoint(codepoint);
-    }
     return "";
   }
 }

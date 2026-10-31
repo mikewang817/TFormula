@@ -26,7 +26,9 @@ Node 22, but test again when changing either dependency version.
 Inside a session, press Ctrl-\\ or run `/tformula-images`. The board lists
 local image paths found in user attachments, assistant text, and completed
 tool output in the active session. Selecting an entry sends it to this
-TFormula proxy instance's focus renderer. Network URLs are not fetched.
+TFormula proxy instance's focus renderer. After selection, use Up/Down to
+switch between recent images and Escape to leave image focus. Escape in the
+selection board cancels without selecting. Network URLs are not fetched.
 
 ## Bridge contract
 

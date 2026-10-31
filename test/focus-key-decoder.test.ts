@@ -26,18 +26,23 @@ describe("FocusKeyDecoder", () => {
     expect(decoder.push("\x1b[102;197:1u", false)).toBe("\x06");
     expect(decoder.push("\x1b[102;133:3u", false)).toBe("");
     expect(decoder.push("\x1b[102;135u", false)).toBe("\x1b[102;135u");
-    expect(decoder.push("\x1b[113;129u", true)).toBe("q");
+    expect(decoder.push("\x1b[113;129u", true)).toBe("");
   });
 
   it("decodes navigation and Escape while focus is active", () => {
     const decoder = new FocusKeyDecoder(new Set(["\x1c"]));
-    expect(decoder.push("\x1b[110u\x1b[9u\x1b[27u", true)).toBe("n\t\x1b");
-    expect(decoder.push("\x1b[113;1:3u\x1b[A", true)).toBe("p");
+    expect(decoder.push("\x1b[27u", true)).toBe("\x1b");
+    expect(decoder.push("\x1b[113;1:3u\x1b[A", true)).toBe("\x10");
   });
 
   it("maps arrow navigation only while focus is active", () => {
     const decoder = new FocusKeyDecoder(new Set(["\x1c"]));
     expect(decoder.push("\x1b[A\x1b[B", false)).toBe("\x1b[A\x1b[B");
-    expect(decoder.push("\x1b[A\x1b[B", true)).toBe("pn");
+    expect(decoder.push("\x1b[A\x1b[B", true)).toBe("\x10\x0e");
+  });
+
+  it("does not convert letter or Tab input while focused", () => {
+    const decoder = new FocusKeyDecoder(new Set(["\x1c"]));
+    expect(decoder.push("\x1b[110u\x1b[9u\x1b[113u", true)).toBe("");
   });
 });

@@ -139,8 +139,8 @@ export async function runProxy(
   const focusInput = screen && options.focusKey
     ? new FormulaFocusInput(options.focusKey)
     : undefined;
-  const imageFocusInput = screen && options.imageFocusKey
-    ? new FormulaFocusInput(options.imageFocusKey)
+  const imageFocusInput = screen
+    ? new FormulaFocusInput(options.imageFocusKey ?? "")
     : undefined;
   const focusKeyDecoder = new FocusKeyDecoder(new Set(
     [options.focusKey, options.imageFocusKey].filter(Boolean)
@@ -179,7 +179,10 @@ export async function runProxy(
         || !Number.isSafeInteger(selectedAt)
         || (selectedAt as number) <= lastSelectionTimestamp) return;
       lastSelectionTimestamp = selectedAt as number;
-      enqueueScreenOperation(() => screen.focusImagePath(selection.path!));
+      enqueueScreenOperation(async () => {
+        const focused = await screen.focusImagePath(selection.path!);
+        imageFocusInput?.setActive(focused);
+      });
     } catch {
       // Atomic plugin writes can briefly make the record unavailable.
     }
