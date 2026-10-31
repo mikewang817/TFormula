@@ -22,6 +22,7 @@ const PREVIEW_ASPECT_RATIOS = [
 ] as const;
 const MAX_CACHED_PREVIEWS = 8;
 const MAX_CACHED_PREVIEW_BYTES = 32 * 1024 * 1024;
+const PREVIEW_CACHE_VERSION = "fixed-ratio-mask-v1";
 
 export interface LocalImageReference {
   text: string;
@@ -151,6 +152,7 @@ export class AgentImagePreviews {
     const imageWidth = Math.max(1, Math.min(maskWidth, Math.floor(width * scale)));
     const imageHeight = Math.max(1, Math.min(maskHeight, Math.floor(height * scale)));
     const key = JSON.stringify([
+      PREVIEW_CACHE_VERSION,
       path, info.size, info.mtimeMs, columns, rows, canvasWidth, canvasHeight,
       imageWidth, imageHeight, background, focus, aspectRatio?.name
     ]);

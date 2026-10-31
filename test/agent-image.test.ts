@@ -79,6 +79,8 @@ describe("local Agent image overlays", () => {
     const maskPixel = ((info.height - 1) * info.width + 2 * capabilities.cell.width) * 4;
     expect([...data.subarray(maskPixel, maskPixel + 3)]).toEqual([18, 52, 86]);
     expect(data[maskPixel + 3]).toBe(255);
+    const leftMarginPixel = (2 * capabilities.cell.width - 1) * 4;
+    expect(data[leftMarginPixel + 3]).toBe(0);
   });
 
   it("prepares a small preview and a full-viewport focus image", async () => {
