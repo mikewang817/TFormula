@@ -126,8 +126,12 @@ export class AgentImagePreviews {
       // background into every pixel and makes transparent padding look like a
       // black rectangle after the image is placed and scaled.
       .ensureAlpha()
-      .png()
+      .png({ palette: false })
       .toBuffer();
+    // Always construct the placement canvas independently from the terminal
+    // background. Kitty composites transparent PNG pixels with the terminal
+    // itself; using the detected OSC 11 color here would destroy wallpaper
+    // and translucent terminal backgrounds.
     const png = await sharp({
       create: {
         width: canvasWidth,
@@ -139,7 +143,7 @@ export class AgentImagePreviews {
       input: image,
       left: focus ? Math.floor((canvasWidth - imageWidth) / 2) : 0,
       top: focus ? Math.floor((canvasHeight - imageHeight) / 2) : 0
-    }]).png().toBuffer();
+    }]).png({ palette: false }).toBuffer();
     const prepared = { key, png, columns, rows };
     this.#cache.set(key, prepared);
     this.#cacheBytes += png.byteLength;

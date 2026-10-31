@@ -49,6 +49,18 @@ describe("local Agent image overlays", () => {
     expect(data[corner + 3]).toBe(0);
   });
 
+  it("keeps the ordinary preview canvas transparent too", async () => {
+    const prepared = await new AgentImagePreviews().prepare(
+      join(directory, "sample.png"), 30, 80, 3, capabilities.cell, capabilities.background
+    );
+    expect(prepared).toBeDefined();
+    const sharp = await loadSharp();
+    const { data, info } = await sharp(prepared!.png).ensureAlpha().raw()
+      .toBuffer({ resolveWithObject: true });
+    expect(data[3]).toBeGreaterThan(0);
+    expect(info.channels).toBe(4);
+  });
+
   it("prepares a small preview and a full-viewport focus image", async () => {
     const previews = new AgentImagePreviews();
     const source = join(process.cwd(), "assets", "tformula-maxwell.png");

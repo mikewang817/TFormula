@@ -185,6 +185,29 @@ describe("MathRenderer", () => {
     expect(svg.match(/id="formula-content"/gu)).toHaveLength(1);
   });
 
+  it("keeps source masks limited to their source segments", async () => {
+    const svg = mathRendererInternals.buildSourceMaskedSvg({
+      canvasWidth: 360,
+      canvasHeight: 54,
+      sourceSegments: [
+        { rowOffset: 1, startCol: 4, endCol: 12, logicalStartCol: 0 }
+      ],
+      cell: { width: 9, height: 18, source: "cell-query" },
+      background: "#202030",
+      content: '<path d="M0 0h10v10H0z" fill="#eeeeee"/>'
+    });
+    expect(svg).toContain('<rect x="36" y="18" width="72" height="18" fill="#202030"/>');
+    expect(svg).toContain('width="360" height="54" viewBox="0 0 360 54"');
+    expect(svg).not.toContain('<rect x="0"');
+    const sharp = await import("../src/sharp-loader.js").then(({ loadSharp }) => loadSharp());
+    const { data, info } = await sharp(await mathRendererInternals.renderSvgToPng(svg, false))
+      .ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const outsideMask = ((0 * info.width + 200) * 4) + 3;
+    const maskPixel = ((1 * 18 + 1) * info.width + 4 * 9 + 1) * 4 + 3;
+    expect(data[outsideMask]).toBe(0);
+    expect(data[maskPixel]).toBeGreaterThan(0);
+  });
+
   it("contains native Resvg panics and restarts the isolated rasterizer", async () => {
     const resvgPanic = [
       '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">',
