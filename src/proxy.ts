@@ -179,6 +179,10 @@ export async function runProxy(
         || !Number.isSafeInteger(selectedAt)
         || (selectedAt as number) <= lastSelectionTimestamp) return;
       lastSelectionTimestamp = selectedAt as number;
+      // Claim keyboard focus before the asynchronous Kitty upload starts. The
+      // plugin selection and the next arrow key can arrive back-to-back; the
+      // arrow must never leak into the wrapped TUI during that upload window.
+      imageFocusInput?.setActive(true);
       enqueueScreenOperation(async () => {
         const focused = await screen.focusImagePath(selection.path!);
         imageFocusInput?.setActive(focused);

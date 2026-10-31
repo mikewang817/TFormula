@@ -30,7 +30,7 @@ export class FormulaFocusInput {
   }
 
   handle(data: string): FormulaFocusInputResult {
-    if (!data || !this.prefix) return { residual: data, actions: [] };
+    if (!data || (!this.#active && !this.prefix)) return { residual: data, actions: [] };
     let residual = "";
     const actions: FormulaFocusAction[] = [];
     for (const character of data) {

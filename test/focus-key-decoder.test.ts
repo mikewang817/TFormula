@@ -41,6 +41,12 @@ describe("FocusKeyDecoder", () => {
     expect(decoder.push("\x1b[A\x1b[B", true)).toBe("\x10\x0e");
   });
 
+  it("consumes Kitty enhanced arrows while focus is active", () => {
+    const decoder = new FocusKeyDecoder(new Set());
+    expect(decoder.push("\x1b[1;1A\x1b[1;1B", true)).toBe("\x10\x0e");
+    expect(decoder.push("\x1b[1;1A\x1b[1;1B", false)).toBe("\x1b[1;1A\x1b[1;1B");
+  });
+
   it("does not convert letter or Tab input while focused", () => {
     const decoder = new FocusKeyDecoder(new Set(["\x1c"]));
     expect(decoder.push("\x1b[110u\x1b[9u\x1b[113u", true)).toBe("");

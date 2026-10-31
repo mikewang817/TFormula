@@ -40,4 +40,14 @@ describe("FormulaFocusInput", () => {
     const input = new FormulaFocusInput("");
     expect(input.handle("\x1dtext")).toEqual({ residual: "\x1dtext", actions: [] });
   });
+
+  it("consumes arrows and Escape after external image focus activation", () => {
+    const input = new FormulaFocusInput("");
+    input.setActive(true);
+    expect(input.handle("\x0e\x10\x1b")).toEqual({
+      residual: "",
+      actions: ["next", "previous", "close"]
+    });
+    expect(input.active).toBe(false);
+  });
 });
