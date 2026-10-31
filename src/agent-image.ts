@@ -7,12 +7,12 @@ import type { CellMetrics } from "./types.js";
 
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_SOURCE_PIXELS = 40_000_000;
-// Inline previews may use a large contiguous blank area. The actual size is
-// still bounded by the terminal width and available rows at the reference.
-const MAX_PREVIEW_COLUMNS = 128;
-const MAX_PREVIEW_ROWS = 128;
-const LOW_RES_PREVIEW_COLUMNS = 128;
-const LOW_RES_PREVIEW_ROWS = 128;
+const MAX_PREVIEW_COLUMNS = 80;
+const MAX_PREVIEW_ROWS = 12;
+// Keep inline previews lightweight, but large enough to inspect without
+// opening image focus. This is four times the previous 24x3 area.
+const LOW_RES_PREVIEW_COLUMNS = 48;
+const LOW_RES_PREVIEW_ROWS = 6;
 const MAX_CACHED_PREVIEWS = 8;
 const MAX_CACHED_PREVIEW_BYTES = 32 * 1024 * 1024;
 

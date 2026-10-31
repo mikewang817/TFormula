@@ -67,9 +67,9 @@ describe("local Agent image overlays", () => {
     const small = await previews.prepare(
       source, 30, 80, 6, capabilities.cell, capabilities.background
     );
-    expect(small!.columns).toBeLessThanOrEqual(128);
-    expect(small!.rows).toBeLessThanOrEqual(128);
-    expect(small!.columns * small!.rows).toBeGreaterThan(48);
+    expect(small!.columns).toBeLessThanOrEqual(48);
+    expect(small!.rows).toBeLessThanOrEqual(6);
+    expect(small!.columns * small!.rows).toBeGreaterThan(24);
     const full = await previews.prepare(
       source, 80, 80, 24, capabilities.cell, capabilities.background, true
     );
