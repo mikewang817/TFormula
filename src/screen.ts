@@ -53,6 +53,7 @@ const { UnicodeGraphemesAddon } = createRequire(import.meta.url)(
 // Keep image preparation local to the viewport neighborhood. The retained
 // terminal buffer can be much larger than the content currently being viewed.
 const IMAGE_SCAN_CONTEXT_ROWS = 2;
+const INLINE_IMAGE_LEFT_MARGIN = 2;
 
 interface FocusPlacement {
   imageId: number;
@@ -2792,7 +2793,8 @@ export class FormulaScreen {
       const existing = this.#placed.get(anchor);
       try {
         const prepared = await this.#imagePreviews.prepare(
-          reference.path, sourceColumns, this.terminal.cols, availableRows,
+           reference.path, sourceColumns,
+           Math.max(1, this.terminal.cols - INLINE_IMAGE_LEFT_MARGIN), availableRows,
           this.#capabilities.cell, this.#capabilities.background
         );
         if (this.#disposed || this.#screenEpoch !== screenEpoch || this.#layoutSuspended
@@ -2852,7 +2854,7 @@ export class FormulaScreen {
           const restore = this.#cursorRestoreAfterGraphics();
           if (!restore) return undefined;
           return (existing ? kittyDeletePlacement(existing.imageId, existing.placementId) : "")
-            + cursorPosition(row + 1, 1)
+             + cursorPosition(row + 1, INLINE_IMAGE_LEFT_MARGIN + 1)
             + kittyPlaceImage(imageId, placementId, prepared.columns, prepared.rows)
             + restore;
         });
