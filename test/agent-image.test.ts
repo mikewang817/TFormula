@@ -65,10 +65,10 @@ describe("local Agent image overlays", () => {
     const previews = new AgentImagePreviews();
     const source = join(process.cwd(), "assets", "tformula-maxwell.png");
     const small = await previews.prepare(
-      source, 30, 80, 6, capabilities.cell, capabilities.background
+      source, 30, 80, 12, capabilities.cell, capabilities.background
     );
     expect(small!.columns).toBeLessThanOrEqual(48);
-    expect(small!.rows).toBeLessThanOrEqual(6);
+    expect(small!.rows).toBeLessThanOrEqual(12);
     expect(small!.columns * small!.rows).toBeGreaterThan(24);
     const full = await previews.prepare(
       source, 80, 80, 24, capabilities.cell, capabilities.background, true

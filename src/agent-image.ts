@@ -9,10 +9,10 @@ const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_SOURCE_PIXELS = 40_000_000;
 const MAX_PREVIEW_COLUMNS = 80;
 const MAX_PREVIEW_ROWS = 12;
-// Keep inline previews lightweight, but large enough to inspect without
-// opening image focus. This is four times the previous 24x3 area.
+// Keep inline previews bounded while allowing a taller image to use the
+// available blank rows before requiring image focus.
 const LOW_RES_PREVIEW_COLUMNS = 48;
-const LOW_RES_PREVIEW_ROWS = 6;
+const LOW_RES_PREVIEW_ROWS = 12;
 const MAX_CACHED_PREVIEWS = 8;
 const MAX_CACHED_PREVIEW_BYTES = 32 * 1024 * 1024;
 
