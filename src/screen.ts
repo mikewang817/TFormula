@@ -2761,7 +2761,7 @@ export class FormulaScreen {
         || formulaRegions.some((region) =>
           region.canvas.startRow <= row && region.canvas.endRow >= row)) continue;
       let availableRows = 1;
-      while (row + availableRows < this.terminal.rows && availableRows < 12) {
+       while (row + availableRows < this.terminal.rows && availableRows < 128) {
         const next = buffer.getLine(absoluteRow + availableRows);
         if (!next || next.isWrapped || next.translateToString(true).trim()
           || formulaRegions.some((region) => region.canvas.startRow <= row + availableRows
