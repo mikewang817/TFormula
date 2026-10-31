@@ -103,7 +103,7 @@ describe("local Agent image overlays", () => {
       await screen.flushScan();
       const placed = output.join("");
       expect(placed).toContain("\x1b_Ga=t,");
-      expect(placed).toMatch(/\x1b\[2;3H\x1b_Ga=p,[^;]*c=\d+,r=[2-9]/u);
+      expect(placed).toMatch(/\x1b\[2;1H\x1b_Ga=p,[^;]*c=\d+,r=[2-9]/u);
       expect(screen.terminal.buffer.active.getLine(1)?.translateToString(true)).toBe(reference);
 
       const first = placed.match(/a=p,i=(\d+),p=(\d+)/u)!;

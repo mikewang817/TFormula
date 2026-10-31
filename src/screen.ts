@@ -2793,9 +2793,10 @@ export class FormulaScreen {
       const existing = this.#placed.get(anchor);
       try {
         const prepared = await this.#imagePreviews.prepare(
-           reference.path, sourceColumns,
-           Math.max(1, this.terminal.cols - INLINE_IMAGE_LEFT_MARGIN), availableRows,
-          this.#capabilities.cell, this.#capabilities.background
+          reference.path, sourceColumns,
+          this.terminal.cols, availableRows,
+          this.#capabilities.cell, this.#capabilities.background, false,
+          INLINE_IMAGE_LEFT_MARGIN
         );
         if (this.#disposed || this.#screenEpoch !== screenEpoch || this.#layoutSuspended
           || layoutVersion !== this.#layoutVersion
@@ -2854,7 +2855,7 @@ export class FormulaScreen {
           const restore = this.#cursorRestoreAfterGraphics();
           if (!restore) return undefined;
           return (existing ? kittyDeletePlacement(existing.imageId, existing.placementId) : "")
-             + cursorPosition(row + 1, INLINE_IMAGE_LEFT_MARGIN + 1)
+             + cursorPosition(row + 1, 1)
             + kittyPlaceImage(imageId, placementId, prepared.columns, prepared.rows)
             + restore;
         });

@@ -66,7 +66,8 @@ export class AgentImagePreviews {
     availableRows: number,
     cell: CellMetrics,
     background: string,
-    focus = false
+    focus = false,
+    leftMarginColumns = 0
   ): Promise<PreparedAgentImage | undefined> {
     const info = await stat(path);
     if (!info.isFile() || info.size === 0 || info.size > MAX_SOURCE_BYTES) return undefined;
@@ -90,9 +91,13 @@ export class AgentImagePreviews {
 
     const cellWidth = Math.max(1, cell.width);
     const cellHeight = Math.max(1, cell.height);
+    const margin = focus ? 0 : Math.max(0, Math.floor(leftMarginColumns));
+    const availableColumns = focus
+      ? terminalColumns
+      : Math.max(1, terminalColumns - margin);
     const maxColumns = focus
       ? terminalColumns
-      : Math.min(terminalColumns, Math.min(MAX_PREVIEW_COLUMNS, LOW_RES_PREVIEW_COLUMNS));
+      : Math.min(availableColumns, Math.min(MAX_PREVIEW_COLUMNS, LOW_RES_PREVIEW_COLUMNS));
     const maxRows = focus
       ? availableRows
       : Math.min(availableRows, Math.min(MAX_PREVIEW_ROWS, LOW_RES_PREVIEW_ROWS));
@@ -103,7 +108,7 @@ export class AgentImagePreviews {
     // The preview canvas must follow the fitted image, not the width of the
     // Markdown source line. Otherwise a tall image squeezed into one row gets
     // a wide background-only tail beside the actual pixels.
-    const columns = focus ? terminalColumns : imageColumns;
+    const columns = focus ? terminalColumns : imageColumns + margin;
     const rows = focus ? availableRows : imageRows;
     const canvasWidth = Math.max(1, Math.floor(columns * cellWidth));
     const canvasHeight = Math.max(1, Math.floor(rows * cellHeight));
@@ -143,7 +148,7 @@ export class AgentImagePreviews {
       }
     }).composite([{
       input: image,
-      left: focus ? Math.floor((canvasWidth - imageWidth) / 2) : 0,
+       left: focus ? Math.floor((canvasWidth - imageWidth) / 2) : margin * cellWidth,
       top: focus ? Math.floor((canvasHeight - imageHeight) / 2) : 0
     }]).png({ palette: false }).toBuffer();
     const prepared = { key, png, columns, rows };
