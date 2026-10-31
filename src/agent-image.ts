@@ -13,6 +13,13 @@ const MAX_PREVIEW_ROWS = 12;
 // available blank rows before requiring image focus.
 const LOW_RES_PREVIEW_COLUMNS = 48;
 const LOW_RES_PREVIEW_ROWS = 12;
+const PREVIEW_ASPECT_RATIOS = [
+  { name: "16:9", value: 16 / 9 },
+  { name: "9:16", value: 9 / 16 },
+  { name: "1:1", value: 1 },
+  { name: "3:4", value: 3 / 4 },
+  { name: "4:3", value: 4 / 3 }
+] as const;
 const MAX_CACHED_PREVIEWS = 8;
 const MAX_CACHED_PREVIEW_BYTES = 32 * 1024 * 1024;
 
@@ -51,6 +58,29 @@ export interface PreparedAgentImage {
   png: Uint8Array;
   columns: number;
   rows: number;
+}
+
+function nearestPreviewAspectRatio(width: number, height: number): (typeof PREVIEW_ASPECT_RATIOS)[number] {
+  const aspect = width / height;
+  return PREVIEW_ASPECT_RATIOS.reduce((nearest, candidate) =>
+    Math.abs(Math.log(candidate.value / aspect)) < Math.abs(Math.log(nearest.value / aspect))
+      ? candidate : nearest
+  );
+}
+
+function previewMaskCells(
+  aspect: number,
+  maxColumns: number,
+  maxRows: number,
+  cell: CellMetrics
+): { columns: number; rows: number } {
+  const cellWidth = Math.max(1, cell.width);
+  const cellHeight = Math.max(1, cell.height);
+  const targetCellRatio = aspect * cellHeight / cellWidth;
+  const heightLimitedColumns = Math.max(1, Math.round(maxRows * targetCellRatio));
+  const columns = Math.min(maxColumns, heightLimitedColumns);
+  const rows = Math.min(maxRows, Math.max(1, Math.round(columns / targetCellRatio)));
+  return { columns, rows };
 }
 
 /** Size-bound local raster preview; no network fetch or persistent copy. */
@@ -102,21 +132,27 @@ export class AgentImagePreviews {
       ? availableRows
       : Math.min(availableRows, Math.min(MAX_PREVIEW_ROWS, LOW_RES_PREVIEW_ROWS));
     if (maxRows < 1 || sourceColumns > terminalColumns) return undefined;
-    const scale = Math.min(1, maxColumns * cellWidth / width, maxRows * cellHeight / height);
+    const aspectRatio = focus ? undefined : nearestPreviewAspectRatio(width, height);
+    const mask = aspectRatio
+      ? previewMaskCells(aspectRatio.value, maxColumns, maxRows, cell)
+      : { columns: maxColumns, rows: maxRows };
+    const maskWidth = mask.columns * cellWidth;
+    const maskHeight = mask.rows * cellHeight;
+    const scale = Math.min(1, maskWidth / width, maskHeight / height);
     const imageColumns = Math.max(1, Math.ceil(width * scale / cellWidth));
     const imageRows = Math.max(1, Math.ceil(height * scale / cellHeight));
     // The preview canvas must follow the fitted image, not the width of the
     // Markdown source line. Otherwise a tall image squeezed into one row gets
     // a wide background-only tail beside the actual pixels.
-    const columns = focus ? terminalColumns : imageColumns + margin;
-    const rows = focus ? availableRows : imageRows;
+    const columns = focus ? terminalColumns : mask.columns + margin;
+    const rows = focus ? availableRows : mask.rows;
     const canvasWidth = Math.max(1, Math.floor(columns * cellWidth));
     const canvasHeight = Math.max(1, Math.floor(rows * cellHeight));
-    const imageWidth = Math.max(1, Math.min(canvasWidth, Math.floor(width * scale)));
-    const imageHeight = Math.max(1, Math.min(canvasHeight, Math.floor(height * scale)));
+    const imageWidth = Math.max(1, Math.min(maskWidth, Math.floor(width * scale)));
+    const imageHeight = Math.max(1, Math.min(maskHeight, Math.floor(height * scale)));
     const key = JSON.stringify([
       path, info.size, info.mtimeMs, columns, rows, canvasWidth, canvasHeight,
-      imageWidth, imageHeight, background, focus
+      imageWidth, imageHeight, background, focus, aspectRatio?.name
     ]);
     const cached = this.#cache.get(key);
     if (cached) {
@@ -139,18 +175,31 @@ export class AgentImagePreviews {
     // background. Kitty composites transparent PNG pixels with the terminal
     // itself; using the detected OSC 11 color here would destroy wallpaper
     // and translucent terminal backgrounds.
-    const png = await sharp({
+    const canvas = sharp({
       create: {
         width: canvasWidth,
         height: canvasHeight,
         channels: 4,
         background: { r: 0, g: 0, b: 0, alpha: 0 }
       }
-    }).composite([{
+    });
+    const layers = [] as Array<{ input: Buffer; left: number; top: number }>;
+    if (!focus) {
+      layers.push({
+        input: await sharp({
+          create: { width: maskWidth, height: maskHeight, channels: 4, background }
+        }).png({ palette: false }).toBuffer(),
+        left: margin * cellWidth,
+        top: 0
+      });
+    }
+    layers.push({
       input: image,
-       left: focus ? Math.floor((canvasWidth - imageWidth) / 2) : margin * cellWidth,
-      top: focus ? Math.floor((canvasHeight - imageHeight) / 2) : 0
-    }]).png({ palette: false }).toBuffer();
+      left: focus ? Math.floor((canvasWidth - imageWidth) / 2) : margin * cellWidth
+        + Math.floor((maskWidth - imageWidth) / 2),
+      top: focus ? Math.floor((canvasHeight - imageHeight) / 2) : Math.floor((maskHeight - imageHeight) / 2)
+    });
+    const png = await canvas.composite(layers).png({ palette: false }).toBuffer();
     const prepared = { key, png, columns, rows };
     this.#cache.set(key, prepared);
     this.#cacheBytes += png.byteLength;

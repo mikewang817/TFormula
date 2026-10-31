@@ -34,7 +34,14 @@ describe("local Agent image overlays", () => {
     const { data, info } = await sharp(prepared!.png).raw().toBuffer({ resolveWithObject: true });
     expect(info.width).toBe(prepared!.columns * capabilities.cell.width);
     expect(info.height).toBe(prepared!.rows * capabilities.cell.height);
-    expect([...data.subarray(0, 3)]).toEqual([255, 0, 0]);
+    let hasRedPixel = false;
+    for (let offset = 0; offset < data.length; offset += info.channels) {
+      if (data[offset] === 255 && data[offset + 1] === 0 && data[offset + 2] === 0) {
+        hasRedPixel = true;
+        break;
+      }
+    }
+    expect(hasRedPixel).toBe(true);
   });
 
   it("keeps image canvas padding transparent", async () => {
@@ -59,6 +66,19 @@ describe("local Agent image overlays", () => {
       .toBuffer({ resolveWithObject: true });
     expect(data[3]).toBeGreaterThan(0);
     expect(info.channels).toBe(4);
+  });
+
+  it("uses a fixed nearest-ratio terminal-background mask for inline previews", async () => {
+    const prepared = await new AgentImagePreviews().prepare(
+      join(directory, "sample.png"), 30, 80, 12, capabilities.cell, "#123456", false, 2
+    );
+    expect(prepared).toMatchObject({ columns: 45, rows: 12 });
+    const sharp = await loadSharp();
+    const { data, info } = await sharp(prepared!.png).ensureAlpha().raw()
+      .toBuffer({ resolveWithObject: true });
+    const maskPixel = ((info.height - 1) * info.width + 2 * capabilities.cell.width) * 4;
+    expect([...data.subarray(maskPixel, maskPixel + 3)]).toEqual([18, 52, 86]);
+    expect(data[maskPixel + 3]).toBe(255);
   });
 
   it("prepares a small preview and a full-viewport focus image", async () => {
