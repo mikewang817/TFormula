@@ -1,78 +1,67 @@
-# TFormula OpenCode TUI Plugin
+# TFormula OpenCode V2 image board
 
-This package is the OpenCode-side image selection board for TFormula. It is
-kept separate from the terminal PTY wrapper because OpenCode plugins do not own
-the raw terminal stream or Kitty placement lifecycle.
+This TUI-only plugin lets OpenCode users select a local image referenced in
+the active conversation. TFormula remains responsible for image validation,
+Kitty graphics, cursor restoration, and focus lifecycle.
 
-## Current Behavior
+## Install and run
 
-- Registers `Ctrl-\` and `/tformula-images` inside an OpenCode session.
-- Reads local image candidates from current-session `file` parts and Markdown
-  image references in text parts.
-- Opens an OpenCode `DialogSelect` board.
-- Stores the selected image as `tformula.image-selection.v1` under the TUI KV
-  key `tformula.last-image-selection`.
-- Atomically writes the same record to
-  `/tmp/tformula-opencode-image-selection.json`, which the TFormula PTY wrapper
-  watches and routes through its existing Kitty focus renderer.
+Build the plugin using the OpenCode V2.2.2 SDK pinned in `package.json`:
 
-## Loading
+```sh
+npm install --prefix opencode-plugin --ignore-scripts --legacy-peer-deps
+npm run build --prefix opencode-plugin
+npm run build
+OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/home/green_gdut/GR_tools/TFormula/opencode-plugin"]}' \
+  node dist/cli.js --image-focus-key none -- opencode --standalone
+```
 
-For a TUI-only local plugin, add the directory to OpenCode's `cli.json` plugin
-list using an absolute path or symlinked package directory. The plugin package
-exports `./tui` and targets OpenCode v2.2.x's installed
-`@opencode-ai/plugin` API.
+The plugin package exports `./tui` and uses `@opencode/plugin/tui`'s
+`Plugin.define({ id, setup })`. `--image-focus-key none` allows OpenCode to
+receive Ctrl-\\; otherwise the outer TFormula proxy consumes it first.
+The pinned V2 SDK requires OpenTUI 0.7.0 peers. These peers may warn about
+Node 22 engine support; the real OpenCode V2.2.2 PTY test below passed on
+Node 22, but test again when changing either dependency version.
 
-## TFormula Bridge Contract
+Inside a session, press Ctrl-\\ or run `/tformula-images`. The board lists
+local image paths found in user attachments, assistant text, and completed
+tool output in the active session. Selecting an entry sends it to this
+TFormula proxy instance's focus renderer. Network URLs are not fetched.
 
-The selector and TFormula deliberately communicate through this versioned
-record rather than sharing internal classes:
+## Bridge contract
+
+The proxy generates a unique `TFORMULA_IMAGE_SELECTION_PATH` for each child
+process. The plugin atomically writes a JSON record there on selection:
 
 ```ts
 interface TFormulaImageSelection {
   protocol: "tformula.image-selection.v1";
   sessionID: string;
   path: string;
-  partID?: string;
   messageID?: string;
   selectedAt: number;
 }
 ```
 
-The current PTY wrapper remains authoritative for Kitty rendering, image
-validation, focus placement, cursor restoration, and alternate-screen safety.
-The shared file contains no PNG data; the wrapper revalidates the path before
-rendering. The plugin must not write Kitty APC sequences directly.
+The proxy validates the protocol and timestamp and calls
+`FormulaScreen.focusImagePath(path)`. That method performs local file checks
+before uploading via Kitty. The proxy removes its selection file on exit.
+Do not make the plugin write Kitty APC packets or use a global fixed
+selection file: either breaks ownership or allows one TFormula instance to
+preview another instance's selection.
 
-## API Basis
+## Verification
 
-Validated against the local OpenCode v2.2.2 installation and
-`@opencode-ai/plugin` 1.18.30:
+Against a real OpenCode V2.2.2 standalone TUI in a PTY:
 
-- `api.state.session.messages(sessionID)`
-- `api.state.part(messageID)`
-- `api.ui.DialogSelect`
-- `api.ui.dialog.replace()` / `clear()`
-- `api.command.register()` for the currently compatible keyboard command layer
-- `api.kv.set()`
+- The plugin loaded without a `Plugin failed` warning.
+- Sending Ctrl-\\ (`0x1c`) inside a session with images displayed a
+  `TFormula images` board with three local image candidates.
+- Selecting `test0.jpg` wrote a `tformula.image-selection.v1` record with
+  the active session ID and the selected absolute path. A separate PTY proxy
+  test confirms the record produces a Kitty focus placement and is removed
+  when the proxy exits.
 
-The installed declaration documents newer `api.keymap.registerLayer` methods
-but does not expose them on its `TuiKeymap` type. This implementation uses the
-runtime-compatible command registration until that API mismatch is resolved.
-
-## OpenCode 2.2.2 Runtime Note
-
-The plugin logic and the selection harness pass against the installed
-`@opencode-ai/plugin` declarations. A real OpenCode `v2.2.2` PTY launch was
-also attempted with this package loaded through both `cli.json` and the
-documented project `.opencode/plugins` discovery path. The TUI reported:
-
-```text
-Invalid V2 TUI plugin module: .../tformula-opencode
-```
-
-The error occurs before `tui()` setup runs, including with compiled JavaScript
-and the published module shape. This is a v2.2.2 local-loader/API compatibility
-issue, not a selection or TFormula bridge error. The stable package layout is
-kept here so it can be loaded by a compatible OpenCode v2 release or installed
-as a package through the normal plugin manager.
+`npx vitest run opencode-plugin/test/tui.integration.test.ts` covers command
+registration, candidate collection and record writing. A final visual check
+in a graphics-capable terminal is still needed for placement appearance.

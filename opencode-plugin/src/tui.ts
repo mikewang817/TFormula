@@ -1,8 +1,9 @@
-import type { FilePart, Part } from "@opencode-ai/sdk/v2";
-import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui";
 import { renameSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { SessionMessageInfo } from "@opencode/client";
+import { Plugin } from "@opencode/plugin/tui";
+import type { Context } from "@opencode/plugin/tui/plugin";
 
 export interface TFormulaImageSelection {
   protocol: "tformula.image-selection.v1";
@@ -13,142 +14,123 @@ export interface TFormulaImageSelection {
   selectedAt: number;
 }
 
-type ImageCandidate = {
-  path: string;
-  title: string;
-  description: string;
-  partID?: string;
-  messageID?: string;
-};
-
+type ImageCandidate = { path: string; title: string; description: string; messageID: string };
 const MARKDOWN_IMAGE = /!\[[^\]\r\n]*\]\((?:<([^<>\r\n]+)>|([^()\r\n]+))\)/gu;
+const IMAGE_SUFFIX = /\.(?:png|jpe?g|gif|webp|bmp|avif|tiff?)$/iu;
 
-function localPathFromPart(part: Part): string | undefined {
-  if (part.type !== "file") return undefined;
-  const file = part as FilePart;
-  if (file.source?.type === "file") return file.source.path;
-  if (file.url.startsWith("file://")) {
-    try { return decodeURIComponent(new URL(file.url).pathname); } catch { return undefined; }
+function localImagePath(value: string, directory: string): string | undefined {
+  try {
+    if (/^file:/iu.test(value)) {
+      const path = fileURLToPath(value);
+      return IMAGE_SUFFIX.test(path) ? path : undefined;
+    }
+    if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/iu.test(value)) return undefined;
+    const path = decodeURIComponent(value.replace(/\\([ ()])/gu, "$1"));
+    if (!IMAGE_SUFFIX.test(path)) return undefined;
+    return isAbsolute(path) ? path : resolve(directory, path);
+  } catch {
+    return undefined;
   }
-  return undefined;
 }
 
-export function collectImageCandidates(api: TuiPluginApi, sessionID: string): readonly ImageCandidate[] {
-  const candidates: ImageCandidate[] = [];
+export function collectImageCandidates(
+  messages: readonly SessionMessageInfo[],
+  directory: string
+): ImageCandidate[] {
   const seen = new Set<string>();
-  for (const message of api.state.session.messages(sessionID)) {
-    for (const part of api.state.part(message.id)) {
-      const path = localPathFromPart(part);
-      if (path && !seen.has(path)) {
-        seen.add(path);
-        candidates.push({
-          path,
-          title: path.split("/").pop() || path,
-          description: path,
-          partID: part.id,
-          messageID: part.messageID
-        });
+  const result: ImageCandidate[] = [];
+  const add = (value: string, messageID: string): void => {
+    const path = localImagePath(value, directory);
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    result.push({ path, title: basename(path), description: path, messageID });
+  };
+  const scanText = (text: string, id: string): void => {
+    for (const match of text.matchAll(MARKDOWN_IMAGE)) add(match[1] ?? match[2] ?? "", id);
+  };
+  for (const message of messages) {
+    if (message.type === "user") {
+      scanText(message.text, message.id);
+      for (const file of message.files ?? []) {
+        if (file.mime.startsWith("image/") && file.source.type === "uri") {
+          add(file.source.uri, message.id);
+        }
       }
-      if (part.type !== "text") continue;
-      for (const match of part.text.matchAll(MARKDOWN_IMAGE)) {
-        const path = match[1] ?? match[2];
-        if (!path || /^(?:https?:|data:|\/\/)/iu.test(path) || seen.has(path)) continue;
-        seen.add(path);
-        candidates.push({ path, title: path.split("/").pop() || path, description: path });
+    }
+    if (message.type !== "assistant") continue;
+    for (const content of message.content) {
+      if (content.type === "text") scanText(content.text, message.id);
+      if (content.type !== "tool" || content.state.status !== "completed") continue;
+      for (const item of content.state.content) {
+        if (item.type === "text") scanText(item.text, message.id);
+        if (item.type === "file" && item.mime.startsWith("image/")) add(item.uri, message.id);
       }
     }
   }
-  return candidates.reverse();
+  return result.reverse();
 }
 
-function sessionID(api: TuiPluginApi): string | undefined {
-  const route = api.route.current;
-  return route.name === "session" && typeof route.params?.sessionID === "string"
-    ? route.params.sessionID
-    : undefined;
+function writeSelection(selection: TFormulaImageSelection): void {
+  const path = process.env.TFORMULA_IMAGE_SELECTION_PATH;
+  if (!path || !isAbsolute(path)) return;
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(selection)}\n`, { mode: 0o600 });
+  renameSync(temporary, path);
 }
 
-async function showImageBoard(api: TuiPluginApi): Promise<void> {
-  const currentSession = sessionID(api);
-  if (!currentSession) {
-    api.ui.toast({ message: "Image selection is available inside a session", variant: "warning" });
+export async function showImageBoard(context: Context): Promise<void> {
+  const route = context.ui.router.current();
+  if (route.type !== "session") {
+    context.ui.toast.show({ message: "Image selection is available inside a session", variant: "warning" });
     return;
   }
-  const candidates = collectImageCandidates(api, currentSession);
-  if (candidates.length === 0) {
-    api.ui.toast({ message: "No local images in this conversation", variant: "warning" });
+  await context.data.session.message.sync(route.sessionID);
+  const candidates = collectImageCandidates(
+    context.data.session.message.list(route.sessionID),
+    context.location?.directory ?? context.data.location.default().directory
+  );
+  if (!candidates.length) {
+    context.ui.toast.show({ message: "No local images in this conversation", variant: "warning" });
     return;
   }
-  api.ui.dialog.replace(() => api.ui.DialogSelect({
+  const path = await context.ui.dialog.select({
     title: "TFormula images",
-    placeholder: "Select an image",
     options: candidates.map((candidate) => ({
       title: candidate.title,
       value: candidate.path,
       description: candidate.description
-    })),
-    onSelect: (option) => {
-      const candidate = candidates.find((item) => item.path === option.value);
-      if (!candidate) return;
-      const selection: TFormulaImageSelection = {
-        protocol: "tformula.image-selection.v1",
-        sessionID: currentSession,
-        path: candidate.path,
-        partID: candidate.partID,
-        messageID: candidate.messageID,
-        selectedAt: Date.now()
-      };
-      // The plugin is deliberately transport-neutral. The TFormula wrapper can
-      // consume this event through the documented bridge without owning the
-      // OpenCode TUI renderer or duplicating Kitty placement state.
-      api.kv.set("tformula.last-image-selection", selection);
-      const selectionPath = join(tmpdir(), "tformula-opencode-image-selection.json");
-      const temporaryPath = `${selectionPath}.${process.pid}.tmp`;
-      writeFileSync(temporaryPath, `${JSON.stringify(selection)}\n`, { mode: 0o600 });
-      renameSync(temporaryPath, selectionPath);
-      api.ui.dialog.clear();
-      api.ui.toast({ message: `Selected ${candidate.title}`, variant: "success" });
-    }
-  }));
+    }))
+  });
+  const candidate = candidates.find((item) => item.path === path);
+  if (!candidate) return;
+  if (!process.env.TFORMULA_IMAGE_SELECTION_PATH) {
+    context.ui.toast.show({ message: "Launch OpenCode through TFormula to preview images", variant: "warning" });
+    return;
+  }
+  writeSelection({
+    protocol: "tformula.image-selection.v1",
+    sessionID: route.sessionID,
+    path: candidate.path,
+    messageID: candidate.messageID,
+    selectedAt: Date.now()
+  });
 }
 
-export const id = "tformula-opencode";
-
-export const tui: TuiPlugin = async (api) => {
-  const command = {
-    title: "TFormula: choose conversation image",
-    id: "tformula.image-board",
-    category: "TFormula",
-    bind: "ctrl-\\",
-    palette: true,
-    slash: { name: "tformula-images", aliases: ["images"] },
-    run: () => { void showImageBoard(api); }
-  };
-  const keymap = api.keymap as typeof api.keymap & {
-    registerLayer?: (layer: { mode?: string; commands: typeof command[]; bindings?: string[] }) => () => void;
-  };
-  let unregister: (() => void) | undefined;
-  if (typeof keymap.registerLayer === "function") {
-    unregister = keymap.registerLayer({
+export default Plugin.define({
+  id: "tformula-opencode",
+  setup(context) {
+    context.keymap.layer(() => ({
       mode: "global",
-      commands: [command],
-      bindings: [command.id]
-    });
-  } else if (api.command?.register) {
-    // Compatibility with older local plugin runtimes.
-    unregister = api.command.register(() => [{
-      title: command.title,
-      value: command.id,
-      category: command.category,
-      keybind: command.bind,
-      slash: command.slash,
-      onSelect: command.run
-    }]);
+      commands: [{
+        id: "tformula.image-board",
+        title: "Choose conversation image",
+        group: "TFormula",
+        bind: "ctrl+\\",
+        palette: true,
+        slash: { name: "tformula-images" },
+        run: () => showImageBoard(context)
+      }],
+      bindings: ["tformula.image-board"]
+    }));
   }
-  api.lifecycle?.onDispose?.(() => unregister?.());
-};
-
-// The v2 TUI module contract is an object containing the plugin id and setup
-// function. OpenCode's local loader uses this shape for both package exports
-// and direct local plugin directories.
-export default { id, tui };
+});

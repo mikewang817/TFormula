@@ -1,5 +1,6 @@
 import process from "node:process";
-import { appendFileSync, chmodSync, readFileSync, watchFile, unwatchFile } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, chmodSync, readFileSync, rmSync, watchFile, unwatchFile } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -162,10 +163,12 @@ export async function runProxy(
     });
   };
 
-  const selectionPath = join(tmpdir(), "tformula-opencode-image-selection.json");
+  const selectionPath = screen
+    ? join(tmpdir(), `tformula-image-selection-${randomUUID()}.json`)
+    : undefined;
   let lastSelectionTimestamp = 0;
   const readPluginSelection = (): void => {
-    if (!screen) return;
+    if (!screen || !selectionPath) return;
     try {
       const selection = JSON.parse(readFileSync(selectionPath, "utf8")) as {
         protocol?: string; path?: string; selectedAt?: number;
@@ -181,7 +184,7 @@ export async function runProxy(
       // Atomic plugin writes can briefly make the record unavailable.
     }
   };
-  watchFile(selectionPath, { interval: 250 }, readPluginSelection);
+  if (selectionPath) watchFile(selectionPath, { interval: 250 }, readPluginSelection);
 
   const startRequestedProbe = (): void => {
     if (probeRequestedEpoch === undefined || exiting
@@ -404,7 +407,11 @@ export async function runProxy(
     cols,
     rows,
     cwd: options.cwd,
-    env: { ...process.env, TFORMULA_ACTIVE: "1" } as Record<string, string>
+    env: {
+      ...process.env,
+      TFORMULA_ACTIVE: "1",
+      ...(selectionPath ? { TFORMULA_IMAGE_SELECTION_PATH: selectionPath } : {})
+    } as Record<string, string>
   });
 
   if (startupProbeQuarantine) {
@@ -754,13 +761,16 @@ export async function runProxy(
           focusTailTimer = undefined;
           const outputTail = outputTransformer.flush();
           if (outputTail) await terminalWriter.write(outputTail);
-           unwatchFile(selectionPath, readPluginSelection);
-           screen?.dispose();
+          screen?.dispose();
           await terminalWriter.flush();
         } catch (error) {
           finalExitCode = finalExitCode || 1;
           process.stderr.write(`tformula: terminal output failed: ${error instanceof Error ? error.message : String(error)}\n`);
         } finally {
+          if (selectionPath) {
+            unwatchFile(selectionPath, readPluginSelection);
+            rmSync(selectionPath, { force: true });
+          }
           await imageTransmitter?.dispose();
           process.stdin.pause();
           if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function" && !previousRaw) {

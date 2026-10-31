@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as pty from "node-pty";
@@ -120,6 +120,48 @@ describe("runProxy pseudo-terminal integration", () => {
     expect(transcript).not.toContain("TFORMULA_UNEXPECTED_CHILD_INPUT");
     expect(transcript).toContain("TFORMULA_EDGE_END");
   }, 6_000);
+
+  it("places a selected plugin image through the per-proxy bridge", async () => {
+    const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
+    const fixture = join(process.cwd(), "test", "fixtures", "proxy-edge-agent.mjs");
+    const environment = {
+      ...process.env,
+      TERM: "xterm-ghostty",
+      TERM_PROGRAM: "ghostty",
+      TFORMULA_EDGE_MODE: "image-selection-bridge"
+    } as Record<string, string>;
+    delete environment.TFORMULA_ACTIVE;
+    let transcript = "";
+    let answered = false;
+    const terminal = pty.spawn(tsx, ["src/cli.ts", "--cell-size", "9x18", "--image-focus-key", "none",
+      "--", process.execPath, fixture], {
+      name: "xterm-ghostty", cols: 80, rows: 24, cwd: process.cwd(), env: environment
+    });
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        terminal.kill();
+        reject(new Error("image selection bridge timed out"));
+      }, 6_000);
+      terminal.onData((data) => {
+        transcript += data;
+        if (!answered && transcript.includes(`${ESC}[16t`)) {
+          answered = true;
+          terminal.write(`${ESC}[6;18;9t${ESC}[4;432;720t${ESC}_Gi=2000000000;OK${ST}`);
+        }
+      });
+      terminal.onExit(({ exitCode: code }) => {
+        clearTimeout(timeout);
+        resolve(code);
+      });
+    });
+    expect(exitCode).toBe(0);
+    expect(transcript).toContain("TFORMULA_SELECTION_BRIDGE_READY");
+    expect(transcript).toContain(`z=${TFORMULA_FOCUS_Z_INDEX}`);
+    expect(transcript).toContain("TFORMULA_EDGE_END");
+    const selectionPath = transcript.match(/TFORMULA_SELECTION_BRIDGE_READY:([^\r\n]+)/u)?.[1];
+    expect(selectionPath).toBeTruthy();
+    expect(existsSync(selectionPath!)).toBe(false);
+  }, 7_000);
 
   it("quarantines startup probe replies that arrive after the Agent starts", async () => {
     const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");

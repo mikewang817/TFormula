@@ -3,13 +3,23 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "build": "tsc -p tsconfig.json" },
-  "exports": { "./tui": "./dist/tui.js" },
-  "dependencies": { "@opencode-ai/plugin": "1.18.30" },
-  "devDependencies": { "@types/node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "exports": {
+    "./tui": "./dist/tui.js"
+  },
+  "dependencies": {
+    "@opencode/client": "2.2.2",
+    "@opencode/plugin": "2.2.2"
+  },
+  "devDependencies": {
+    "@types/node": ">=20",
+    "solid-js": "^1.9.12"
+  },
   "peerDependencies": {
-    "@opentui/core": ">=0.4.5",
-    "@opentui/keymap": ">=0.4.5",
-    "@opentui/solid": ">=0.4.5"
+    "@opentui/core": "0.7.0",
+    "@opentui/solid": "0.7.0",
+    "solid-js": "^1.9.12"
   }
 }
