@@ -120,16 +120,6 @@ export interface FormulaRenderedEvent {
   confidence: DetectedFormula["confidence"];
 }
 
-/** A local image observed during one TFormula proxy process. */
-export interface RecentImageEntry {
-  /** Process-local identifier; it is invalid after this TFormula process exits. */
-  id: string;
-  /** Absolute local path resolved from the Agent working directory. */
-  path: string;
-  /** Last time this path was observed in the proxied terminal output. */
-  observedAt: number;
-}
-
 export interface CliOptions {
   mode: "proxy";
   command: string;
@@ -145,8 +135,6 @@ export interface CliOptions {
   stabilityMs: number;
   /** One control character which toggles the non-destructive formula focus overlay. */
   focusKey: string;
-  /** One control character which opens the last local image at readable size. */
-  imageFocusKey: string;
   cellOverride?: { width: number; height: number };
 }
 

@@ -1,7 +1,7 @@
 {
-  "name": "tformula",
-  "version": "0.3.1",
-  "description": "Render CLI LaTeX and read Markdown with images directly in the terminal.",
+  "name": "gtformula",
+  "version": "0.1.0",
+  "description": "Render scientific LaTeX in OpenCode and other terminal agents, and read Markdown with images.",
   "keywords": [
     "terminal",
     "latex",
@@ -14,21 +14,24 @@
     "reader",
     "image"
   ],
-  "homepage": "https://github.com/mikewang817/TFormula#readme",
+  "homepage": "https://github.com/GreenGdut/TFormula#readme",
   "bugs": {
-    "url": "https://github.com/mikewang817/TFormula/issues"
+    "url": "https://github.com/GreenGdut/TFormula/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mikewang817/TFormula.git"
+    "url": "git+https://github.com/GreenGdut/TFormula.git"
   },
   "type": "module",
   "bin": {
-    "tformula": "dist/cli.js"
+    "gtformula": "dist/cli.js"
   },
   "files": [
     "dist",
-    "README.zh-CN.md"
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "assets/tformula-maxwell.png"
   ],
   "scripts": {
     "build": "rimraf dist && tsc -p tsconfig.json && chmod +x dist/cli.js",

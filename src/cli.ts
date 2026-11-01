@@ -23,28 +23,29 @@ const HELP = `TFormula ${VERSION}
 Render LaTeX from terminal agents, or read Markdown, text, and image files.
 
 Usage:
-  tformula [options] [--] [command ...]
-  tformula [options] <document.md|image>
-  tformula --read <document>
-  tformula --shell
-  tformula history [--limit <count>] [--json]
-  tformula cache [status|clear]
-  tformula copy [<id>] [latex|markdown|mathml|html|svg|png|tiff]
-  tformula save [<id>] <path> [formula export options]
-  tformula export [<id>|--last] [--format <format>] [-o <path>]
+  gtformula [options] [--] [command ...]
+  gtformula [options] <document.md|image>
+  gtformula --read <document>
+  gtformula --shell
+  gtformula history [--limit <count>] [--json]
+  gtformula cache [status|clear]
+  gtformula copy [<id>] [latex|markdown|mathml|html|svg|png|tiff]
+  gtformula save [<id>] <path> [formula export options]
+  gtformula export [<id>|--last] [--format <format>] [-o <path>]
 
 Examples:
-  tformula codex
-  tformula claude
-  tformula -- gemini --model gemini-2.5-pro
-  tformula --shell
-  tformula README.md
-  tformula assets/diagram.png
-  tformula history
-  tformula cache status
-  tformula copy mathml
-  tformula save formula.png
-  tformula save 2f83a1 formula.svg --color navy --padding 12
+  gtformula opencode
+  gtformula codex
+  gtformula claude
+  gtformula -- gemini --model gemini-2.5-pro
+  gtformula --shell
+  gtformula README.md
+  gtformula assets/diagram.png
+  gtformula history
+  gtformula cache status
+  gtformula copy mathml
+  gtformula save formula.png
+  gtformula save 2f83a1 formula.svg --color navy --padding 12
 
 Options:
   --shell                 Start the login shell (default when no command is given)
@@ -55,7 +56,6 @@ Options:
   --min-readable-scale <n> Keep raw TeX below this fitted ratio, default 0.4
   --stability-ms <number>  Background formula quiet period, default 80 ms
   --focus-key <key>        Focus latest formula, default ctrl-] (or none)
-  --image-focus-key <key>  Browse local images, default ctrl-\\ (or none)
   --cell-size <WxH>        Override terminal cell pixels, for example 9x18
   -C, --cwd <directory>    Child or reader working directory
   --debug                  Print diagnostics
@@ -75,7 +75,7 @@ natural MathJax proportions and are only reduced when they do not fit.
 `;
 
 function fail(message: string): never {
-  process.stderr.write(`tformula: ${message}\n`);
+  process.stderr.write(`gtformula: ${message}\n`);
   process.exit(2);
 }
 
@@ -305,9 +305,6 @@ export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" 
   let minReadableScale = Number(process.env.TFORMULA_MIN_READABLE_SCALE ?? "0.4");
   let stabilityMs = Number(process.env.TFORMULA_STABILITY_MS ?? "80");
   let focusKey = parseFocusKey(process.env.TFORMULA_FOCUS_KEY ?? "ctrl-]");
-  let imageFocusKey = parseFocusKey(
-    process.env.TFORMULA_IMAGE_FOCUS_KEY ?? "ctrl-\\", "--image-focus-key"
-  );
   let cellOverride: CliOptions["cellOverride"];
   let forceShell = false;
   let readerPath: string | undefined;
@@ -338,11 +335,6 @@ export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" 
     else if (value === "--focus-key") {
       focusKey = parseFocusKey(argv[++index] ?? fail("--focus-key requires a key"));
     }
-    else if (value === "--image-focus-key") {
-      imageFocusKey = parseFocusKey(
-        argv[++index] ?? fail("--image-focus-key requires a key"), "--image-focus-key"
-      );
-    }
     else if (value === "-C" || value === "--cwd") cwd = argv[++index] ?? fail(`${value} requires a directory`);
     else if (value === "--cell-size") {
       const raw = argv[++index] ?? fail("--cell-size requires WIDTHxHEIGHT");
@@ -360,7 +352,6 @@ export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" 
     fail("--stability-ms must be between 0 and 2000");
   }
   stabilityMs = Math.floor(stabilityMs);
-  if (focusKey && focusKey === imageFocusKey) fail("--focus-key and --image-focus-key must differ");
   if (forceShell && commandParts.length > 0) fail("--shell cannot be combined with a command");
   if (readerPath && (forceShell || commandParts.length > 0)) {
     fail("--read cannot be combined with --shell or a command");
@@ -395,7 +386,6 @@ export function parseArgs(argv: string[]): TFormulaOptions | "help" | "version" 
     minReadableScale,
     stabilityMs,
     focusKey,
-    imageFocusKey,
     cellOverride
   };
 }
@@ -414,7 +404,7 @@ async function main(): Promise<void> {
   if (parsed.mode === "history" || parsed.mode === "cache"
     || parsed.mode === "export" || parsed.mode === "copy") {
     const debug = (message: string): void => {
-      if (parsed.debug) process.stderr.write(`[tformula] ${message}\n`);
+      if (parsed.debug) process.stderr.write(`[gtformula] ${message}\n`);
     };
     if (parsed.mode === "history") {
       const history = await import("./formula-history.js");
@@ -449,7 +439,7 @@ async function main(): Promise<void> {
   // starting a second proxy must fail before probing or spawning a PTY.
   if (isTFormulaActive()) {
     process.stderr.write(
-      "tformula: TFormula is already active; run the agent command directly inside the existing session\n"
+      "gtformula: TFormula is already active; run the agent command directly inside the existing session\n"
     );
     process.exitCode = 2;
     return;
@@ -493,7 +483,7 @@ if (process.argv[1]) {
 
 if (invokedDirectly) {
   main().catch((error) => {
-    process.stderr.write(`tformula: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`gtformula: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   });
 }

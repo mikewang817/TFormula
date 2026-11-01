@@ -7,9 +7,6 @@ import type {
   ITerminalAddon,
   Terminal as XtermTerminal
 } from "@xterm/headless";
-import {
-  AgentImagePreviews, localImagePath, localImageReference, type LocalImageReference
-} from "./agent-image.js";
 import { containsFormulaTrigger, MAX_DISPLAY_BLOCK_ROWS } from "./detect.js";
 import { planFormulaPlacements } from "./formula-layout.js";
 import {
@@ -36,7 +33,6 @@ import { detectScreenFormulaRegions } from "./screen-text.js";
 import type {
   FormulaPlacementPlan,
   FormulaRenderedEvent,
-  RecentImageEntry,
   RecentFormulaEntry,
   TerminalCapabilities
 } from "./types.js";
@@ -50,11 +46,6 @@ const { UnicodeGraphemesAddon } = createRequire(import.meta.url)(
   UnicodeGraphemesAddon: new () => ITerminalAddon;
 };
 
-// Keep image preparation local to the viewport neighborhood. The retained
-// terminal buffer can be much larger than the content currently being viewed.
-const IMAGE_SCAN_CONTEXT_ROWS = 2;
-const INLINE_IMAGE_LEFT_MARGIN = 2;
-
 interface FocusPlacement {
   imageId: number;
   placementId: number;
@@ -65,15 +56,8 @@ interface PlannedFormulaSnapshot {
   deferred: Array<{ latex: string; startRow: number; endRow: number }>;
 }
 
-interface VisibleLocalImage {
-  row: number;
-  reference: LocalImageReference;
-  sourceColumns: number;
-  availableRows: number;
-}
-
 interface PlacedFormula {
-  kind: "formula" | "image";
+  kind: "formula";
   anchor: string;
   imageId: number;
   placementId: number;
@@ -455,8 +439,6 @@ function lineTextSnapshot(line: IBufferLine | undefined, translatedText?: string
 export class FormulaScreen {
   readonly terminal: XtermTerminal;
   readonly #renderer: MathRenderer;
-  readonly #imagePreviews = new AgentImagePreviews();
-  readonly #cwd: string;
   readonly #transmitImage: (png: Uint8Array, imageId: number) => string;
   readonly #placed = new Map<string, PlacedFormula>();
   /**
@@ -493,13 +475,8 @@ export class FormulaScreen {
   readonly #formulaStability = new Map<string, FormulaStabilityState>();
   readonly #recentFormulas: RecentFormulaEntry[] = [];
   readonly #recentFormulaLimit = 50;
-  readonly #recentImages: RecentImageEntry[] = [];
-  readonly #seenImageAnchors = new Map<string, string>();
-  readonly #imageFailureReports = new Map<string, { message: string; at: number }>();
   #recentFormulaId = 1;
-  #recentImageId = 1;
   #focusIndex = -1;
-  #imageFocusIndex = -1;
   #focusPlacement?: FocusPlacement;
   #focusDirty = false;
   readonly #writeOuter: (data: string | Uint8Array) => void;
@@ -568,7 +545,6 @@ export class FormulaScreen {
     rows: number;
     capabilities: TerminalCapabilities;
     scale: number;
-    cwd?: string;
     minReadableScale?: number;
     stabilityMs?: number;
     writeOuter: (data: string | Uint8Array) => void;
@@ -598,17 +574,6 @@ export class FormulaScreen {
     // ZWJ families). Wrong cell widths corrupt both formula anchors and the
     // cursor position restored after a Kitty placement.
     this.terminal.loadAddon(new UnicodeGraphemesAddon());
-    this.terminal.parser.registerOscHandler(8, (data) => {
-      // OpenCode may redraw/scroll a linked label before a viewport scan gets
-      // a quiet moment. Record the local target as the OSC 8 arrives, while
-      // returning false so xterm's native hyperlink handling remains intact.
-      const separator = data.indexOf(";");
-      const path = separator >= 0
-        ? localImagePath(data.slice(separator + 1), this.#cwd)
-        : undefined;
-      if (path) this.#rememberImage(path, `hyperlink:${path}`);
-      return false;
-    });
     this.#capabilities = options.capabilities;
     this.#scale = options.scale;
     this.#minReadableScale = Number.isFinite(options.minReadableScale)
@@ -618,7 +583,6 @@ export class FormulaScreen {
       ? Math.max(0, Math.min(2_000, Math.floor(options.stabilityMs!)))
       : 80;
     this.#renderer = options.renderer ?? new MathRenderer();
-    this.#cwd = options.cwd ?? process.cwd();
     this.#transmitImage = options.transmitImage ?? kittyTransmitImage;
     this.#writeOuter = options.writeOuter;
     this.#writeGraphics = options.writeGraphics;
@@ -704,7 +668,7 @@ export class FormulaScreen {
     this.#pendingWrites += reservations;
     this.#scanVersion += 1;
     this.#rescanRequested = true;
-    // A newly enabled one-row image preview can create its first Kitty
+    // A newly enabled one-row formula placement can create its first Kitty
     // placement while an alternate-screen TUI is still repainting. Mark the
     // alternate viewport dirty before the write begins, not only after an
     // existing placement is scrolled. Explicit flushScan() can still promote
@@ -952,32 +916,7 @@ export class FormulaScreen {
   }
 
   get formulaFocusActive(): boolean {
-    return this.#focusIndex >= 0 || this.#imageFocusIndex >= 0;
-  }
-
-  get recentImageCount(): number {
-    return this.#recentImages.length;
-  }
-
-  /** Images observed in this proxy process, newest first. */
-  get recentImages(): readonly RecentImageEntry[] {
-    return this.#recentImages;
-  }
-
-  #rememberImage(path: string, anchor: string): void {
-    if (this.#seenImageAnchors.get(anchor) === path) return;
-    this.#seenImageAnchors.set(anchor, path);
-    if (this.#seenImageAnchors.size > 128) {
-      this.#seenImageAnchors.delete(this.#seenImageAnchors.keys().next().value!);
-    }
-    const previous = this.#recentImages.findIndex((entry) => entry.path === path);
-    const entry = previous >= 0
-      ? this.#recentImages.splice(previous, 1)[0]!
-      : { id: `img-${this.#recentImageId++}`, path, observedAt: Date.now() };
-    entry.observedAt = Date.now();
-    if (previous < 0) this.#debug(`local image target indexed: ${entry.id} ${path}`);
-    this.#recentImages.unshift(entry);
-    if (this.#recentImages.length > 50) this.#recentImages.pop();
+    return this.#focusIndex >= 0;
   }
 
   #rememberFormula(
@@ -1016,7 +955,6 @@ export class FormulaScreen {
 
   async focusLatestFormula(): Promise<boolean> {
     if (this.#recentFormulas.length === 0 || !this.#capabilities.kittyGraphics) return false;
-    if (this.#imageFocusIndex >= 0) await this.closeFormulaFocus();
     const previousIndex = this.#focusIndex;
     this.#focusIndex = 0;
     this.#focusDirty = true;
@@ -1047,7 +985,6 @@ export class FormulaScreen {
   }
 
   async refreshFormulaFocus(): Promise<boolean> {
-    if (this.#imageFocusIndex >= 0) return this.#refreshImageFocus();
     if (this.#focusIndex < 0) return false;
     if (!this.#focusDirty && this.#focusPlacement) return true;
     if (this.#disposed || this.#layoutSuspended || !this.#capabilities.kittyGraphics) return false;
@@ -1110,104 +1047,8 @@ export class FormulaScreen {
     }
   }
 
-  async focusLatestImage(): Promise<boolean> {
-    if (this.#recentImages.length === 0) this.#visibleLocalImages([]);
-    if (this.#recentImages.length === 0 || !this.#capabilities.kittyGraphics) return false;
-    if (this.#focusIndex >= 0) await this.closeFormulaFocus();
-    return this.#focusAvailableImage(0, 1);
-  }
-
-  async focusNextImage(): Promise<boolean> {
-    if (this.#recentImages.length === 0) return false;
-    return this.#focusAvailableImage((this.#imageFocusIndex + 1) % this.#recentImages.length, 1);
-  }
-
-  async focusPreviousImage(): Promise<boolean> {
-    if (this.#recentImages.length === 0) return false;
-    return this.#focusAvailableImage(
-      (this.#imageFocusIndex - 1 + this.#recentImages.length) % this.#recentImages.length, -1
-    );
-  }
-
-  async #focusAvailableImage(start: number, direction: 1 | -1): Promise<boolean> {
-    const previousIndex = this.#imageFocusIndex;
-    for (let offset = 0; offset < this.#recentImages.length; offset += 1) {
-      this.#imageFocusIndex = (start + direction * offset + this.#recentImages.length)
-        % this.#recentImages.length;
-      this.#focusDirty = true;
-      if (await this.#refreshImageFocus()) return true;
-    }
-    this.#imageFocusIndex = this.#focusPlacement ? previousIndex : -1;
-    return false;
-  }
-
-  async #refreshImageFocus(): Promise<boolean> {
-    if (this.#imageFocusIndex < 0) return false;
-    if (!this.#focusDirty && this.#focusPlacement) return true;
-    if (this.#disposed || this.#layoutSuspended || !this.#capabilities.kittyGraphics) return false;
-    const path = this.#recentImages[this.#imageFocusIndex]?.path;
-    if (!path) return false;
-    try {
-      const columns = this.terminal.cols;
-      const rows = this.terminal.rows;
-      const preview = await this.#imagePreviews.prepare(
-        path, columns, columns, rows, this.#capabilities.cell, this.#capabilities.background, true
-      );
-      if (!preview || this.#disposed || this.#layoutSuspended) {
-        if (!preview) this.#debug(`image focus skipped: image unavailable: ${path}`);
-        return false;
-      }
-      const restoreCursor = this.#cursorRestoreAfterGraphics();
-      if (!restoreCursor) return false;
-      const previous = this.#focusPlacement;
-      const imageId = this.#nextImageId();
-      const placementId = this.#nextPlacementId();
-      const emitted = await this.#writeGraphicsTransaction([
-        previous ? kittyDeletePlacement(previous.imageId, previous.placementId) : "",
-        previous ? kittyDeleteImage(previous.imageId) : "",
-        this.#transmitImage(preview.png, imageId),
-        cursorPosition(1, 1),
-        kittyPlaceImage(imageId, placementId, columns, rows, undefined, TFORMULA_FOCUS_Z_INDEX),
-        restoreCursor
-      ].join(""));
-      if (!emitted) {
-        this.#allocatedImageIds.delete(imageId);
-        return false;
-      }
-      if (previous) this.#allocatedImageIds.delete(previous.imageId);
-      this.#focusPlacement = { imageId, placementId };
-      this.#focusDirty = false;
-      this.#debug(`focused local image across ${columns}x${rows} cells`);
-      return true;
-    } catch (error) {
-      this.#debug(`image focus skipped: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
-    }
-  }
-
-  async focusImage(id: string): Promise<boolean> {
-    const index = this.#recentImages.findIndex((entry) => entry.id === id);
-    if (index < 0) return false;
-    if (this.#focusIndex >= 0) await this.closeFormulaFocus();
-    this.#imageFocusIndex = index;
-    this.#focusDirty = true;
-    return this.#refreshImageFocus();
-  }
-
-  async focusImagePath(path: string): Promise<boolean> {
-    if (!path) return false;
-    this.#rememberImage(path, `plugin:${path}`);
-    const index = this.#recentImages.findIndex((entry) => entry.path === path);
-    if (index < 0) return false;
-    if (this.#focusIndex >= 0) await this.closeFormulaFocus();
-    this.#imageFocusIndex = index;
-    this.#focusDirty = true;
-    return this.#refreshImageFocus();
-  }
-
   async closeFormulaFocus(): Promise<void> {
     this.#focusIndex = -1;
-    this.#imageFocusIndex = -1;
     this.#focusDirty = false;
     const placement = this.#focusPlacement;
     this.#focusPlacement = undefined;
@@ -1251,7 +1092,7 @@ export class FormulaScreen {
     for (let row = 0; row < this.terminal.rows; row += 1) {
       const line = buffer.getLine(buffer.viewportY + row);
       const text = line?.translateToString(true) ?? "";
-      if (containsFormulaTrigger(text) || this.#imageReferenceAt(line, text)) return false;
+      if (containsFormulaTrigger(text)) return false;
     }
     return true;
   }
@@ -2680,229 +2521,6 @@ export class FormulaScreen {
       && bounds.end === viewportY + region.canvas.endRow;
   }
 
-  #imageReferenceAt(line: IBufferLine | undefined, text: string): LocalImageReference | undefined {
-    const markdown = localImageReference(text, this.#cwd);
-    if (markdown || !line || !text.trim()) return markdown;
-    // OpenTUI conceals Markdown images to an OSC 8-linked alt label. xterm
-    // stores the hyperlink target in its link service, not in the visible text.
-    // Feature-detect these internals and accept only a line consisting entirely
-    // of one linked label, never an ordinary inline link in a prose sentence.
-    const service = (this.terminal as unknown as {
-      _core?: { _oscLinkService?: {
-        getLinkData?: (id: number) => { uri?: string } | undefined;
-      } };
-    })._core?._oscLinkService;
-    if (typeof service?.getLinkData !== "function") return undefined;
-    let linkId = 0;
-    for (let column = 0; column < lineTrimmedColumns(line); column += 1) {
-      const cell = line.getCell(column);
-      if (!cell || !cell.getChars().trim()) continue;
-      const id = (cell as unknown as { extended?: { _urlId?: number } }).extended?._urlId;
-      if (!id || (linkId !== 0 && id !== linkId)) return undefined;
-      linkId = id;
-    }
-    if (!linkId) return undefined;
-    const path = localImagePath(service.getLinkData(linkId)?.uri ?? "", this.#cwd);
-    return path ? { text, path } : undefined;
-  }
-
-  #imageCanvasAvailable(row: number, reference: LocalImageReference, rows: number): boolean {
-    const buffer = this.terminal.buffer.active;
-    const source = buffer.getLine(buffer.viewportY + row);
-    if (!source || source.isWrapped
-      || this.#imageReferenceAt(source, source.translateToString(true))?.path !== reference.path
-      || source.translateToString(true) !== reference.text) return false;
-    // Low-resolution previews may cover the reference row itself. Focus images
-    // still use the available viewport canvas and are unaffected by this path.
-    if (rows > 1 && buffer.getLine(buffer.viewportY + row + 1)?.isWrapped) return false;
-    for (let offset = 1; offset < rows; offset += 1) {
-      const line = buffer.getLine(buffer.viewportY + row + offset);
-      if (!line || line.isWrapped || line.translateToString(true).trim()) return false;
-    }
-    return true;
-  }
-
-  #visibleLocalImages(formulaRegions: readonly FormulaPlacementPlan[]): VisibleLocalImage[] {
-    const buffer = this.terminal.buffer.active;
-    const references = Array.from({ length: this.terminal.rows }, (_, row) => {
-      const line = buffer.getLine(buffer.viewportY + row);
-      return this.#imageReferenceAt(line, line?.translateToString(true) ?? "");
-    });
-    if (!references.some(Boolean)) return [];
-
-    // Scan only a bounded neighborhood. This preserves a little context for a
-    // Markdown fence without making every image scan walk the whole scrollback.
-    const contextRows = Math.max(this.terminal.rows, this.terminal.rows * IMAGE_SCAN_CONTEXT_ROWS);
-    const startRow = Math.max(0, buffer.viewportY - contextRows);
-    const endRow = Math.min(buffer.length, buffer.viewportY + this.terminal.rows + contextRows);
-    let fence = "";
-    let fenceLength = 0;
-    const candidates: VisibleLocalImage[] = [];
-    for (let absoluteRow = startRow; absoluteRow < endRow; absoluteRow += 1) {
-      const row = absoluteRow - buffer.viewportY;
-      const line = buffer.getLine(absoluteRow);
-      const text = line?.translateToString(true) ?? "";
-      if (!line?.isWrapped) {
-        const marker = /^ {0,3}(`{3,}|~{3,})/u.exec(text)?.[1];
-        if (marker && (!fence || (marker[0] === fence && marker.length >= fenceLength
-          && /^ {0,3}(?:`{3,}|~{3,})\s*$/u.test(text)))) {
-          if (fence) fence = "";
-          else { fence = marker[0]!; fenceLength = marker.length; }
-          continue;
-        }
-      }
-      if (fence || row < 0 || !line || line.isWrapped) continue;
-      const reference = row >= 0 && row < references.length
-        ? references[row]
-        : this.#imageReferenceAt(line, text);
-      if (!reference || buffer.getLine(absoluteRow + 1)?.isWrapped) continue;
-      this.#rememberImage(reference.path, `${buffer.type}:${absoluteRow}`);
-      const sourceColumns = lineTrimmedColumns(line);
-      if (sourceColumns > this.terminal.cols
-        || formulaRegions.some((region) =>
-          region.canvas.startRow <= row && region.canvas.endRow >= row)) continue;
-      let availableRows = 1;
-      while (row + availableRows < this.terminal.rows && availableRows < 12) {
-        const next = buffer.getLine(absoluteRow + availableRows);
-        if (!next || next.isWrapped || next.translateToString(true).trim()
-          || formulaRegions.some((region) => region.canvas.startRow <= row + availableRows
-            && region.canvas.endRow >= row + availableRows)) break;
-        availableRows += 1;
-      }
-      candidates.push({ row, reference, sourceColumns, availableRows: Math.max(1, availableRows) });
-    }
-    return candidates;
-  }
-
-  async #scanLocalImages(
-    formulaRegions: readonly FormulaPlacementPlan[],
-    bufferType: string,
-    viewportY: number,
-    version: number,
-    layoutVersion: number,
-    screenEpoch: number,
-    allowQueuedWrites: boolean,
-    desiredAnchors: Set<string>
-  ): Promise<void> {
-    for (const { row, reference, sourceColumns, availableRows } of
-      this.#visibleLocalImages(formulaRegions)) {
-      if (this.#disposed || this.#screenEpoch !== screenEpoch || this.#layoutSuspended
-        || layoutVersion !== this.#layoutVersion
-        || version !== this.#scanVersion || (!allowQueuedWrites && this.#pendingWrites > 0)) break;
-      const anchor = `${bufferType}:${viewportY + row}:0`;
-      const existing = this.#placed.get(anchor);
-      try {
-        const prepared = await this.#imagePreviews.prepare(
-          reference.path, sourceColumns,
-          this.terminal.cols, availableRows,
-          this.#capabilities.cell, this.#capabilities.background, false,
-          INLINE_IMAGE_LEFT_MARGIN
-        );
-        if (this.#disposed || this.#screenEpoch !== screenEpoch || this.#layoutSuspended
-          || layoutVersion !== this.#layoutVersion
-          || this.terminal.buffer.active.type !== bufferType
-          || this.terminal.buffer.active.viewportY !== viewportY
-          || version !== this.#scanVersion || (!allowQueuedWrites && this.#pendingWrites > 0)) {
-          this.#rescanRequested = true;
-          break;
-        }
-        if (!prepared || !this.#imageCanvasAvailable(row, reference, prepared.rows)) continue;
-        desiredAnchors.add(anchor);
-        const fingerprint = prepared.key;
-        const bounds = existing && this.#placementBounds(existing);
-        if (existing?.kind === "image" && existing.fingerprint === fingerprint
-          && existing.resizeGeneration === this.#resizeGeneration
-          && bounds?.start === viewportY + row
-          && bounds?.end === viewportY + row + prepared.rows - 1
-          && (bufferType !== "normal" || [existing.startMarker, existing.endMarker].some(
-            (marker) => Boolean(marker && !marker.isDisposed && marker.line >= 0)
-          ))) continue;
-        if (this.terminal.buffer.active.cursorX >= this.terminal.cols
-          && this.#pendingWrapHeldColumns === undefined && !this.#pendingWrapReplay()) break;
-        const imageKey = `${bufferType}:agent-image:${fingerprint}`;
-        if (this.#blockedImageKeys.has(imageKey)) continue;
-        const retry = this.#imageRetries.get(imageKey);
-        if (retry && retry.notBefore > Date.now()) continue;
-        let image = this.#terminalImages.get(imageKey);
-        if (!image) {
-          image = { imageId: this.#nextImageId(), placements: 0, lastUsed: ++this.#imageUse };
-          const transmission = this.#transmitImage(prepared.png, image.imageId);
-          this.#terminalImages.set(imageKey, image);
-          if (!await this.#writeGraphicsTransaction(() =>
-            this.#disposed || this.#screenEpoch !== screenEpoch || this.#layoutSuspended
-              || layoutVersion !== this.#layoutVersion
-              || version !== this.#scanVersion ? undefined : transmission)) {
-            this.#terminalImages.delete(imageKey);
-            this.#rescanRequested = true;
-            break;
-          }
-        }
-        if (this.#disposed || this.#screenEpoch !== screenEpoch || this.#layoutSuspended
-          || layoutVersion !== this.#layoutVersion
-          || version !== this.#scanVersion || (!allowQueuedWrites && this.#pendingWrites > 0)
-          || this.terminal.buffer.active.viewportY !== viewportY
-          || !this.#imageCanvasAvailable(row, reference, prepared.rows)) {
-          this.#rescanRequested = true;
-          break;
-        }
-        const imageId = image.imageId;
-        const placementId = this.#nextPlacementId();
-        const emitted = await this.#writeGraphicsTransaction(() => {
-          if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
-            || version !== this.#scanVersion
-            || this.terminal.buffer.active.viewportY !== viewportY
-            || !this.#imageCanvasAvailable(row, reference, prepared.rows)) return undefined;
-          const restore = this.#cursorRestoreAfterGraphics();
-          if (!restore) return undefined;
-          return (existing ? kittyDeletePlacement(existing.imageId, existing.placementId) : "")
-             + cursorPosition(row + 1, 1)
-            + kittyPlaceImage(imageId, placementId, prepared.columns, prepared.rows)
-            + restore;
-        });
-        if (!emitted) { this.#rescanRequested = true; break; }
-        if (this.#disposed || this.#layoutSuspended || layoutVersion !== this.#layoutVersion
-          || version !== this.#scanVersion || this.terminal.buffer.active.viewportY !== viewportY
-          || !this.#imageCanvasAvailable(row, reference, prepared.rows)) {
-          await this.#writeGraphicsTransaction(
-            kittyDeletePlacement(imageId, placementId) + (this.#cursorRestoreAfterGraphics() ?? "")
-          );
-          // The transaction already removed the old pin, if there was one.
-          if (existing && this.#placed.get(anchor) === existing) {
-            this.#releasePlacement(existing);
-            this.#placed.delete(anchor);
-          }
-          this.#rescanRequested = true;
-          break;
-        }
-        if (existing) this.#releasePlacement(existing);
-        image.placements += 1;
-        image.lastUsed = ++this.#imageUse;
-        this.#placed.set(anchor, {
-          kind: "image", anchor, imageId, placementId, imageKey,
-          latex: reference.path, sourceText: reference.text, fingerprint,
-          resizeGeneration: this.#resizeGeneration, bufferType,
-          absoluteStartRow: viewportY + row,
-          absoluteEndRow: viewportY + row + prepared.rows - 1,
-          ...this.#markersForRows(row, row + prepared.rows - 1)
-        });
-        this.#evictIdleTerminalImages();
-        this.#debug(`rendered local image at ${anchor} (${prepared.columns}x${prepared.rows} cells)`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const previous = this.#imageFailureReports.get(reference.path);
-        const now = Date.now();
-        if (!previous || previous.message !== message || now - previous.at >= 10_000) {
-          this.#debug(`local image skipped: ${message}`);
-          this.#imageFailureReports.delete(reference.path);
-          this.#imageFailureReports.set(reference.path, { message, at: now });
-          if (this.#imageFailureReports.size > 128) {
-            this.#imageFailureReports.delete(this.#imageFailureReports.keys().next().value!);
-          }
-        }
-      }
-    }
-  }
-
   async #scan(allowQueuedWrites = false, forceStable = false): Promise<void> {
     if (this.#disposed || !this.#capabilities.kittyGraphics || this.terminal.modes.originMode) return;
     if ((allowQueuedWrites || !forceStable)
@@ -3364,10 +2982,6 @@ export class FormulaScreen {
           }
         }
       }
-      await this.#scanLocalImages(
-        regions, bufferType, viewportY, version, layoutVersion,
-        screenEpoch, allowQueuedWrites, desiredAnchors
-      );
       // Stale placement deletion is deliberately transactional as well. A
       // resize can invalidate an in-flight scan; deleting before all current
       // formulas are prepared would permanently lose an image that has just

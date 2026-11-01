@@ -33,7 +33,7 @@ describe("CLI arguments", () => {
       mode: "proxy",
       focusKey: "\x06"
     });
-    expect(parseArgs(["codex"])).toMatchObject({ focusKey: "\x1d", imageFocusKey: "\x1c" });
+    expect(parseArgs(["codex"])).toMatchObject({ focusKey: "\x1d" });
   });
 
   it("starts a login shell by default", () => {

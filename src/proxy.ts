@@ -1,6 +1,5 @@
 import process from "node:process";
-import { randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, readFileSync, rmSync, watchFile, unwatchFile } from "node:fs";
+import { appendFileSync, chmodSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -107,7 +106,6 @@ export async function runProxy(
         // Arguments can contain API tokens or private prompts. Keep only the
         // executable name in persistent history metadata.
         command: [options.command],
-        cwd: options.cwd,
         debug
       })
     : undefined;
@@ -120,7 +118,6 @@ export async function runProxy(
         rows,
         capabilities,
         scale: options.scale,
-        cwd: options.cwd,
         minReadableScale: options.minReadableScale,
         stabilityMs: options.stabilityMs,
         writeOuter,
@@ -139,12 +136,7 @@ export async function runProxy(
   const focusInput = screen && options.focusKey
     ? new FormulaFocusInput(options.focusKey)
     : undefined;
-  const imageFocusInput = screen
-    ? new FormulaFocusInput(options.imageFocusKey ?? "")
-    : undefined;
-  const focusKeyDecoder = new FocusKeyDecoder(new Set(
-    [options.focusKey, options.imageFocusKey].filter(Boolean)
-  ));
+  const focusKeyDecoder = new FocusKeyDecoder(new Set([options.focusKey].filter(Boolean)));
   const responseFilter = new TerminalResponseFilter((imageId) =>
     imageId === KITTY_QUERY_IMAGE_ID
       || isRuntimeProbeQueryId(imageId)
@@ -155,43 +147,12 @@ export async function runProxy(
   const outputSplitter = new OutputCheckpointSplitter(Math.max(2, Math.floor(rows / 3)));
   outputSplitter.setCharacterInterval(cols * Math.max(2, Math.floor(rows / 3)));
   let plainOutputFastPath = false;
-  let pendingImageOpener = false;
 
   const enqueueScreenOperation = (operation: () => Promise<unknown> | void): void => {
     outputQueue = outputQueue.then(async () => { await operation(); }).catch((error) => {
       debug(`screen operation failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   };
-
-  const selectionPath = screen
-    ? join(tmpdir(), `tformula-image-selection-${randomUUID()}.json`)
-    : undefined;
-  let lastSelectionTimestamp = 0;
-  const readPluginSelection = (): void => {
-    if (!screen || !selectionPath) return;
-    try {
-      const selection = JSON.parse(readFileSync(selectionPath, "utf8")) as {
-        protocol?: string; path?: string; selectedAt?: number;
-      };
-      const selectedAt = selection.selectedAt;
-      if (selection.protocol !== "tformula.image-selection.v1"
-        || typeof selection.path !== "string"
-        || !Number.isSafeInteger(selectedAt)
-        || (selectedAt as number) <= lastSelectionTimestamp) return;
-      lastSelectionTimestamp = selectedAt as number;
-      // Claim keyboard focus before the asynchronous Kitty upload starts. The
-      // plugin selection and the next arrow key can arrive back-to-back; the
-      // arrow must never leak into the wrapped TUI during that upload window.
-      imageFocusInput?.setActive(true);
-      enqueueScreenOperation(async () => {
-        const focused = await screen.focusImagePath(selection.path!);
-        imageFocusInput?.setActive(focused);
-      });
-    } catch {
-      // Atomic plugin writes can briefly make the record unavailable.
-    }
-  };
-  if (selectionPath) watchFile(selectionPath, { interval: 250 }, readPluginSelection);
 
   const startRequestedProbe = (): void => {
     if (probeRequestedEpoch === undefined || exiting
@@ -417,7 +378,6 @@ export async function runProxy(
     env: {
       ...process.env,
       TFORMULA_ACTIVE: "1",
-      ...(selectionPath ? { TFORMULA_IMAGE_SELECTION_PATH: selectionPath } : {})
     } as Record<string, string>
   });
 
@@ -433,8 +393,7 @@ export async function runProxy(
   process.stdin.resume();
   const applyFocusAction = async (
     action: FormulaFocusAction,
-    input: FormulaFocusInput | undefined,
-    image: boolean
+    input: FormulaFocusInput | undefined
   ): Promise<void> => {
     if (!screen || !input) return;
     if (action === "close") {
@@ -442,31 +401,18 @@ export async function runProxy(
       input.setActive(false);
       return;
     }
-    const active = image
-      ? action === "open"
-        ? await screen.focusLatestImage()
-        : action === "next" ? await screen.focusNextImage() : await screen.focusPreviousImage()
-      : action === "open"
+    const active = action === "open"
         ? await screen.focusLatestFormula()
         : action === "next" ? await screen.focusNextFormula() : await screen.focusPreviousFormula();
-    if (image) debug(`image focus ${action}: ${active ? "shown" : "unavailable"}; graphics=${capabilities.kittyGraphics}`);
     input.setActive(active || screen.formulaFocusActive);
   };
   const routeInput = (input: string): void => {
     if (!input) return;
-    const activeInput = imageFocusInput?.active ? imageFocusInput
-      : focusInput?.active ? focusInput : undefined;
+    const activeInput = focusInput?.active ? focusInput : undefined;
     const formulaHandled = (activeInput ?? focusInput)?.handle(input);
-    const imageHandled = activeInput ? undefined
-      : imageFocusInput?.handle(formulaHandled?.residual ?? input);
-    const data = imageHandled?.residual ?? formulaHandled?.residual ?? input;
+    const data = formulaHandled?.residual ?? input;
     for (const action of formulaHandled?.actions ?? []) {
-      enqueueScreenOperation(() => applyFocusAction(action, activeInput ?? focusInput,
-        activeInput === imageFocusInput));
-    }
-    for (const action of imageHandled?.actions ?? []) {
-      if (action === "open") debug(`image focus key received; known images=${screen?.recentImageCount ?? 0}`);
-      enqueueScreenOperation(() => applyFocusAction(action, imageFocusInput, true));
+      enqueueScreenOperation(() => applyFocusAction(action, activeInput ?? focusInput));
     }
     if (!data) return;
     if (!startupProbeQuarantine && !probeActive
@@ -489,7 +435,7 @@ export async function runProxy(
   const routeTerminalInput = (input: string): void => {
     if (focusTailTimer) clearTimeout(focusTailTimer);
     focusTailTimer = undefined;
-    const focused = Boolean(focusInput?.active || imageFocusInput?.active);
+    const focused = Boolean(focusInput?.active);
     routeInput(focusKeyDecoder.push(input, focused));
     if (focusKeyDecoder.hasPending) {
       focusTailTimer = setTimeout(() => {
@@ -502,16 +448,6 @@ export async function runProxy(
     if (responseTailTimer) clearTimeout(responseTailTimer);
     responseTailTimer = undefined;
     const data = Buffer.isBuffer(chunk) ? inputDecoder.write(chunk) : chunk;
-    if (options.debug && imageFocusInput) {
-      if (data.includes(options.imageFocusKey)) debug("image focus legacy key arrived from terminal");
-      // Report only key code/modifiers, never the surrounding input or prompts.
-      for (const match of data.matchAll(/(?:\x1b\[|\u009b)(\d{1,6})(?::\d*){0,2};(\d{1,4})(?::[123])?(?:;[\d:]+)?u/gu)) {
-        const modifiers = Number(match[2]) - 1;
-        if ((modifiers & 4) !== 0) {
-          debug(`terminal CSI-u Ctrl key: codepoint=${match[1]}, modifiers=${match[2]}`);
-        }
-      }
-    }
     const filtered = responseFilter.push(data);
     // Preserve stream order for the runtime barrier: every untagged cell/theme
     // response in this chunk must be recorded before its tagged Kitty ACK can
@@ -601,10 +537,7 @@ export async function runProxy(
     // logs into thousands of Promise callbacks and viewport scans. Once
     // enabled, the fast path may span adjacent queued callbacks because every
     // one is independently trigger-free.
-    const imageTrigger = data.includes("![") || (pendingImageOpener && data.includes("["));
-    pendingImageOpener = data.endsWith("!");
-    const formulaOrLayoutTrigger = containsFormulaTrigger(data)
-      || imageTrigger || data.includes("\x1b");
+    const formulaOrLayoutTrigger = containsFormulaTrigger(data) || data.includes("\x1b");
     const skipCheckpoints = !formulaOrLayoutTrigger
       && (plainOutputFastPath || screen.canSkipOutputCheckpoints);
     plainOutputFastPath = skipCheckpoints;
@@ -774,10 +707,6 @@ export async function runProxy(
           finalExitCode = finalExitCode || 1;
           process.stderr.write(`tformula: terminal output failed: ${error instanceof Error ? error.message : String(error)}\n`);
         } finally {
-          if (selectionPath) {
-            unwatchFile(selectionPath, readPluginSelection);
-            rmSync(selectionPath, { force: true });
-          }
           await imageTransmitter?.dispose();
           process.stdin.pause();
           if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function" && !previousRaw) {

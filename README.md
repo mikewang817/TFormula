@@ -1,14 +1,14 @@
-# TFormula
+# gtformula
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Render scientific LaTeX directly inside **OpenAI Codex** and any other CLI
-agent, while keeping the terminal fully interactive.
+Render scientific LaTeX directly inside **OpenCode** and any other CLI agent,
+while keeping the terminal fully interactive.
 
 The primary TFormula workflow is intentionally this simple:
 
 ```sh
-tformula codex
+gtformula opencode
 ```
 
 Codex continues to behave like the normal Codex CLI, but formulas in its live
@@ -19,8 +19,8 @@ Every successfully rendered formula is also ready to reuse—without selecting
 or retyping it:
 
 ```sh
-tformula copy mathml       # latest formula -> clipboard
-tformula save formula.png  # latest formula -> high-resolution image
+gtformula copy mathml       # latest formula -> clipboard
+gtformula save formula.png  # latest formula -> high-resolution image
 ```
 
 > **Ghostty is the recommended terminal.** TFormula is developed and tested
@@ -38,17 +38,17 @@ the terminal buffer for copying.
 
 ## Quick start: Codex in Ghostty
 
-Install TFormula globally. With npm 11, allow the native setup scripts used by
+Install gtformula globally. With npm 11, allow the native setup scripts used by
 `node-pty` and the reader's `sharp` image pipeline:
 
 ```sh
-npm install -g tformula --allow-scripts=node-pty --allow-scripts=sharp
+npm install -g gtformula --allow-scripts=node-pty --allow-scripts=sharp
 ```
 
-Then start Codex through TFormula:
+Then start OpenCode through gtformula:
 
 ```sh
-tformula codex
+gtformula opencode
 ```
 
 That is the complete integration—there is no Codex plugin or configuration to
@@ -68,47 +68,25 @@ The same PTY wrapper works with other terminal agents:
 
 | Agent | Command |
 |---|---|
-| OpenAI Codex | `tformula codex` |
-| Claude Code | `tformula claude` |
-| Cursor Agent | `tformula agent` |
-| Pi coding agent | `tformula pi` |
-| Gemini CLI | `tformula gemini` |
-| OpenCode | `tformula opencode` |
-| Aider | `tformula aider` |
-| Goose | `tformula goose` |
-| Qwen Code | `tformula qwen` |
-| Any other CLI agent | `tformula -- <agent-command> [args...]` |
+| OpenCode | `gtformula opencode` |
+| OpenAI Codex | `gtformula codex` |
+| Claude Code | `gtformula claude` |
+| Cursor Agent | `gtformula agent` |
+| Pi coding agent | `gtformula pi` |
+| Gemini CLI | `gtformula gemini` |
+| Aider | `gtformula aider` |
+| Goose | `gtformula goose` |
+| Qwen Code | `gtformula qwen` |
+| Any other CLI agent | `gtformula -- <agent-command> [args...]` |
 
 `--shell` starts an enhanced login shell, so commands launched inside that
 shell can be wrapped without creating an alias for each agent:
 
 ```sh
-tformula --shell
+gtformula --shell
 ```
 
-Running `tformula` without arguments is equivalent to `tformula --shell`.
-
-## Local images in Agent output
-
-Ask the Agent to print a local image reference on its **own line**, for example:
-
-```md
-![Fetched page screenshot](./artifacts/screenshot.png)
-```
-
-Relative paths resolve from the Agent's working directory; absolute paths and
-`file://` URIs also work. The Agent must first save the image as a local file
-accessible to this terminal; mentioning `image.png` without creating it is not
-enough. TFormula fits a preview over the reference line and
-the immediately following blank lines (up to 12 rows), without inserting lines
-or replacing the underlying text. If there is insufficient space, the file
-cannot be read, or the terminal lacks Kitty graphics, the reference stays as
-text. Large screenshots squeezed into only a few spare rows are left as links;
-press `Ctrl-\` to view the latest image in a full-screen overlay, then `q`,
-`Esc`, or `Ctrl-\` to return. Fenced examples and remote URLs are ignored. The Agent's TUI must actually
-print the Markdown reference or emit a standalone OSC 8-linked image label (as
-OpenCode's Markdown renderer does). A PTY proxy cannot recover a path if the TUI
-discards both the reference and its hyperlink target.
+Running `gtformula` without arguments is equivalent to `gtformula --shell`.
 
 ## Markdown reader
 
@@ -116,16 +94,16 @@ Pass a Markdown, text, or image path instead of a command to open TFormula's
 full-screen document reader:
 
 ```sh
-tformula README.md
-tformula notes.txt
-tformula assets/tformula-maxwell.png
+gtformula README.md
+gtformula notes.txt
+gtformula assets/tformula-maxwell.png
 ```
 
 Known document extensions are detected automatically. Use `--read` to open
 another UTF-8 text file without making it ambiguous with a command:
 
 ```sh
-tformula --read package.json
+gtformula --read package.json
 ```
 
 The reader parses Markdown into a document tree and lays it out again for the
@@ -218,32 +196,32 @@ resize, graphics retries, and repeated Agent output do not create duplicate
 entries. List recent formulas with:
 
 ```sh
-tformula history
-tformula history --limit 50
-tformula history --json
+gtformula history
+gtformula history --limit 50
+gtformula history --json
 ```
 
 The list includes a short ID that can be used as an export selector. The
 shortest workflow always acts on the latest formula:
 
 ```sh
-tformula copy                 # raw LaTeX -> clipboard
-tformula copy mathml          # MathML -> clipboard
-tformula save formula.png     # high-resolution PNG
-tformula save formula.svg     # self-contained SVG
+gtformula copy                 # raw LaTeX -> clipboard
+gtformula copy mathml          # MathML -> clipboard
+gtformula save formula.png     # high-resolution PNG
+gtformula save formula.svg     # self-contained SVG
 ```
 
 Use a full ID or unique prefix when the target is not the latest formula:
 
 ```sh
-tformula copy 12ab34cd markdown
-tformula save 12ab34cd formula.mathml
-tformula save 12ab34cd formula.png --scale 6 --color navy --background white
+gtformula copy 12ab34cd markdown
+gtformula save 12ab34cd formula.mathml
+gtformula save 12ab34cd formula.png --scale 6 --color navy --background white
 ```
 
 The output extension selects the format for `save`; `--as <format>` can
 override it. The compatible `export` command remains available for scripts and
-stdout pipelines, for example `tformula export --last --format html`.
+stdout pipelines, for example `gtformula export --last --format html`.
 
 | Format | `copy` / `--as` name | Output |
 |---|---|---|
@@ -262,7 +240,7 @@ is generated locally. On Linux, clipboard export uses `wl-copy` or `xclip`.
 
 History contains plaintext LaTeX, so its directory is restricted to mode
 `0700` and session files to `0600`. Use `--no-history` to disable recording,
-`tformula history --clear` to delete existing history, or
+`gtformula history --clear` to delete existing history, or
 `TFORMULA_HISTORY_DIR` to override its location.
 
 ## Requirements
@@ -280,7 +258,7 @@ The current implementation has been developed against Ghostty 1.3.1.
 npm install
 npm run check
 npm link
-tformula codex
+gtformula codex
 ```
 
 ## Formula sizing
@@ -361,15 +339,15 @@ If a terminal does not answer pixel-size queries, TFormula falls back to 9x18
 pixels. You can override that explicitly:
 
 ```sh
-tformula --cell-size 10x20 claude
+gtformula --cell-size 10x20 claude
 ```
 
 The default text-relative scale is 1.0. It can be adjusted without changing the
 terminal font:
 
 ```sh
-tformula --scale 1.1 codex
-TFORMULA_SCALE=0.9 tformula --shell
+gtformula --scale 1.1 codex
+TFORMULA_SCALE=0.9 gtformula --shell
 ```
 
 TFormula also measures how much a formula had to be reduced to fit its safe
@@ -378,8 +356,8 @@ is kept instead of placing an illegibly small image. This policy can be tuned
 or disabled with zero:
 
 ```sh
-tformula --min-readable-scale 0.6 codex
-TFORMULA_MIN_READABLE_SCALE=0 tformula claude
+gtformula --min-readable-scale 0.6 codex
+TFORMULA_MIN_READABLE_SCALE=0 gtformula claude
 ```
 
 Background scans also require a newly detected formula region to remain
@@ -389,8 +367,8 @@ quiet period for complete formulas so long responses cannot scroll them away.
 The delay can be adjusted or disabled:
 
 ```sh
-tformula --stability-ms 150 codex
-TFORMULA_STABILITY_MS=0 tformula claude
+gtformula --stability-ms 150 codex
+TFORMULA_STABILITY_MS=0 gtformula claude
 ```
 
 Press `Ctrl-]` to open the most recently observed formula in a full-terminal,
@@ -400,15 +378,9 @@ These keys are consumed by TFormula and never reach the Agent. The shortcut can
 be changed or disabled:
 
 ```sh
-tformula --focus-key ctrl-f codex
-TFORMULA_FOCUS_KEY=none tformula claude
+gtformula --focus-key ctrl-f codex
+TFORMULA_FOCUS_KEY=none gtformula claude
 ```
-
-Images have their own `Ctrl-\` focus shortcut. Press it to enter image focus;
-press it again to close the overlay. While focused, `n`/`j` or Down selects
-the next recent image, and `p`/`k` or Up selects the previous one. These keys
-are consumed by TFormula. Customize the entry shortcut with
-`--image-focus-key <key>` or `TFORMULA_IMAGE_FOCUS_KEY`.
 
 ## Agent prompt template
 
@@ -447,10 +419,10 @@ Optional process-local customization is available for specialist notation and
 Unicode fallback fonts:
 
 ```sh
-TFORMULA_MATH_MACROS='{"RR":"\\mathbb{R}","vect":["\\mathbf{#1}",1]}' tformula codex
-TFORMULA_MATH_ENVIRONMENTS='{"braced":["\\left\\{","\\right\\}"]}' tformula claude
-TFORMULA_FONT_FILES='/path/math.ttf:/path/text.otf' tformula pi
-TFORMULA_SYSTEM_FONTS=false tformula codex
+TFORMULA_MATH_MACROS='{"RR":"\\mathbb{R}","vect":["\\mathbf{#1}",1]}' gtformula codex
+TFORMULA_MATH_ENVIRONMENTS='{"braced":["\\left\\{","\\right\\}"]}' gtformula claude
+TFORMULA_FONT_FILES='/path/math.ttf:/path/text.otf' gtformula pi
+TFORMULA_SYSTEM_FONTS=false gtformula codex
 ```
 
 Macro and environment values are MathJax `configmacros` definitions. Leading
@@ -489,16 +461,16 @@ uses `$XDG_CACHE_HOME/tformula` or `~/.cache/tformula`. Override the location or
 the default 256 MB limit with:
 
 ```sh
-TFORMULA_CACHE_DIR=/path/to/cache tformula codex
-TFORMULA_CACHE_MAX_MB=512 tformula claude
-TFORMULA_READER_MAX_IMAGES=128 tformula README.md
+TFORMULA_CACHE_DIR=/path/to/cache gtformula codex
+TFORMULA_CACHE_MAX_MB=512 gtformula claude
+TFORMULA_READER_MAX_IMAGES=128 gtformula README.md
 ```
 
 Inspect or clear the formula cache without starting a PTY session:
 
 ```sh
-tformula cache status
-tformula cache clear
+gtformula cache status
+gtformula cache clear
 ```
 
 ## Detection
@@ -558,7 +530,6 @@ ordinary prices such as `$12.50` from being rendered.
 --min-readable-scale <n> Keep raw TeX below this fitted ratio (0 to 1)
 --stability-ms <number> Background formula quiet period (0 to 2000 ms)
 --focus-key <key>       Formula focus shortcut (ctrl-X, one character, or none)
---image-focus-key <key> Image focus shortcut (default ctrl-\)
 --cell-size <WxH>       Override terminal cell pixels
 -C, --cwd <directory>  Child working directory
 --debug                 Print detection and sizing diagnostics
@@ -568,7 +539,7 @@ Use `--` when an agent command or its arguments could be mistaken for TFormula
 options:
 
 ```sh
-tformula -- claude --resume
+gtformula -- claude --resume
 ```
 
 ## Safety and fallback behavior
