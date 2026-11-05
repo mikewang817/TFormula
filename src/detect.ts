@@ -900,7 +900,7 @@ function slashDelimitedRegions(
 
   for (let row = 0; row < lines.length; row += 1) {
     const context = contexts[row]!;
-    if (context.inCodeFence) {
+    if (context.inCodeFence || (!display && !(lines[row] ?? "").trim())) {
       pending = undefined;
       continue;
     }
@@ -1067,6 +1067,7 @@ function dollarDelimitedRegions(
     const end = positions[index + 1]!;
     if (end.row - start.row > MAX_DISPLAY_BLOCK_ROWS
       || delimiterBodyCrossesCode(contexts, start, end, delimiter.length)) continue;
+    if (!display && lines.slice(start.row + 1, end.row).some((line) => !line.trim())) continue;
     const latex = bodyBetweenDelimiters(lines, start, end, delimiter.length);
     const numericOnly = !display && /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/u.test(latex.trim());
     if (!latex || (!display && !numericOnly && !isLikelyInlineDollarMath(latex))) continue;
