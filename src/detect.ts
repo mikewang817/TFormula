@@ -234,7 +234,7 @@ interface DefinitionItem {
 
 export function escapeTexText(value: string): string {
   const replacements: Record<string, string> = {
-    "\\": "\\backslash{}",
+    "\\": "\\textbackslash{}",
     "{": "\\{",
     "}": "\\}",
     "$": "\\$",
@@ -242,8 +242,8 @@ export function escapeTexText(value: string): string {
     "#": "\\#",
     "%": "\\%",
     "_": "\\_",
-    "^": "\\^{}",
-    "~": "\\~{}"
+    "^": "\\textasciicircum{}",
+    "~": "\\textasciitilde{}"
   };
   return value.replace(/[\\{}$&#%_^~]/gu, (character) => replacements[character]!);
 }
