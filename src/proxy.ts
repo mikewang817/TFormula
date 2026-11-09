@@ -634,6 +634,11 @@ export async function runProxy(
     if (epoch !== undefined && deferUntilProbe) requestProbe(epoch);
   };
   process.on("SIGWINCH", onResize);
+  // Forward termination to the child so the normal exit path below removes
+  // images, flushes history, and restores the TTY.
+  const onTerminate = (signal: NodeJS.Signals): void => child.kill(signal);
+  process.on("SIGTERM", onTerminate);
+  process.on("SIGHUP", onTerminate);
 
   if (pendingInput) child.write(pendingInput);
   debug(`started ${options.command}; math=${Boolean(screen && capabilities.kittyGraphics)}; image=${imageTransmitter?.mode ?? "disabled"}; history=${formulaHistory ? "enabled" : "disabled"}; cell=${capabilities.cell.width.toFixed(2)}x${capabilities.cell.height.toFixed(2)}px`);
@@ -646,6 +651,8 @@ export async function runProxy(
       // exit between two resize epochs can leave the queue blocked on a
       // layout waiter whose probe is deliberately cancelled below.
       process.off("SIGWINCH", onResize);
+      process.off("SIGTERM", onTerminate);
+      process.off("SIGHUP", onTerminate);
       probeGeneration += 1;
       probeQueued = false;
       probeActive = false;
