@@ -453,6 +453,8 @@ both count and a 64 MB byte budget; the persistent cache retains its separate
 256 MB default budget. In a live terminal session, one PNG is uploaded once
 and reused by independent Kitty placements wherever the same
 variant appears. The original TeX text remains in terminal scrollback.
+Cached SVGs embed the formula source, so like history the cache directory is
+restricted to mode `0700` and its files to `0600`.
 
 On macOS the disk cache defaults to `~/Library/Caches/TFormula`; on Linux it
 uses `$XDG_CACHE_HOME/tformula` or `~/.cache/tformula`. Override the location or
