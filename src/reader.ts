@@ -416,11 +416,11 @@ class TerminalReader {
   }
 
   get columns(): number {
-    return Math.max(2, process.stdout.columns ?? 80);
+    return Math.max(2, process.stdout.columns || 80);
   }
 
   get rows(): number {
-    return Math.max(3, process.stdout.rows ?? 24);
+    return Math.max(3, process.stdout.rows || 24);
   }
 
   get viewportRows(): number {
