@@ -35,8 +35,9 @@
     "benchmark": "npm run build && node benchmark/performance.mjs",
     "benchmark:reader": "npm run build && node benchmark/reader-interaction.mjs",
     "dev": "tsx src/cli.ts",
+    "pretest": "npm run build",
     "test": "vitest run",
-    "check": "npm run build && npm test",
+    "check": "npm test",
     "prepack": "npm run build",
     "prepublishOnly": "npm run check"
   },
