@@ -200,8 +200,13 @@ export class FormulaHistoryStore {
   }
 
   async list(limit = DEFAULT_HISTORY_LIMIT): Promise<FormulaHistoryEntry[]> {
-    await this.flush();
     const boundedLimit = Math.max(1, Math.min(MAX_HISTORY_LIMIT, Math.floor(limit)));
+    return (await this.#entries()).slice(0, boundedLimit);
+  }
+
+  /** Every recorded entry, newest first. */
+  async #entries(): Promise<FormulaHistoryEntry[]> {
+    await this.flush();
     const files = await historyFiles(this.#root);
     const batches = await Promise.all(files.map(async (path) => {
       try {
@@ -214,13 +219,15 @@ export class FormulaHistoryStore {
     const entries = batches.flat().sort((left, right) => {
       const byTime = Date.parse(right.recordedAt) - Date.parse(left.recordedAt);
       return byTime || right.id.localeCompare(left.id);
-    }).slice(0, boundedLimit);
+    });
     this.#debug(`formula history loaded ${entries.length} record(s) from ${files.length} session file(s)`);
     return entries;
   }
 
   async resolve(selector: string): Promise<FormulaHistoryEntry> {
-    const entries = await this.list(MAX_HISTORY_LIMIT);
+    // Ids shown by an earlier `history` call must stay resolvable after newer
+    // sessions push them past the listing limit.
+    const entries = await this.#entries();
     if (selector === "last") {
       const entry = entries[0];
       if (entry) return entry;
