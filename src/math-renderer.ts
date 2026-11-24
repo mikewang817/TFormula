@@ -51,7 +51,7 @@ export class MathRenderError extends Error {
 }
 
 let mathJaxPromise: Promise<MathJaxApi> | undefined;
-const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-scientific-svg-v6";
+const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-scientific-svg-v7";
 const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v7";
 const CANONICAL_CONTAINER_WIDTH = 100_000;
 const MATHJAX_EX_PX = 8;
@@ -81,6 +81,7 @@ export const SCIENTIFIC_TEX_PACKAGES = [
   "extpfeil",
   "boldsymbol",
   "enclose",
+  "textcomp",
   "configmacros"
 ] as const;
 
