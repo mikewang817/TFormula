@@ -458,7 +458,7 @@ describe("MathRenderer", () => {
     expect(png.readUInt32BE(20)).toBe(108);
   });
 
-  it("renders one-row reader math as a tight natural-size PNG", async () => {
+  it("rasterizes inline math on a transparent high-resolution canvas matching the reserved cells", async () => {
     const rendered = await renderTestRegion(new MathRenderer(),
       {
         startRow: 0,
@@ -482,12 +482,13 @@ describe("MathRenderer", () => {
     );
     const png = Buffer.from(rendered.png);
 
-    expect(rendered.pixelPlacement).toEqual(expect.objectContaining({
-      offsetX: expect.any(Number),
-      offsetY: expect.any(Number)
-    }));
-    expect(rendered.widthPx).toBeLessThan(27);
-    expect(rendered.heightPx).toBeLessThanOrEqual(18);
+    expect(rendered.widthPx).toBe(54);
+    expect(rendered.heightPx).toBe(36);
+    const { data, info } = await (await import("sharp")).default(png).ensureAlpha().raw()
+      .toBuffer({ resolveWithObject: true });
+    const alpha = data.filter((_, index) => index % info.channels === 3);
+    expect(alpha[0]).toBe(0);
+    expect(alpha.some(value => value > 200)).toBe(true);
     expect(png.readUInt32BE(16)).toBe(rendered.widthPx);
     expect(png.readUInt32BE(20)).toBe(rendered.heightPx);
   });

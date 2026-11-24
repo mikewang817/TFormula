@@ -10,7 +10,6 @@ import {
   kittyDeleteImage,
   kittyDeletePlacementsByZIndex,
   kittyPlaceImage,
-  kittyPlaceImagePixels,
   synchronizedOutput,
   type KittySourceRectangle,
   TFORMULA_IMAGE_ID_MAX,
@@ -57,7 +56,6 @@ interface PreparedAsset {
   png: Uint8Array;
   width: number;
   height: number;
-  pixelPlacement?: { offsetX: number; offsetY: number };
 }
 
 interface UploadedAsset {
@@ -65,7 +63,6 @@ interface UploadedAsset {
   key: string;
   width: number;
   height: number;
-  pixelPlacement?: { offsetX: number; offsetY: number };
 }
 
 export interface VisibleReaderPlacement {
@@ -559,20 +556,13 @@ class TerminalReader {
       const placementId = this.#allocatePlacementId();
       graphics.push(
         cursorPosition(visible.screenRow + 1, placement.col + 1),
-        uploaded.pixelPlacement
-          ? kittyPlaceImagePixels(
-              uploaded.imageId,
-              placementId,
-              uploaded.pixelPlacement.offsetX,
-              uploaded.pixelPlacement.offsetY
-            )
-          : kittyPlaceImage(
-              uploaded.imageId,
-              placementId,
-              placement.columns,
-              visible.rows,
-              sourceRectangleForVisiblePlacement(visible, uploaded.width, uploaded.height)
-            )
+        kittyPlaceImage(
+          uploaded.imageId,
+          placementId,
+          placement.columns,
+          visible.rows,
+          sourceRectangleForVisiblePlacement(visible, uploaded.width, uploaded.height)
+        )
       );
     }
   }
@@ -653,8 +643,7 @@ class TerminalReader {
       key: `math\0${rendered.cacheKey}`,
       png: rendered.png,
       width: rendered.widthPx,
-      height: rendered.heightPx,
-      ...(rendered.pixelPlacement ? { pixelPlacement: rendered.pixelPlacement } : {})
+      height: rendered.heightPx
     };
     this.#placementAssetKeys.set(placement, prepared.key);
     return { key: prepared.key, prepared };
@@ -918,10 +907,7 @@ class TerminalReader {
         key: asset.key,
         imageId: this.#allocateImageId(),
         width: asset.prepared.width,
-        height: asset.prepared.height,
-        ...(asset.prepared.pixelPlacement
-          ? { pixelPlacement: asset.prepared.pixelPlacement }
-          : {})
+        height: asset.prepared.height
       };
       await this.#writer.write(
         this.#transmitter.transmitPayload(asset.prepared.png, uploaded.imageId)
