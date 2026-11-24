@@ -96,6 +96,12 @@ describe("terminal probing", () => {
     })).toBe(false);
   });
 
+  it("probes Rex with its default TERM outside multiplexers", () => {
+    const rex = { TERM: "xterm-256color", TERM_PROGRAM: "rex" };
+    expect(probeInternals.supportsKittyGraphics(rex)).toBe(true);
+    expect(probeInternals.supportsKittyGraphics({ ...rex, TMUX: "/tmp/tmux" })).toBe(false);
+  });
+
   it("fails closed unless the Kitty query explicitly succeeds", () => {
     expect(probeInternals.confirmedKittyGraphics(true, true)).toBe(true);
     expect(probeInternals.confirmedKittyGraphics(true, false)).toBe(false);
