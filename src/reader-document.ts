@@ -56,9 +56,77 @@ export function parseMarkdown(source: string): Root {
     extensions: [gfm(), math()],
     mdastExtensions: [gfmFromMarkdown(), mathFromMarkdown()]
   });
-  root.children = promoteDisplayMath(root.children, normalized);
+  const blocks = restoreFlattenedTables(root.children, normalized);
+  root.children = promoteDisplayMath(blocks, normalized);
   normalizeMathHtmlEntities(root);
   return root;
+}
+
+function literalParagraph(node: RootContent | undefined, source: string): string {
+  if (node?.type !== "paragraph" || node.children.length !== 1) {
+    return "";
+  }
+  const text = node.children[0]!;
+  if (text.type !== "text" || !text.position || text.value.includes("\n")) {
+    return "";
+  }
+  const raw = source.slice(text.position.start.offset, text.position.end.offset);
+  return raw === text.value ? raw : "";
+}
+
+function flattenedTable(header: string, body: string): RootContent[] | undefined {
+  const parts = header.trimEnd().split(/\|[ \t]+\|/u);
+  if (parts.length !== 4 || parts[3] !== "") {
+    return;
+  }
+  const caption = parts[0]!.trimEnd();
+  if (!/^\[\d{4}\][ \t]+表[ \t]*\d/u.test(caption)) {
+    return;
+  }
+  const cells = (row: string): string[] => row.split("|").map(cell => cell.trim());
+  const headings = cells(parts[1]!);
+  const rules = cells(parts[2]!);
+  // Some exports count the empty outside cell in the separator row.
+  if (headings.length < 2 || headings.some(cell => !cell)
+    || !rules.every(rule => /^-{3,}$/u.test(rule))
+    || (rules.length !== headings.length && rules.length !== headings.length + 1)) {
+    return;
+  }
+
+  const match = body.match(/^(\[\d{4}\])[ \t]+\|(.+)\|[ \t]*$/u);
+  if (!match) {
+    return;
+  }
+  const rows = match[2]!.split(/\|[ \t]+\|[ \t]+\|/u).map(cells);
+  if (rows.some(row => row.length !== headings.length || row.some(cell => !cell))) {
+    return;
+  }
+  return [
+    { type: "paragraph", children: [{ type: "text", value: caption }] },
+    { type: "paragraph", children: [{ type: "text", value: match[1]! }] },
+    { type: "table", children: [headings, ...rows].map(row => ({
+      type: "tableRow",
+      children: row.map(value => ({ type: "tableCell", children: [{ type: "text", value }] }))
+    })) }
+  ];
+}
+
+function restoreFlattenedTables(children: RootContent[], source: string): RootContent[] {
+  const result: RootContent[] = [];
+  for (let index = 0; index < children.length; index += 1) {
+    const node = children[index]!;
+    const header = literalParagraph(node, source);
+    const table = header.includes("---") && header.startsWith("[")
+      ? flattenedTable(header, literalParagraph(children[index + 1], source))
+      : undefined;
+    if (table) {
+      result.push(...table);
+      index += 1;
+    } else {
+      result.push(node);
+    }
+  }
+  return result;
 }
 
 function fencedCodeLines(lines: string[]): boolean[] {

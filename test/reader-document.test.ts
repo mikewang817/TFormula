@@ -50,6 +50,37 @@ describe("reader document parsing", () => {
     expect(mathResourceKey("x", false)).not.toBe(mathResourceKey("x", true));
   });
 
+  const tableCaption = "[0101] 表1气孔各子带参数";
+  const packedHeader = tableCaption + " | | 类型 | 能量 | 占比 | | --- | --- | --- | --- | |";
+  const packedBody = "[0102] | LL | 1076603520 | 0.999997 | | | HH | -0.0001 | 0.000001 |";
+
+  it("restores a numbered table split across two packed paragraphs", () => {
+    const root = parseMarkdown([packedHeader, packedBody, "[0103] 下一段"].join("\n\n"));
+    const [caption, label, table, next] = root.children;
+    expect(caption).toMatchObject({ type: "paragraph", children: [{ value: tableCaption }] });
+    expect(label).toMatchObject({ type: "paragraph", children: [{ value: "[0102]" }] });
+    expect(next).toMatchObject({ type: "paragraph", children: [{ value: "[0103] 下一段" }] });
+    expect(table?.type).toBe("table");
+    if (table?.type === "table") {
+      expect(table.children.map(row => row.children.map(cell => cell.children))).toEqual([
+        ["类型", "能量", "占比"],
+        ["LL", "1076603520", "0.999997"],
+        ["HH", "-0.0001", "0.000001"]
+      ].map(row => row.map(value => [{ type: "text", value }])));
+    }
+  });
+
+  it("preserves incomplete rows and literal pipe examples", () => {
+    const shortBody = "[0102] | LL | 252.92 |";
+    const source = [packedHeader, shortBody, "```\n" + packedHeader + "\n\n" + packedBody + "\n```"].join("\n\n");
+    const root = parseMarkdown(source);
+    expect(root.children).toMatchObject([
+      { type: "paragraph", children: [{ value: packedHeader }] },
+      { type: "paragraph", children: [{ value: shortBody }] },
+      { type: "code" }
+    ]);
+  });
+
   it("repairs OCR page headers attached to display closers and decodes TeX entities", () => {
     const root = parseMarkdown([
       "$$",

@@ -52,6 +52,7 @@ export class MathRenderError extends Error {
 
 let mathJaxPromise: Promise<MathJaxApi> | undefined;
 const MATHJAX_CACHE_VERSION = "mathjax-4.1.3-scientific-svg-v7";
+const READER_INLINE_RASTER_SCALE = 2;
 const PNG_CACHE_VERSION = "resvg-2.6.2-terminal-canvas-v7";
 const CANONICAL_CONTAINER_WIDTH = 100_000;
 const MATHJAX_EX_PX = 8;
@@ -621,7 +622,7 @@ interface PlacementGeometry {
   wrapSegments: FormulaPlacementPlan["formulaSlices"] | undefined;
   logicalColumns: number;
   horizontallySliced: boolean;
-  tightInline: boolean;
+  readerInline: boolean;
 }
 
 function placementGeometry(plan: FormulaPlacementPlan): PlacementGeometry {
@@ -646,7 +647,7 @@ function placementGeometry(plan: FormulaPlacementPlan): PlacementGeometry {
     wrapSegments,
     logicalColumns,
     horizontallySliced: Boolean(wrapSegments),
-    tightInline: !display
+    readerInline: !display
       && rows === 1
       && plan.mode === "compact"
       && plan.sourceMasks.length === 0
@@ -705,7 +706,7 @@ export class MathRenderer {
       wrapSegments,
       logicalColumns,
       horizontallySliced,
-      tightInline
+      readerInline
     } = placementGeometry(plan);
     const mathJaxContainerWidth = mathJaxContainerWidthForPlacement(
       plan,
@@ -728,7 +729,8 @@ export class MathRenderer {
       sourceMasks: plan.sourceMasks,
       formulaSlices: plan.formulaSlices,
       mode: plan.mode,
-      tightInline,
+      // Keep existing cache keys for proxy overlays and display equations.
+      ...(readerInline ? { readerInlineScale: READER_INLINE_RASTER_SCALE } : { tightInline: false }),
       columns,
       rows,
       cell: { width: capabilities.cell.width, height: capabilities.cell.height },
@@ -765,17 +767,22 @@ export class MathRenderer {
       + (plan.displayRange?.startCol ?? 0) * capabilities.cell.width;
     const nested = resizeNestedSvg(
       formulaSvg,
-      tightInline ? 0 : nestedX,
-      tightInline ? 0 : geometry.offsetY,
+      nestedX,
+      geometry.offsetY,
       geometry.formulaWidth,
       geometry.formulaHeight
     );
     const content = `<g color="${escapeAttribute(foreground)}" fill="${escapeAttribute(foreground)}">${nested}</g>`;
+    // Cell-sized placement also works when the terminal reports logical pixels
+    // but draws images on a high-density backing surface.
+    const rasterScale = readerInline ? READER_INLINE_RASTER_SCALE : 1;
     const canvasWidth = Math.max(1, Math.round(columns * capabilities.cell.width));
     const canvasHeight = Math.max(1, Math.round(rows * capabilities.cell.height));
-    const wrapper = tightInline
+    const widthPx = canvasWidth * rasterScale;
+    const heightPx = canvasHeight * rasterScale;
+    const wrapper = readerInline
       ? [
-          `<svg xmlns="http://www.w3.org/2000/svg" width="${geometry.formulaWidth}" height="${geometry.formulaHeight}" viewBox="0 0 ${geometry.formulaWidth} ${geometry.formulaHeight}">`,
+          `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="${heightPx}" viewBox="0 0 ${canvasWidth} ${canvasHeight}">`,
           content,
           "</svg>"
         ].join("")
@@ -815,14 +822,8 @@ export class MathRenderer {
       cacheKey,
       columns,
       rows,
-      widthPx: tightInline ? geometry.formulaWidth : canvasWidth,
-      heightPx: tightInline ? geometry.formulaHeight : canvasHeight,
-      ...(tightInline ? {
-        pixelPlacement: {
-          offsetX: geometry.offsetX,
-          offsetY: geometry.offsetY
-        }
-      } : {}),
+      widthPx,
+      heightPx,
       fitScale: geometry.fitScale,
       naturalAspectRatio: dimensions.aspectRatio,
       naturalHeightEx: dimensions.heightEx

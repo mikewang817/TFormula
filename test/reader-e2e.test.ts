@@ -70,6 +70,44 @@ describe("reader pseudo-terminal integration", () => {
     }
   }, 8_000);
 
+  it("places inline subscripts in the same cell grid as the surrounding text", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tformula-reader-inline-"));
+    const document = join(directory, "inline.md");
+    await writeFile(document, "参数矩阵 $\\theta_{logic}$，采样率 $f_s=500Hz$。");
+    const terminal = pty.spawn(process.execPath, ["dist/cli.js", document], {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      cwd: process.cwd(),
+      env: ptyEnvironment({ TERM: "xterm-256color", TERM_PROGRAM: "rex" })
+    });
+    let transcript = "";
+    let answered = false;
+    const timeout = setTimeout(() => terminal.kill(), 7_000);
+    try {
+      const exited = new Promise<number>((resolve) => {
+        terminal.onExit(({ exitCode }) => resolve(exitCode));
+      });
+      terminal.onData((data) => {
+        transcript += data;
+        if (!answered && transcript.includes("a=q,")) {
+          answered = true;
+          terminal.write(`${ESC}[6;18;9t${ESC}_Gi=2000000000;OK${ST}`);
+        }
+        const placements = transcript.match(/\x1b_Ga=p,[^\x1b]*?,c=\d+,r=1,C=1/gu) ?? [];
+        if (placements.length >= 2) terminal.write("q");
+      });
+      await expect(exited).resolves.toBe(0);
+      expect(transcript).toMatch(/,c=\d+,r=1,C=1/u);
+      expect(transcript).toContain("参数矩阵");
+      expect(transcript).not.toContain("asset failed:");
+    } finally {
+      clearTimeout(timeout);
+      terminal.kill();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 8_000);
+
   it("accepts a late Kitty handshake and zooms a scrolling image", async () => {
     const tsx = join(process.cwd(), "node_modules", ".bin", "tsx");
     const directory = await mkdtemp(join(tmpdir(), "tformula-reader-e2e-"));

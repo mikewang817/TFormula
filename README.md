@@ -115,6 +115,14 @@ GIF, AVIF, TIFF, HEIF, and SVG files are converted to a terminal-ready PNG and
 keep their aspect ratio. An image is still drawn when a PDF/OCR converter has
 placed a caption or page header in the same paragraph.
 
+Some Chinese patent exports flatten a pipe table into two numbered paragraphs.
+The first starts with a caption such as `[0101] 表1` and includes the column
+headings and separator. The next contains all the data rows, with `| | |`
+between rows. When every row matches the headings, the reader displays a table
+and keeps the original number formatting, including trailing zeros. If a row
+has missing cells, the reader shows the original paragraphs. Press `r` to
+inspect the Markdown source.
+
 The open document and its referenced local images are watched for changes.
 Saving from an editor refreshes the rendered view automatically without
 restarting TFormula. Directory-based watching supports atomic-save editors;
@@ -136,18 +144,12 @@ MathJax. A paragraph containing only one single-dollar equation is displayed as
 block math when it is clearly standalone, optionally with an academic equation
 number such as `(4)` or a four-digit patent paragraph label.
 
-Inline formulas use a reader-specific tight-image path. After lazy MathJax
-measurement, TFormula creates a transparent PNG at the fitted glyph dimensions
-and places it at natural pixel size with Kitty `X`/`Y` sub-cell offsets. Width
-selection compares the neighboring floor and ceil terminal-column counts; the
-floor is used only when it requires no more than 8% additional proportional
-shrink. Adjacent Markdown space cells are replaced by the formula's pixel side
-bearing, CJK prose uses the remaining line width, and closing punctuation is
-kept off the start of the next line. Agent proxy overlays keep their original
-source masks and PTY coordinates; this tighter placement applies only to the
-document reader. Adjacent terminal prose still starts on integer cell
-boundaries, so this is not browser-style subpixel text layout, but tight PNGs,
-pixel offsets, and bounded fitting minimize the remaining quantization gap.
+The reader fits inline formulas into one row beside the surrounding text.
+It measures each formula with MathJax, aligns its baseline, and renders a
+transparent image at twice the measured cell resolution for sharper subscripts.
+Kitty places it in the reserved columns and row, so the formula scales with
+terminal text on high-density displays. When choosing a column count, the
+reader rounds down only if this needs at most 8% extra shrinkage.
 
 Useful reader keys:
 
@@ -435,8 +437,7 @@ Math rendering is content-addressed and shared by every TFormula-wrapped Agent
 run for the current user. A normalized formula is typeset to SVG once. Each
 terminal-ready PNG variant is then rasterized once for its exact display mode,
 cell dimensions, scale, foreground, background, and source rectangle. Reader
-inline variants cache their transparent fitted glyph PNG separately from Kitty
-placement, allowing one natural-size upload to be reused with sub-cell offsets.
+inline variants cache a transparent PNG aligned to the reserved cells.
 Returning to an earlier terminal font size reuses the existing PNG instead of
 invoking MathJax or the rasterizer again.
 
