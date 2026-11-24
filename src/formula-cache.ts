@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
+  chmod,
   mkdir,
   open,
   readdir,
@@ -292,6 +293,7 @@ export class FormulaCache {
   #diskDisabled = false;
   #cleanupRunning = false;
   #hasCleaned = false;
+  #rootSecured = false;
   #writesSinceCleanup = 0;
 
   constructor(options: FormulaCacheOptions = {}) {
@@ -462,7 +464,13 @@ export class FormulaCache {
   ): Promise<Buffer> {
     const path = this.#path(kind, key);
     const lockPath = `${path}.lock`;
-    await mkdir(dirname(path), { recursive: true });
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    // Cached SVGs embed the LaTeX source. Like formula history, keep them
+    // private even if an older version created the root under a 022 umask.
+    if (!this.#rootSecured) {
+      await chmod(this.root, 0o700);
+      this.#rootSecured = true;
+    }
 
     // If an owner is paused past the bounded lease, a successor may fence it
     // out. Retain an already-rendered value across reacquisition, but publish
@@ -511,7 +519,7 @@ export class FormulaCache {
 
         const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
         try {
-          await writeFile(temporary, data, { flag: "wx" });
+          await writeFile(temporary, data, { flag: "wx", mode: 0o600 });
           if (!await lockStillOwned(lockPath, snapshot)) continue;
           await rename(temporary, path);
         } finally {

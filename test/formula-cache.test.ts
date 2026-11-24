@@ -77,6 +77,17 @@ describe("FormulaCache", () => {
     expect(await second.getSvg(key)).toBe('<svg width="1ex" height="1ex"/>');
   });
 
+  it("keeps cached formula sources private", async () => {
+    const cache = new FormulaCache({ root: await cacheRoot() });
+    await mkdir(cache.root, { recursive: true, mode: 0o755 });
+    const key = formulaCacheKey({ latex: "\\text{secret}" });
+    await cache.getOrCreateSvg(key, async () => '<svg width="1ex" height="1ex"/>');
+
+    expect((await stat(cache.root)).mode & 0o777).toBe(0o700);
+    const file = join(cache.root, "svg", key.slice(0, 2), `${key}.svg`);
+    expect((await stat(file)).mode & 0o777).toBe(0o600);
+  });
+
   it("runs one producer when independent instances request the same item concurrently", async () => {
     const root = await cacheRoot();
     const key = formulaCacheKey({ variant: "shared-png" });
