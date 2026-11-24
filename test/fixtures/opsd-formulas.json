@@ -1,0 +1,21 @@
+[
+  "\\mathcal{L}_{\\mathrm{OPSD}}(\\theta)\n=\n\\mathbb{E}_{(x,y^\\star)\\sim\\mathcal S}\n\\mathbb{E}_{\\hat y\\sim p_S(\\cdot|x)}\n\\left[\n\\sum_{n=1}^{|\\hat y|}\nD\\left(\np_T(\\cdot|x,y^\\star,\\hat y_{<n})\n\\;\\middle\\|\\;\np_S(\\cdot|x,\\hat y_{<n})\n\\right)\n\\right].",
+  "(x,y^\\star)\\sim\\mathcal S",
+  "\\hat y\\sim p_S(\\cdot|x)",
+  "p_S(\\cdot|x,\\hat y_{<n})",
+  "p_T(\\cdot|x,y^\\star,\\hat y_{<n})",
+  "D(p_T\\|p_S)",
+  "p_S(\\cdot|x)=p_\\theta(\\cdot|x)",
+  "p_T(\\cdot|x,y^\\star)\n=\np_\\theta(\\cdot|x,y^\\star)",
+  "D\\left(\np_T(\\cdot|x,y^\\star,y^\\star_{<n})\n\\;\\middle\\|\\;\np_S(\\cdot|x,y^\\star_{<n})\n\\right).",
+  "\\hat y\\sim p_S(\\cdot|x)",
+  "D_{\\mathrm{KL}}(p_T\\|p_S)\n=\n\\sum_{v\\in V}\np_T(v)\\log\n\\frac{p_T(v)}{p_S(v)}",
+  "D_{\\mathrm{KL}}(p_S\\|p_T)\n=\n\\sum_{v\\in V}\np_S(v)\\log\n\\frac{p_S(v)}{p_T(v)}",
+  "m=\\beta p_T+(1-\\beta)p_S",
+  "D_{\\mathrm{JSD}_\\beta}(p_T,p_S)\n=\n\\beta D_{\\mathrm{KL}}(p_T\\|m)\n+\n(1-\\beta)D_{\\mathrm{KL}}(p_S\\|m).",
+  "\\operatorname{stopgrad}(p_T)",
+  "\\nabla_\\theta \\mathcal L_{\\mathrm{OPSD}}\n\\quad\\text{只更新学生 logits}",
+  "\\boxed{\n\\text{采样任务}\n\\rightarrow\n\\text{学生生成}\n\\rightarrow\n\\text{教师/学生逐 token 打分}\n\\rightarrow\n\\text{计算分布距离}\n\\rightarrow\n\\text{只更新学生}\n}",
+  "\\text{同一个模型}\n+\n\\text{不同上下文}\n+\n\\text{学生轨迹上的分布蒸馏}.",
+  "\\text{教师分布}\n+\n\\text{学生分布}\n+\n\\text{可训练参数}\n+\n\\text{逐 token 的 reverse KL}."
+]

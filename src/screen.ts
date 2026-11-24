@@ -28,6 +28,7 @@ import {
   TFORMULA_IMAGE_ID_MIN
 } from "./kitty.js";
 import { detectScreenFormulaRegions } from "./screen-text.js";
+import type { FormulaSource } from "./formula-source.js";
 import type {
   FormulaPlacementPlan,
   FormulaRenderedEvent,
@@ -479,6 +480,7 @@ export class FormulaScreen {
   readonly #maxDetachedPlacements: number;
   readonly #minReadableScale: number;
   readonly #stabilityMs: number;
+  readonly #formulaSource?: FormulaSource;
   #capabilities: TerminalCapabilities;
   #scale: number;
   #imageId = TFORMULA_IMAGE_ID_MIN;
@@ -537,6 +539,7 @@ export class FormulaScreen {
     preserveImagesOnClear?: boolean;
     maxTerminalImages?: number;
     maxDetachedPlacements?: number;
+    formulaSource?: FormulaSource;
   }) {
     this.terminal = new Terminal({
       cols: options.cols,
@@ -554,6 +557,7 @@ export class FormulaScreen {
     // cursor position restored after a Kitty placement.
     this.terminal.loadAddon(new UnicodeGraphemesAddon());
     this.#capabilities = options.capabilities;
+    this.#formulaSource = options.formulaSource;
     this.#scale = options.scale;
     this.#minReadableScale = Number.isFinite(options.minReadableScale)
       ? Math.max(0, Math.min(1, options.minReadableScale!))
@@ -2052,7 +2056,8 @@ export class FormulaScreen {
         detectScreenFormulaRegions(
           physicalLines,
           this.terminal.cols,
-          continuesAfterViewport
+          continuesAfterViewport,
+          this.#formulaSource
         ),
         physicalLines
       )
@@ -2091,7 +2096,8 @@ export class FormulaScreen {
         detectScreenFormulaRegions(
           detailedLines,
           this.terminal.cols,
-          continuesAfterViewport
+          continuesAfterViewport,
+          this.#formulaSource
         ),
         detailedLines
       )

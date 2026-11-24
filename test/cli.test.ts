@@ -6,6 +6,15 @@ import { describe, expect, it } from "vitest";
 import { isTFormulaActive, parseArgs, parseFocusKey } from "../src/cli.js";
 
 describe("CLI arguments", () => {
+  it("selects or disables a Codex formula source without consuming child arguments", () => {
+    expect(parseArgs(["--codex-session", "rollout.jsonl", "codex", "resume", "session-id"]))
+      .toMatchObject({ mode: "proxy", codexSession: "rollout.jsonl", command: "codex", args: ["resume", "session-id"] });
+    expect(parseArgs(["--no-codex-source", "codex"]))
+      .toMatchObject({ mode: "proxy", codexSource: false, command: "codex" });
+    expect(parseArgs(["codex", "--codex-session", "child-argument"]))
+      .toMatchObject({ command: "codex", args: ["--codex-session", "child-argument"] });
+  });
+
   it("wraps any command without agent-specific knowledge", () => {
     const options = parseArgs(["--scale", "1.1", "--", "claude", "--resume"]);
     expect(options).toMatchObject({ command: "claude", args: ["--resume"], scale: 1.1 });

@@ -54,6 +54,14 @@ tformula codex
 That is the complete integration—there is no Codex plugin or configuration to
 install. Codex itself must already be installed and available on your `PATH`.
 
+When wrapping Codex directly, TFormula also reads the child session's local
+rollout to recover display formulas damaged by terminal Markdown formatting.
+An explicit `codex resume <UUID>` preloads that session before replay starts.
+Use `--no-codex-source` to disable recovery or `--codex-session <rollout.jsonl>`
+to select a source explicitly; place these options before `codex`.
+See [Codex source recovery](docs/codex-source-recovery.md) for matching rules,
+privacy, dependencies, and streaming limitations.
+
 ## See it in action
 
 This example shows Codex explaining Maxwell's equations in Ghostty.
