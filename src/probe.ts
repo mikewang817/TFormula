@@ -352,8 +352,8 @@ export async function probeTerminal(
   if (!cellOverride && parsed.cell && parsed.cell.width > 0 && parsed.cell.height > 0) {
     cell = { ...parsed.cell, source: "cell-query" };
   } else if (!cellOverride && parsed.windowPixels) {
-    const cols = Math.max(1, process.stdout.columns ?? 80);
-    const rows = Math.max(1, process.stdout.rows ?? 24);
+    const cols = Math.max(1, process.stdout.columns || 80);
+    const rows = Math.max(1, process.stdout.rows || 24);
     cell = {
       width: parsed.windowPixels.width / cols,
       height: parsed.windowPixels.height / rows,

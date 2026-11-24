@@ -53,8 +53,8 @@ export async function runProxy(
   pendingInput = "",
   startupProbePending = false
 ): Promise<number> {
-  const cols = Math.max(2, process.stdout.columns ?? 80);
-  const rows = Math.max(2, process.stdout.rows ?? 24);
+  const cols = Math.max(2, process.stdout.columns || 80);
+  const rows = Math.max(2, process.stdout.rows || 24);
   let capabilities = initialCapabilities;
   let child: pty.IPty;
   let probeCapture = "";
@@ -197,8 +197,8 @@ export async function runProxy(
           ? { ...validCell, source: "cell-query" as const }
           : validWindow
             ? {
-                width: validWindow.width / Math.max(1, process.stdout.columns ?? cols),
-                height: validWindow.height / Math.max(1, process.stdout.rows ?? rows),
+                width: validWindow.width / Math.max(1, process.stdout.columns || cols),
+                height: validWindow.height / Math.max(1, process.stdout.rows || rows),
                 source: "window-query" as const
               }
             : capabilities.cell;
@@ -276,8 +276,8 @@ export async function runProxy(
           ? { ...validCell, source: "cell-query" as const }
           : validWindow
             ? {
-                width: validWindow.width / Math.max(1, process.stdout.columns ?? cols),
-                height: validWindow.height / Math.max(1, process.stdout.rows ?? rows),
+                width: validWindow.width / Math.max(1, process.stdout.columns || cols),
+                height: validWindow.height / Math.max(1, process.stdout.rows || rows),
                 source: "window-query" as const
               }
             : capabilities.cell;
@@ -613,8 +613,8 @@ export async function runProxy(
     // layout epoch. Revalidate the viewport before any later plain burst is
     // allowed to bypass intermediate checkpoints.
     plainOutputFastPath = false;
-    const nextCols = Math.max(2, process.stdout.columns ?? 80);
-    const nextRows = Math.max(2, process.stdout.rows ?? 24);
+    const nextCols = Math.max(2, process.stdout.columns || 80);
+    const nextRows = Math.max(2, process.stdout.rows || 24);
     outputSplitter.setLineInterval(Math.max(2, Math.floor(nextRows / 3)));
     outputSplitter.setCharacterInterval(nextCols * Math.max(2, Math.floor(nextRows / 3)));
     // The real terminal has already resized. Bytes still waiting in outputQueue
