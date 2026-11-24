@@ -270,8 +270,8 @@ function supportsKittyGraphics(env: NodeJS.ProcessEnv): boolean {
   // Base64) as ordinary text. Disable graphics until passthrough is negotiated.
   if (env.TMUX || env.STY || env.ZELLIJ || env.MOSH_CONNECTION
     || /^(?:screen|tmux)(?:[-.]|$)/u.test(term)) return false;
-  const identity = `${term} ${env.TERM_PROGRAM ?? ""}`.toLowerCase();
-  return /ghostty|kitty|wezterm/u.test(identity);
+  const program = (env.TERM_PROGRAM ?? "").toLowerCase();
+  return program === "rex" || /ghostty|kitty|wezterm/u.test(`${term} ${program}`);
 }
 
 /**
