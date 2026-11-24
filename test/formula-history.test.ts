@@ -81,6 +81,28 @@ describe("formula history", () => {
     await expect(store.resolve("missing")).rejects.toThrow("formula history entry not found");
   });
 
+  it("resolves ids older than the listing limit", async () => {
+    const root = await temporaryRoot();
+    let tick = 0;
+    const session = (sessionId: string): FormulaHistoryStore => new FormulaHistoryStore({
+      root,
+      sessionId,
+      now: () => new Date(1_700_000_000_000 + tick * 1_000),
+      createId: () => `entry-${tick++}`
+    });
+    // Each session is capped at 1,000 formulas, so exceed the limit across two.
+    for (const store of [session("older"), session("newer")]) {
+      for (let index = 0; index < 600; index += 1) {
+        store.record({ latex: `x_{${index}}`, display: true, confidence: "explicit" });
+      }
+      await store.flush();
+    }
+
+    const store = session("reader");
+    expect(await store.list(5_000)).toHaveLength(1_000);
+    await expect(store.resolve("entry-0")).resolves.toMatchObject({ latex: "x_{0}" });
+  });
+
   it("clears all persisted sessions", async () => {
     const root = await temporaryRoot();
     const store = new FormulaHistoryStore({ root, sessionId: "session-c" });
